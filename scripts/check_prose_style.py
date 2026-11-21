@@ -137,6 +137,11 @@ def added_markdown(base: str) -> dict[str, list[tuple[int, str]]]:
             number = int(found.group(1)) if found else 0
             continue
         if raw.startswith("+") and number and current:
+            # Vendored references are third-party documents, not project
+            # prose; they are hash-pinned by check_style_references.py.
+            if current.startswith(("engineering/references/", "references/")):
+                number += 1
+                continue
             by_file.setdefault(current, []).append((number, raw[1:]))
             number += 1
     return by_file
