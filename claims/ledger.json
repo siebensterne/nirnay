@@ -642,6 +642,23 @@
         ]
       },
       "falsifier": "A re-exported symbol is not the identical canonical object, a tampered fill digest still compares equal, rejected records or their attempt counts are omitted from the CLI listing, or a re-export module defines its own engine behavior."
+    },
+    {
+      "id": "CLM-049",
+      "statement": "A registered experiment binds bar cadence, timestamp semantics, calendar, annualisation and point-in-time basis before evaluation; a registered search validates ordered timestamps against that cadence and uses only the registered periods_per_year, rejecting conflicting CLI values, bare numeric latency and zero-valued holdout placeholders for unevaluated candidates.",
+      "status": "implemented",
+      "scope": {
+        "files": [
+          "research/python/src/quantlab/experiments/schema.py",
+          "research/python/src/quantlab/experiments/cadence.py",
+          "research/python/src/quantlab/experiments/search_adapter.py",
+          "research/python/src/quantlab/alpha_search.py",
+          "research/python/src/quantlab/cli.py",
+          "research/python/tests/test_experiment_registry.py",
+          "engineering/research/dataset-acceptance-contract.md"
+        ]
+      },
+      "falsifier": "A daily registration accepts minute-spaced bars, a minute registration accepts an incompatible interval, a named basis accepts a different period count, a synthetic dataset passes without a synthetic calendar and fixed interval, a CLI value replaces the registered annualisation factor, a bare one-nanosecond latency passes without a declared model, or an unevaluated candidate carries a numeric holdout result."
     }
   ]
 }

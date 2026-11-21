@@ -47,7 +47,16 @@ def _registered(count: int = 4) -> dict:
         "holdout_key": holdout_key(DATASET_VERSION, "fixture-universe", "features.v1",
                                    validation, holdout),
         "cost_model": {"assumptions": costs, "cost_model_sha256": content_hash(costs)},
-        "execution_assumptions": {"queue_model": "not_calibrated"},
+        "execution_assumptions": {"execution_latency_model": "not_modelled",
+                                  "queue_model": "not_modelled"},
+        "bar_kind": "minute",
+        "bar_interval_ns": 60_000_000_000,
+        "timestamp_semantics": "bar_close",
+        "calendar_id": "fixture:continuous-minute-v1",
+        "session_definition": "Fixture continuous minute bars; no exchange session",
+        "annualization_basis": "synthetic_declared",
+        "periods_per_year": 525_600.0,
+        "point_in_time_basis": "chronological_only",
     }
 
 

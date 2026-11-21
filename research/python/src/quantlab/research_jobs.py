@@ -31,6 +31,7 @@ from .cli import _load_reference_data
 from .experiments import (ExperimentError, ExperimentRegistry, build_search_space,
                           content_hash, holdout_key, make_attempt)
 from .experiments.reproducibility import bind_published_dataset, environment_digest
+from .experiments.schema import NOT_APPLICABLE_INTERVAL, SYNTHETIC_ANNUALIZATION_BASIS
 from .point_in_time import PITDatasetBuilder, write_dataset
 
 ROOT = Path(__file__).resolve().parents[4]
@@ -322,7 +323,16 @@ def _registered_record(job: dict[str, Any], environment: dict[str, Any],
                        "cost_model_sha256": content_hash(
                            {"source": "synthetic-local-no-calibration"})},
         "execution_assumptions": {"mode": "dry-run", "synthetic": True,
+                                  "execution_latency_model": "not_modelled",
                                   "no_live_routing": True},
+        "bar_kind": "other",
+        "bar_interval_ns": NOT_APPLICABLE_INTERVAL,
+        "timestamp_semantics": "observation_time",
+        "calendar_id": "synthetic:event-sequence-v1",
+        "session_definition": "Synthetic canonical event sequence; no exchange session",
+        "annualization_basis": SYNTHETIC_ANNUALIZATION_BASIS,
+        "periods_per_year": 1.0,
+        "point_in_time_basis": "chronological_only",
     }
 
 

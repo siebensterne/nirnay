@@ -415,6 +415,14 @@
       "evidence_status": "simulation/event_replay.py and simulation/execution.py are direct re-exports of the canonical sim package; tests assert identical function objects and that a tampered fill digest fails compare_records. The list-experiments CLI command prints registered and terminal records with their attempted-config counts, so rejected runs and losers are visible. No new matching engine or behavior is added. Implemented, not independently verified; no alpha or live-readiness claim.",
       "owner": "research",
       "scope": "research/python/src/quantlab/simulation/event_replay.py; research/python/src/quantlab/simulation/execution.py; research/python/src/quantlab/simulation/__init__.py; research/python/src/quantlab/cli.py; research/python/tests/test_simulation_namespace.py; research/python/tests/test_cli_pipeline.py"
+    },
+    {
+      "id": "CAP-054",
+      "name": "Immutable bar-cadence and annualisation experiment contract",
+      "status": "implemented",
+      "evidence_status": "Pre-registration now requires bar kind, fixed or explicitly not-applicable interval, timestamp semantics, versioned calendar and session definition, named annualisation basis with a consistent period count, and a point-in-time basis that bounds what the boolean certifies. A pure cadence validator fails closed on ordered timestamps that disagree with a daily or minute registration, on a synthetic dataset without a synthetic calendar and fixed interval, and on calendar metadata that is missing or inconsistent for a market dataset; it never invents bars for calendar gaps. Registered searches use only the declared periods_per_year, reject conflicting CLI values, require an explicit execution-latency model and use null/not_evaluated states for unexamined holdout fields. Implemented, not independently verified; no alpha, profitability, venue-realism or live-readiness claim.",
+      "owner": "research",
+      "scope": "research/python/src/quantlab/experiments/schema.py; research/python/src/quantlab/experiments/cadence.py; research/python/src/quantlab/experiments/search_adapter.py; research/python/src/quantlab/alpha_search.py; research/python/src/quantlab/cli.py; research/python/src/quantlab/research_jobs.py; research/python/tests/test_experiment_registry.py; research/python/tests/test_parameter_search.py; research/python/tests/test_experiment_comparison.py; engineering/research/dataset-acceptance-contract.md"
     }
   ]
 }
