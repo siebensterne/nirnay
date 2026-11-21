@@ -54,11 +54,34 @@ def added_paths(root: Path = ROOT, base: str | None = None) -> list[str]:
     ref = base or base_ref()
     tracked = subprocess.run(
         ["git", "diff", "--name-only", "--diff-filter=A", ref],
-        check=True,
+        check=False,
         capture_output=True,
         text=True,
         cwd=root,
     )
+    if tracked.returncode != 0:
+        # Hosted PR checkouts may not contain a local `main` ref. Fall back to
+        # the remote-tracking base, then to the full tracked set rather than
+        # skipping the license gate entirely.
+        fallback = "origin/main" if ref == "main" else "main"
+        alternate = subprocess.run(
+            ["git", "diff", "--name-only", "--diff-filter=A", fallback],
+            check=False,
+            capture_output=True,
+            text=True,
+            cwd=root,
+        )
+        if alternate.returncode == 0:
+            tracked = alternate
+        else:
+            everything = subprocess.run(
+                ["git", "ls-files"],
+                check=True,
+                capture_output=True,
+                text=True,
+                cwd=root,
+            )
+            tracked = everything
     untracked = subprocess.run(
         ["git", "ls-files", "--others", "--exclude-standard"],
         check=True,
