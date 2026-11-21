@@ -19,6 +19,7 @@ minute registration must match its declared interval exactly.
 from __future__ import annotations
 
 from collections.abc import Sequence
+from itertools import pairwise
 from typing import Any
 
 from .schema import NOT_APPLICABLE_INTERVAL, ExperimentError
@@ -100,7 +101,7 @@ def validate_bar_cadence(record: dict[str, Any], timestamps_ns: Sequence[int]) -
     for timestamp in timestamps_ns:
         if type(timestamp) is not int or timestamp <= 0:
             raise ExperimentError("bar timestamps must be positive integers")
-    for previous, current in zip(timestamps_ns, timestamps_ns[1:]):
+    for previous, current in pairwise(timestamps_ns):
         if previous >= current:
             raise ExperimentError("bar timestamps must be strictly increasing")
 
@@ -110,7 +111,7 @@ def validate_bar_cadence(record: dict[str, Any], timestamps_ns: Sequence[int]) -
     if interval is None:
         return
 
-    observed = {current - previous for previous, current in zip(timestamps_ns, timestamps_ns[1:])}
+    observed = {current - previous for previous, current in pairwise(timestamps_ns)}
     mismatched = sorted(observed - {interval})
     if mismatched:
         raise ExperimentError(
