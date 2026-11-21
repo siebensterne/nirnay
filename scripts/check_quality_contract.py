@@ -75,9 +75,7 @@ def parse_rc(text: str) -> dict[str, str]:
     return values
 
 
-def check_shellcheck_text(
-    contract: dict[str, Any], text: str
-) -> list[str]:
+def check_shellcheck_text(contract: dict[str, Any], text: str) -> list[str]:
     """Compare .shellcheckrc against the contract."""
     expected = contract["shellcheck"]
     values = parse_rc(text)
@@ -117,9 +115,7 @@ def parse_ini(text: str) -> dict[str, dict[str, str]]:
     return sections
 
 
-def check_editorconfig_text(
-    contract: dict[str, Any], text: str
-) -> list[str]:
+def check_editorconfig_text(contract: dict[str, Any], text: str) -> list[str]:
     """Compare .editorconfig against the contract."""
     expected = contract["editorconfig"]
     errors: list[str] = []
@@ -147,6 +143,24 @@ def check_rust_text(contract: dict[str, Any], text: str) -> list[str]:
     return errors
 
 
+def check_xtask_text(contract: dict[str, Any], files: list[Path]) -> list[str]:
+    """Verify the task runner is typed, discoverable and self-tested."""
+    expected = contract["xtask"]
+    text = "\n".join(
+        path.read_text(encoding="utf-8") for path in files if path.is_file()
+    )
+    errors: list[str] = []
+    for name in expected["required_tasks"]:
+        if f'"{name}"' not in text:
+            errors.append(f"xtask required task missing: {name}")
+    if "#[cfg(test)]" not in text:
+        errors.append("xtask self-tests missing")
+    for shell in ('Command::new("sh")', 'Command::new("bash")'):
+        if shell in text:
+            errors.append("xtask must not dispatch through a shell")
+    return errors
+
+
 def validate(root: Path = ROOT) -> list[str]:
     """Return every quality-contract violation found under ``root``."""
     contract = load_contract(root)
@@ -163,6 +177,17 @@ def validate(root: Path = ROOT) -> list[str]:
     cargo = root / "Cargo.toml"
     if cargo.is_file():
         errors += check_rust_text(contract, cargo.read_text())
+    xtask = root / "xtask"
+    if not (xtask / "Cargo.toml").is_file():
+        errors.append("xtask crate is missing")
+    else:
+        errors += check_xtask_text(
+            contract,
+            [xtask / "src" / "main.rs", xtask / "src" / "tasks.rs"],
+        )
+    alias = root / ".cargo" / "config.toml"
+    if alias.is_file() and "--locked" not in alias.read_text(encoding="utf-8"):
+        errors.append("cargo xtask alias must pin --locked")
     return errors
 
 
@@ -184,8 +209,24 @@ class ContractTests(unittest.TestCase):
         """Deleting an optional check fails the gate."""
         contract = load_contract()
         text = (ROOT / ".shellcheckrc").read_text()
-        lines = [line for line in text.splitlines() if "useless-use-of-cat" not in line]
+        lines = [
+            line
+            for line in text.splitlines()
+            if "useless-use-of-cat" not in line
+        ]
         self.assertTrue(check_shellcheck_text(contract, "\n".join(lines)))
+
+    def test_xtask_task_drift_is_detected(self) -> None:
+        """A missing task runner or task name fails the gate."""
+        contract = load_contract()
+        files = [
+            ROOT / "xtask" / "src" / "main.rs",
+            ROOT / "xtask" / "src" / "tasks.rs",
+        ]
+        self.assertEqual(check_xtask_text(contract, files), [])
+        findings = check_xtask_text(contract, [])
+        for name in contract["xtask"]["required_tasks"]:
+            self.assertTrue(any(name in finding for finding in findings))
 
     def test_rust_denial_drift_is_detected(self) -> None:
         """Removing a Rust lint denial fails the gate."""

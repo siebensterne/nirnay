@@ -1,2 +1,5 @@
+# Local cargo policy: the xtask alias is the single entry point for every gate.
+# --quiet keeps logs readable; --locked guarantees the pinned dependency graph;
+# --package selects the task runner explicitly.
 [alias]
-xtask = "run -p xtask --"
+xtask = "run --quiet --locked --package xtask --"

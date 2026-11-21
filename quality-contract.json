@@ -82,5 +82,23 @@
       "redundant_else",
       "needless_raw_string_hashes"
     ]
+  },
+  "xtask": {
+    "crate": "xtask/Cargo.toml",
+    "required_tasks": [
+      "style",
+      "fmt",
+      "lint",
+      "test",
+      "docs",
+      "check",
+      "ci",
+      "list"
+    ],
+    "typed_argv": true,
+    "generated_help": true,
+    "self_tests": true,
+    "fail_closed": true,
+    "locked_alias": true
   }
 }
