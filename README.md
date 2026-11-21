@@ -7,8 +7,8 @@
 <!-- CURRENT-STATE
 code_commit: 7dd3fe17c1f6c841c71dd0bc9b235fff80640937
 verified_on: 2026-11-21
-ci_run: none
-scope: local cargo xtask ci on feat/quality-governance; prose remediation through 510e1a5
+ci_run: 44911669537
+scope: make check + xtask ci/assure + CI 44911669537 on 8aecbdc (12/12)
 -->
 
 ## Implemented scope
