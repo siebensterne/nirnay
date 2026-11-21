@@ -1,0 +1,7 @@
+make bench-ingress
+make bench-research
+make bench-experiments
+make bench-latency
+make bench-risk-oms
+# F1 fix: exact exercised-code digest command (paths and note in environment log)
+git ls-files -z -- Makefile crates/authoritative-oms/tests/performance.rs crates/market-archive/tests/performance.rs crates/risk-authority/tests/performance.rs research/python/src/quantlab/bench.py research/python/src/quantlab/cli.py research/python/src/quantlab/experiments/store.py research/python/src/quantlab/point_in_time.py research/python/src/quantlab/reporting/comparison.py | xargs -0 sha256sum | sha256sum

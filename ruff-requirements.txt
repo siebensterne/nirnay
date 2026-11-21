@@ -1,3 +1,0 @@
-# Pinned Ruff for the repository's Python gate. Kept in lockstep with
-# constraints/python-research.txt and ruff.toml's required-version.
-ruff==0.17.5

@@ -18,6 +18,7 @@ import sys
 import tempfile
 import time
 from concurrent.futures import ProcessPoolExecutor
+from datetime import date
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -347,6 +348,110 @@ def run_experiments_suite(
     return [line]
 
 
+def benchmark_historical_query_once(size: int, seed: int, out_dir: str | Path
+                                    ) -> dict[str, float | str]:
+    """Time point-in-time reference lookups over a published synthetic dataset."""
+    events = synthetic_events(size, seed)
+    references = _load_reference_data(FIXTURES / "reference-data.example.json")
+    rows, manifest = PITDatasetBuilder(references).build(
+        events,
+        dataset_id="bench-historical-query",
+        created_at_utc_ns=CREATED_AT_NS,
+        universe_id="fixture-universe",
+    )
+    workspace = Path(tempfile.mkdtemp(prefix="nirnay-bench-query-", dir=out_dir))
+    dataset = write_dataset(rows, manifest, workspace / "dataset")
+    published = [json.loads(line) for line in
+                 (dataset / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+    durations: list[float] = []
+    resolved: list[str] = []
+    for row in published:
+        event = row["event"]
+        started = time.perf_counter()
+        listing = references.resolve(
+            event["provider"], event["provider_instrument_id"],
+            valid_on=date.fromisoformat(row["session_date_ist"]),
+            known_at_ns=event["received_utc_ns"],
+        )
+        actions = references.known_actions(row["instrument_id"],
+                                           known_at_ns=event["received_utc_ns"])
+        durations.append((time.perf_counter() - started) * 1_000_000.0)
+        resolved.append(f"{listing.listing_id}:{','.join(a.action_id for a in actions)}")
+    ordered = sorted(durations)
+    return {
+        "rows": float(len(published)),
+        "queries": float(len(durations) * 2),
+        "p50_us": percentile(ordered, 0.50),
+        "p99_us": percentile(ordered, 0.99),
+        "p999_us": percentile(ordered, 0.999),
+        "peak_rss_bytes": float(peak_rss_bytes()),
+        "output_sha256": digest(resolved),
+    }
+
+
+def benchmark_end_to_end_once(size: int, seed: int, out_dir: str | Path
+                              ) -> dict[str, float | str]:
+    """Time synthetic ingest-to-consumer data latency through publication."""
+    events = synthetic_events(size, seed)
+    references = _load_reference_data(FIXTURES / "reference-data.example.json")
+    ingest_ns = time.perf_counter_ns()
+    rows, manifest = PITDatasetBuilder(references).build(
+        events,
+        dataset_id="bench-e2e-latency",
+        created_at_utc_ns=CREATED_AT_NS,
+        universe_id="fixture-universe",
+    )
+    workspace = Path(tempfile.mkdtemp(prefix="nirnay-bench-e2e-", dir=out_dir))
+    dataset = write_dataset(rows, manifest, workspace / "dataset")
+    durations: list[float] = []
+    payloads: list[dict[str, Any]] = []
+    for line in (dataset / "events.jsonl").read_text(encoding="utf-8").splitlines():
+        consumer_ns = time.perf_counter_ns()
+        durations.append((consumer_ns - ingest_ns) / 1_000.0)
+        payloads.append(json.loads(line))
+    ordered = sorted(durations)
+    return {
+        "rows": float(len(payloads)),
+        "samples": float(len(durations)),
+        "p50_us": percentile(ordered, 0.50),
+        "p99_us": percentile(ordered, 0.99),
+        "p999_us": percentile(ordered, 0.999),
+        "peak_rss_bytes": float(peak_rss_bytes()),
+        "output_sha256": digest(payloads),
+    }
+
+
+def run_latency_suite(size: int, repeats: int, seed: int, out_dir: str | Path) -> list[str]:
+    """Run synthetic historical-query and end-to-end latency paths."""
+    if repeats < 2:
+        raise ValueError("latency suite needs at least two repeats")
+    queries = [benchmark_historical_query_once(size, seed, out_dir) for _ in range(repeats)]
+    e2e = [benchmark_end_to_end_once(size, seed, out_dir) for _ in range(repeats)]
+    for group in (queries, e2e):
+        outputs = {str(run["output_sha256"]) for run in group}
+        assert len(outputs) == 1, "latency output hashes must be deterministic across repeats"
+    common = f"size={size} rows={int(queries[0]['rows'])} repeats={repeats} seed={seed}"
+    lines = [(
+        f"BENCH-HISTORICAL-QUERY {common} queries={int(queries[0]['queries'])}"
+        f" p50_us={percentile(sorted(float(r['p50_us']) for r in queries), 0.50):.3f}"
+        f" p99_us={percentile(sorted(float(r['p99_us']) for r in queries), 0.99):.3f}"
+        f" p999_us={percentile(sorted(float(r['p999_us']) for r in queries), 0.999):.3f}"
+        f" peak_rss_bytes={int(max(float(r['peak_rss_bytes']) for r in queries))}"
+        f" output_sha256={queries[0]['output_sha256']} source=synthetic-local"
+    )]
+    lines.append((
+        f"BENCH-E2E-LATENCY {common} samples={int(e2e[0]['samples'])}"
+        f" p50_us={percentile(sorted(float(r['p50_us']) for r in e2e), 0.50):.3f}"
+        f" p99_us={percentile(sorted(float(r['p99_us']) for r in e2e), 0.99):.3f}"
+        f" p999_us={percentile(sorted(float(r['p999_us']) for r in e2e), 0.999):.3f}"
+        f" peak_rss_bytes={int(max(float(r['peak_rss_bytes']) for r in e2e))}"
+        f" output_sha256={e2e[0]['output_sha256']} source=synthetic-local"
+    ))
+    for line in lines:
+        emit(line)
+    return lines
+
+
 def parse_sizes(raw: str) -> list[int]:
     """Parse a comma-separated list of positive synthetic fixture sizes."""
     sizes = [int(part.strip()) for part in raw.split(",") if part.strip()]
@@ -357,7 +462,8 @@ def parse_sizes(raw: str) -> list[int]:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--suite", choices=("core", "experiments", "all"), default="all")
+    parser.add_argument("--suite", choices=("core", "experiments", "latency", "all"),
+                        default="all")
     parser.add_argument("--repeats", type=int, default=5)
     parser.add_argument("--sizes", default="200,800")
     parser.add_argument("--size", type=int, default=800)
@@ -376,6 +482,8 @@ def main(argv: list[str] | None = None) -> int:
             run_core_suite(size, args.repeats, args.seed, out_dir)
     if args.suite in ("experiments", "all"):
         run_experiments_suite(args.size, args.workers, args.repeats, args.seed, out_dir)
+    if args.suite in ("latency", "all"):
+        run_latency_suite(args.size, args.repeats, args.seed, out_dir)
     return 0
 
 

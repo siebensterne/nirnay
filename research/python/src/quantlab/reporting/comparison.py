@@ -51,9 +51,9 @@ def _summary(record: dict[str, Any]) -> dict[str, Any]:
         "holdout_key": record["holdout_key"],
         "holdout_use": record.get("holdout_use", "selection"),
         "attempted_configs": len(record["attempted_configs"]),
-        "selected_config": results["selected"],
-        "holdout_net_mean": results["untouched_holdout_net_mean"],
-        "report_sha256": results["report_sha256"],
+        "selected_config": results.get("selected"),
+        "holdout_net_mean": results.get("untouched_holdout_net_mean"),
+        "report_sha256": results.get("report_sha256"),
         "cscv_pbo": diagnostics.get("cscv_pbo", {}).get("pbo_estimate"),
     }
 

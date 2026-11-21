@@ -700,6 +700,38 @@ def _cmd_compare_experiments(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_validation_report(args: argparse.Namespace) -> int:
+    from .validation_report import (build_validation_report, load_frozen_record,
+                                    validation_report_bytes)
+
+    trusted: dict[str, str] = {}
+    for item in args.trusted_key:
+        key_id, separator, public_key = item.partition("=")
+        if not separator or not key_id or not public_key or key_id in trusted:
+            raise ValueError("--trusted-key must be unique KEY_ID=BASE64 values")
+        trusted[key_id] = public_key
+    record = load_frozen_record(args.record)
+    registry = ExperimentRegistry(args.registry) if args.registry else None
+    report = build_validation_report(record, args.dataset, registry=registry,
+                                     trusted_public_keys=trusted or None)
+    payload = validation_report_bytes(report)
+    if args.output:
+        _write_new(args.output, payload)
+    else:
+        sys.stdout.buffer.write(payload)
+    return 0
+
+
+def _cmd_run_research_job(args: argparse.Namespace) -> int:
+    from .research_jobs import run_job
+
+    result = run_job(args.manifest, args.out, args.registry, job_id=args.job_id)
+    payload = json.dumps(result.as_dict(), sort_keys=True, separators=(",", ":"),
+                         allow_nan=False).encode("utf-8")
+    sys.stdout.buffer.write(payload + b"\n")
+    return result.exit_code
+
+
 def _cmd_list_experiments(args: argparse.Namespace) -> int:
     registry = ExperimentRegistry(args.registry)
     experiments = [
@@ -835,6 +867,29 @@ def build_parser() -> argparse.ArgumentParser:
                          help="optional published dataset for manifest binding")
     compare.add_argument("--trusted-key", action="append", default=[], metavar="KEY_ID=BASE64")
     compare.set_defaults(handler=_cmd_compare_experiments)
+
+    report = sub.add_parser("validation-report",
+                            help="emit a deterministic integrity-only validation report")
+    report.add_argument("--record", type=Path, required=True,
+                        help="frozen experiment record with a record_sha256 digest")
+    report.add_argument("--dataset", type=Path, required=True,
+                        help="published immutable dataset directory")
+    report.add_argument("--registry", type=Path,
+                        help="optional registry; when given the stored record is authoritative")
+    report.add_argument("--trusted-key", action="append", default=[], metavar="KEY_ID=BASE64")
+    report.add_argument("--output", type=Path)
+    report.set_defaults(handler=_cmd_validation_report)
+
+    job = sub.add_parser("run-research-job",
+                         help="validate and dry-run one local opt-in research job")
+    job.add_argument("--manifest", type=Path, required=True)
+    job.add_argument("--out", type=Path, required=True,
+                     help="fresh output directory for the synthetic dataset")
+    job.add_argument("--registry", type=Path, required=True,
+                     help="append-only experiment registry that receives the run record")
+    job.add_argument("--job-id", help="job id from the manifest; defaults to the first job")
+    job.set_defaults(handler=_cmd_run_research_job)
+
 
     listing = sub.add_parser("list-experiments",
                              help="list registered and terminal experiment records")

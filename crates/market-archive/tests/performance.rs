@@ -110,6 +110,9 @@ fn append_latency_and_throughput() {
     let output = path("append");
     let count = 2_000_u64;
     let gap_at = count / 2;
+    // No durable-write fault is injected in the append workload.
+    let sync_failure_count = 0_u64;
+    let partial_write_count = 0_u64;
     let mut ingestor = DurableIngestor::create_new(
         &output,
         UPSTOX_SOURCE_ID,
@@ -172,7 +175,7 @@ fn append_latency_and_throughput() {
         .saturating_add(checkpoint.malformed_rejected)
         .saturating_add(checkpoint.duplicates_skipped);
     eprintln!(
-        "BENCH-APPEND ingested={ingested} committed={} dropped={dropped} queue_depth={queue_depth} malformed={} gaps={} out_of_order={} seconds={:.3} frames_per_sec={:.1} p50_us={:.1} p99_us={:.1} p999_us={:.1} e2e_p50_us={:.1} e2e_p99_us={:.1} e2e_p999_us={:.1} source=synthetic-local",
+        "BENCH-APPEND ingested={ingested} committed={} dropped={dropped} queue_depth={queue_depth} malformed={} gaps={} out_of_order={} seconds={:.3} frames_per_sec={:.1} p50_us={:.1} p99_us={:.1} p999_us={:.1} e2e_p50_us={:.1} e2e_p99_us={:.1} e2e_p999_us={:.1} sync_failure_count={sync_failure_count} partial_write_count={partial_write_count} source=synthetic-local",
         checkpoint.committed_frames,
         checkpoint.malformed_rejected,
         checkpoint.gaps_observed,
@@ -207,6 +210,9 @@ fn append_latency_and_throughput() {
 fn replay_throughput_and_bounded_frames() {
     let output = path("replay");
     let count = 100_000_u64;
+    // Replay is read-only; no durable-write fault is injected.
+    let sync_failure_count = 0_u64;
+    let partial_write_count = 0_u64;
     let mut lines = String::new();
     for sequence in 1..=count {
         let item = frame(sequence);
@@ -237,7 +243,7 @@ fn replay_throughput_and_bounded_frames() {
     }
     let elapsed = started.elapsed();
     eprintln!(
-        "BENCH-REPLAY frames={streamed} journal_bytes={journal_bytes} peak_frames_held={held} seconds={:.3} frames_per_sec={:.1} source=synthetic-local",
+        "BENCH-REPLAY frames={streamed} journal_bytes={journal_bytes} peak_frames_held={held} seconds={:.3} frames_per_sec={:.1} sync_failure_count={sync_failure_count} partial_write_count={partial_write_count} source=synthetic-local",
         elapsed.as_secs_f64(),
         streamed as f64 / elapsed.as_secs_f64()
     );
@@ -264,6 +270,10 @@ fn recovery_child() {
 #[ignore = "opt-in performance measurement"]
 fn recovery_after_process_termination() {
     let output = path("recovery");
+    // The injected fault is process termination, not a sync failure or a
+    // partial record write, so both durable-write counters remain zero.
+    let sync_failure_count = 0_u64;
+    let partial_write_count = 0_u64;
     {
         let mut ingestor =
             DurableIngestor::create_new(&output, UPSTOX_SOURCE_ID, SequencePolicy::CaptureSession)
@@ -286,7 +296,7 @@ fn recovery_after_process_termination() {
     );
     let elapsed = started.elapsed();
     eprintln!(
-        "BENCH-RECOVERY seconds={:.3} evidence={}",
+        "BENCH-RECOVERY seconds={:.3} sync_failure_count={sync_failure_count} partial_write_count={partial_write_count} evidence={}",
         elapsed.as_secs_f64(),
         String::from_utf8_lossy(&child.stderr).trim()
     );

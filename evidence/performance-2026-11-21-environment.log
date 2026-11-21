@@ -1,0 +1,48 @@
+date_utc=2026-11-21T04:39:49.249059+00:00
+commit=ec0b216f07e7b7e653e8f784b18c6517d6335696
+branch=feat/repro-evidence
+status_porcelain=M Makefile
+ M crates/authoritative-oms/tests/performance.rs
+ M crates/market-archive/tests/performance.rs
+ M research/python/src/quantlab/bench.py
+ M research/python/src/quantlab/cli.py
+ M research/python/src/quantlab/reporting/comparison.py
+ M research/python/tests/test_bench.py
+?? configs/research/
+?? research/python/src/quantlab/research_jobs.py
+?? research/python/src/quantlab/validation_report.py
+?? research/python/tests/test_research_jobs.py
+?? research/python/tests/test_validation_report.py
+?? schemas/research/research-job-manifest.v1.schema.json
+rustc=rustc 1.99.1 (58cf8f9c3 2026-10-13)
+cargo=cargo 1.99.1 (5f94df478 2026-08-27)
+python=Python 3.15.2
+constraint_file=constraints/python-research.txt
+constraint_sha256=e385f9cf1dbd5f06cde53d3cc6939329d03b6dbc1135d6f62e9605f4e4e07996
+uname=Darwin tourists-MacBook-Air.local 27.0.0 Darwin Kernel Version 27.0.0: Tue Aug 11 21:05:27 PDT 2026; root:xnu-13432.1.9~1/RELEASE_ARM64_T8103 arm64
+cpu_brand=Apple M1
+logical_cpus=8
+physical_cpus=8
+memory_bytes=8589934592
+platform=macOS-27.0.1-arm64-arm-64bit-Mach-O
+locale=LANG="en_US.UTF-8"
+LC_COLLATE="en_US.UTF-8"
+LC_CTYPE="en_US.UTF-8"
+LC_MESSAGES="en_US.UTF-8"
+LC_MONETARY="en_US.UTF-8"
+LC_NUMERIC="en_US.UTF-8"
+LC_TIME="en_US.UTF-8"
+LC_ALL=
+exercised_code_paths=Makefile,crates/authoritative-oms/tests/performance.rs,crates/market-archive/tests/performance.rs,crates/risk-authority/tests/performance.rs,research/python/src/quantlab/bench.py,research/python/src/quantlab/cli.py,research/python/src/quantlab/experiments/store.py,research/python/src/quantlab/point_in_time.py,research/python/src/quantlab/reporting/comparison.py
+exercised_code_digest_command=git ls-files -z -- Makefile crates/authoritative-oms/tests/performance.rs crates/market-archive/tests/performance.rs crates/risk-authority/tests/performance.rs research/python/src/quantlab/bench.py research/python/src/quantlab/cli.py research/python/src/quantlab/experiments/store.py research/python/src/quantlab/point_in_time.py research/python/src/quantlab/reporting/comparison.py | xargs -0 sha256sum | sha256sum
+exercised_code_digest=116be6ec65115cf9fa52936656df7ad147e2f2ba778d37e72377b3f3de54a713
+exercised_code_digest_note=Recomputed from the current tree after the F1 transparency fix; replaces a previously unpublished aggregate. No benchmark measurement or raw BENCH log changed.
+exercised_file_sha256=1cc4f0b72d5a309ff8ddb961bccf2c932640d4ca5272409429b47ede6d493c70  research/python/src/quantlab/bench.py
+exercised_file_sha256=7b18a4577dcee27ca73339e074199041c7cdd606acf664935f969f6f4a40cd59  research/python/src/quantlab/cli.py
+exercised_file_sha256=033497670f12fd056cbe62ca8c7b58b0685588c907dc2c0806b5279bba2e0216  research/python/src/quantlab/point_in_time.py
+exercised_file_sha256=66b19e4d1e4374d1812f6e960f6af932deb4d26148929d26c3079043ea324374  research/python/src/quantlab/experiments/store.py
+exercised_file_sha256=67a00b18efbfa74f450e613aae601160f1ac95f8fe878d9100e823e398523c33  research/python/src/quantlab/reporting/comparison.py
+exercised_file_sha256=b8d589ad3f2b82f389005749ed0bcc2233796ef6a10e0c9b052dbeca11058747  crates/market-archive/tests/performance.rs
+exercised_file_sha256=4ba1ebfbf69bbb787609da5e29098cd2257f257269fd5a9b8c8333feed920dae  crates/risk-authority/tests/performance.rs
+exercised_file_sha256=e91e3c5a2a1ffcae46c12af0d3c6c768327fc1b7c69073f228cdebf95259b56b  crates/authoritative-oms/tests/performance.rs
+exercised_file_sha256=16b0e3b282f64c16af5d0a9671fce208231ecaa8b5ecdeb79a19ff3bdd4eee94  Makefile

@@ -419,6 +419,57 @@
       "falsifier": "A caller can fabricate all six observations without registering owners, forge another owner's token, pass a safe_for_new_risk boolean or string verdict; a persisted engaged switch is cleared by unauthenticated replay or a release without evidenced reason; or a risk-reducing release/apply_fill is denied by a health condition."
     },
     {
+      "id": "CLM-042",
+      "statement": "A research job runs only when its manifest validates, its pinned constraint file and code digest match, and its synthetic dataset digest matches; otherwise the runner refuses before execution, and a successful dry-run appends a hash-chained structured run record through the experiment registry.",
+      "status": "implemented",
+      "scope": {
+        "files": [
+          "configs/research/jobs.v1.json",
+          "schemas/research/research-job-manifest.v1.schema.json",
+          "research/python/src/quantlab/research_jobs.py",
+          "research/python/src/quantlab/cli.py",
+          "research/python/tests/test_research_jobs.py"
+        ]
+      },
+      "falsifier": "An invalid manifest is accepted; an unpinned or drifted environment passes; a stale dataset hash is not refused; two dry-runs of the same job produce different output digests; or a run completes without an integrity-verifiable registry record."
+    },
+    {
+      "id": "CLM-043",
+      "statement": "An independent validation report is deterministic for a frozen record and published dataset, is bounded to internal integrity, and is refused when the record is tampered, its digest is missing or the registry chain is reordered.",
+      "status": "implemented",
+      "scope": {
+        "files": [
+          "research/python/src/quantlab/validation_report.py",
+          "research/python/src/quantlab/experiments/verify.py",
+          "research/python/src/quantlab/reporting/comparison.py",
+          "research/python/src/quantlab/cli.py",
+          "research/python/tests/test_validation_report.py"
+        ]
+      },
+      "falsifier": "Two reports for the same frozen record differ in bytes or digest; a tampered record or reordered registry chain still validates; or the report claims data rights, alpha, profitability, entitlement or live readiness."
+    },
+    {
+      "id": "CLM-044",
+      "statement": "Published performance evidence records actual measured local synthetic observations with hashes and scope limits; opt-in benchmark lines are never gates and no latency, throughput or readiness claim is made; distribution, allocation, scheduling, licensed data, Fieldbook sharing and target-infrastructure gaps remain owner-gated and unimplemented.",
+      "status": "implemented",
+      "scope": {
+        "files": [
+          "evidence/PERFORMANCE-2026-11-21.md",
+          "evidence/performance-2026-11-21-bench-ingress.log",
+          "evidence/performance-2026-11-21-bench-research.log",
+          "evidence/performance-2026-11-21-bench-experiments.log",
+          "evidence/performance-2026-11-21-bench-risk-oms.log",
+          "evidence/performance-2026-11-21-bench-latency.log",
+          "Makefile",
+          "research/python/src/quantlab/bench.py",
+          "crates/market-archive/tests/performance.rs",
+          "crates/authoritative-oms/tests/performance.rs",
+          "engineering/research/compute-and-validation.md"
+        ]
+      },
+      "falsifier": "A published number is fabricated or a BENCH counter is a hard-coded literal stand-in; a benchmark is added to make check or CI as a gate; a latency threshold is asserted; a dated record presents local synthetic numbers as deployment evidence; or an owner-gated scheduler, allocator, feature store, licensed-data or target-infrastructure gap is silently implemented."
+    },
+    {
       "id": "CLM-045",
       "statement": "A risk permit is bound to exact order terms by a deterministic SHA-256 digest carried in PermitRef and recomputed in OmsStore::create; a tampered intent, rewritten permit identity or spent permit cannot open an order, while an identical replay is a no-op even after restart.",
       "status": "implemented",

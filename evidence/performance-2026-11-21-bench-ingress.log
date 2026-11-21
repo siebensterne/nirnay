@@ -1,0 +1,14 @@
+cargo test -p market-archive --test performance -- --ignored --nocapture --skip recovery_child
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.23s
+     Running tests/performance.rs (target/debug/deps/performance-f6d62ef27b60a854)
+
+running 3 tests
+BENCH-RECOVERY seconds=0.005 sync_failure_count=0 partial_write_count=0 evidence=RECOVERY-COMMITTED 100
+test recovery_after_process_termination ... ok
+BENCH-REPLAY frames=100000 journal_bytes=33966685 peak_frames_held=1 seconds=1.003 frames_per_sec=99700.7 sync_failure_count=0 partial_write_count=0 source=synthetic-local
+test replay_throughput_and_bounded_frames ... ok
+BENCH-APPEND ingested=2003 committed=2000 dropped=3 queue_depth=2000 malformed=1 gaps=1 out_of_order=0 seconds=8.178 frames_per_sec=244.6 p50_us=4000.5 p99_us=8043.8 p999_us=11341.0 e2e_p50_us=4001.0 e2e_p99_us=8044.0 e2e_p999_us=11341.0 sync_failure_count=0 partial_write_count=0 source=synthetic-local
+test append_latency_and_throughput ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 8.19s
+

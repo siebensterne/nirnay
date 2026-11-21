@@ -305,6 +305,30 @@
       "scope": "crates/risk-authority/src/authority.rs; crates/risk-authority/src/observation.rs; crates/risk-authority/src/control.rs; crates/risk-authority/tests/authority.rs; apps/paper-runner/src/lib.rs"
     },
     {
+      "id": "CAP-047",
+      "name": "Local opt-in research job manifest and runner",
+      "status": "implemented",
+      "evidence_status": "A checked-in jobs.v1 manifest and JSON schema declare job id, synthetic dataset id/version/SHA-256, code digest, pinned constraint file, allowlisted read-only command and a schedule hint. The runner validates the manifest, refuses an unpinned or mismatched environment and a stale dataset digest, executes verify-dataset in dry-run mode on a freshly built synthetic fixture, and appends a structured run record (commit/command/exit/duration/hashes) through the existing append-only experiment registry. No scheduler daemon, distributed executor, allocator or service is added. Tests cover schema invalids, dry-run determinism and stale-hash refusal. Implemented, not independently verified; local synthetic observation only, no latency, throughput, readiness or data-rights claim. Scheduling, distribution, allocation, containers, licensed data, Fieldbook sharing and target infrastructure remain owner-gated.",
+      "owner": "research",
+      "scope": "configs/research/jobs.v1.json; schemas/research/research-job-manifest.v1.schema.json; research/python/src/quantlab/research_jobs.py; research/python/src/quantlab/cli.py; research/python/tests/test_research_jobs.py; engineering/research/compute-and-validation.md"
+    },
+    {
+      "id": "CAP-048",
+      "name": "Independent integrity-only validation report CLI",
+      "status": "implemented",
+      "evidence_status": "quantlab validation-report reads a frozen experiment record and a published dataset and emits deterministic JSON whose report_sha256 recomputes from the report body. It reuses the registry chain and dataset-binding checks from experiments/verify.py and the digest/summary surface of reporting/comparison.py, optionally resolving the record from a registry so the stored body is authoritative. Tampered records, missing digests and reordered registry chains are refused; repeated reports are byte-stable. The report is explicitly limited to internal integrity: it does not certify data rights, source completeness, model correctness, alpha, profitability or live readiness. Implemented, not independently verified.",
+      "owner": "research",
+      "scope": "research/python/src/quantlab/validation_report.py; research/python/src/quantlab/experiments/verify.py; research/python/src/quantlab/reporting/comparison.py; research/python/src/quantlab/cli.py; research/python/tests/test_validation_report.py"
+    },
+    {
+      "id": "CAP-049",
+      "name": "Dated local synthetic performance evidence with latency and fault-count paths",
+      "status": "implemented",
+      "evidence_status": "A dated record at evidence/PERFORMANCE-2026-11-21.md fills the template with actual runs of make bench-ingress, bench-research, bench-experiments, bench-risk-oms and the new opt-in bench-latency target, all exit 0, with captured raw logs, full commit/toolchain/hardware, repeats, p50/p99/p99.9, throughput, peak RSS, output/dataset/code hashes and verbatim scope limits. Historical-query and end-to-end data latency emit BENCH-HISTORICAL-QUERY and BENCH-E2E-LATENCY lines on synthetic PIT fixtures with no thresholds. OMS and ingress BENCH lines now carry SyncFailure and partial-write injection counts. All harnesses remain outside make check and CI. These are local synthetic observations on the measured tree only; no latency, throughput, capacity or readiness claim is granted and no target infrastructure was used. Implemented, not independently verified.",
+      "owner": "performance",
+      "scope": "evidence/PERFORMANCE-2026-11-21.md; evidence/performance-2026-11-21-*.log; Makefile; research/python/src/quantlab/bench.py; research/python/tests/test_bench.py; crates/market-archive/tests/performance.rs; crates/authoritative-oms/tests/performance.rs; README.md"
+    },
+    {
       "id": "CAP-050",
       "name": "Deterministic permit-to-intent digest binding with durable single-use permits",
       "status": "implemented",

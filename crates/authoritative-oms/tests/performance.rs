@@ -122,6 +122,8 @@ mod percentile_tests {
 fn restart_recovery_after_k_commits_with_injected_fault() -> TestResult {
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("oms.journal");
+    let mut sync_failure_count = 0_u64;
+    let partial_write_count = 0_u64;
     {
         let mut store = OmsStore::open(&path)?;
         for id in 1..=COMMITS {
@@ -133,6 +135,7 @@ fn restart_recovery_after_k_commits_with_injected_fault() -> TestResult {
             )?;
         }
         store.force_commit_fault(CommitFault::SyncFailure);
+        sync_failure_count += 1;
         let uncertain = COMMITS + 1;
         let failed = store.create(
             ClientOrderId::new(uncertain)?,
@@ -153,7 +156,7 @@ fn restart_recovery_after_k_commits_with_injected_fault() -> TestResult {
         }
     }
     eprintln!(
-        "BENCH-OMS-RECOVERY commits={} replayed={replayed} seconds={:.3} replay_per_sec={:.1} fault=SyncFailure source=synthetic-local",
+        "BENCH-OMS-RECOVERY commits={} replayed={replayed} seconds={:.3} replay_per_sec={:.1} fault=SyncFailure sync_failure_count={sync_failure_count} partial_write_count={partial_write_count} source=synthetic-local",
         COMMITS + 1,
         elapsed.as_secs_f64(),
         replayed as f64 / elapsed.as_secs_f64()
@@ -191,6 +194,9 @@ fn duplicate_event_handling_rate() -> TestResult {
         "first fill is accepted"
     );
 
+    // No durable-write fault is injected in the duplicate-delivery workload.
+    let sync_failure_count = 0_u64;
+    let partial_write_count = 0_u64;
     let mut latencies = Vec::with_capacity(DUPLICATES as usize);
     let mut ignored = 0_u64;
     let started = Instant::now();
@@ -204,7 +210,7 @@ fn duplicate_event_handling_rate() -> TestResult {
     let elapsed = started.elapsed();
     latencies.sort_unstable();
     eprintln!(
-        "BENCH-OMS-DUPLICATE attempts={DUPLICATES} ignored={ignored} seconds={:.3} duplicates_per_sec={:.1} p50_us={:.1} p99_us={:.1} p999_us={:.1} source=synthetic-local",
+        "BENCH-OMS-DUPLICATE attempts={DUPLICATES} ignored={ignored} seconds={:.3} duplicates_per_sec={:.1} p50_us={:.1} p99_us={:.1} p999_us={:.1} sync_failure_count={sync_failure_count} partial_write_count={partial_write_count} source=synthetic-local",
         elapsed.as_secs_f64(),
         ignored as f64 / elapsed.as_secs_f64(),
         percentile(&latencies, 0.50) as f64 / 1000.0,
@@ -247,6 +253,9 @@ fn reconciliation_completeness_against_injected_unknown_set() -> TestResult {
         "the injected UNKNOWN set is complete"
     );
 
+    // No durable-write fault is injected in the reconciliation workload.
+    let sync_failure_count = 0_u64;
+    let partial_write_count = 0_u64;
     let mut latencies = Vec::with_capacity(UNKNOWN_ORDERS as usize);
     let started = Instant::now();
     for id in 1..=UNKNOWN_ORDERS {
@@ -279,7 +288,7 @@ fn reconciliation_completeness_against_injected_unknown_set() -> TestResult {
         "no injected UNKNOWN order remains unresolved"
     );
     eprintln!(
-        "BENCH-OMS-RECON unknown_injected={} resolved={} complete=true seconds={:.3} reconciliations_per_sec={:.1} p50_us={:.1} p99_us={:.1} p999_us={:.1} source=synthetic-local",
+        "BENCH-OMS-RECON unknown_injected={} resolved={} complete=true seconds={:.3} reconciliations_per_sec={:.1} p50_us={:.1} p99_us={:.1} p999_us={:.1} sync_failure_count={sync_failure_count} partial_write_count={partial_write_count} source=synthetic-local",
         injected.len(),
         resolved.len(),
         elapsed.as_secs_f64(),

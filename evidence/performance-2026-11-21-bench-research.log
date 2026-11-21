@@ -1,0 +1,15 @@
+PYTHONPATH=research/python/src python3 -m quantlab.bench --suite core --repeats 5 --sizes 200,800 --seed 7
+BENCH-RESEARCH-BUILD size=200 rows=200 repeats=5 seed=7 source=synthetic-local p50_ms=7.875 p99_ms=10.483 p999_ms=10.483 peak_rss_bytes=36454400
+BENCH-RESEARCH-WRITE size=200 rows=200 repeats=5 seed=7 source=synthetic-local p50_ms=3.506 p99_ms=3.577 p999_ms=3.577 peak_rss_bytes=36454400
+BENCH-RESEARCH-VERIFY size=200 rows=200 repeats=5 seed=7 source=synthetic-local p50_ms=6.262 p99_ms=6.388 p999_ms=6.388 peak_rss_bytes=36454400
+BENCH-RESEARCH-BACKTEST size=200 rows=200 repeats=5 seed=7 source=synthetic-local p50_ms=0.905 p99_ms=0.963 p999_ms=0.963 peak_rss_bytes=36454400
+BENCH-RESEARCH-PORTFOLIO size=200 rows=200 repeats=5 seed=7 source=synthetic-local p50_ms=0.826 p99_ms=0.860 p999_ms=0.860 peak_rss_bytes=36454400
+BENCH-RESEARCH-ALPHA size=200 rows=200 repeats=5 seed=7 source=synthetic-local p50_ms=17.427 p99_ms=17.583 p999_ms=17.583 peak_rss_bytes=36454400
+BENCH-RESEARCH-OUTPUT size=200 rows=200 repeats=5 seed=7 source=synthetic-local deterministic=true output_sha256=3b3721bc4c489d8a1b7e56ab61731a56d90935f25987f2960f45624bf46ff876 dataset_sha256=53fd9c411cf03d5d00295a2bb3876994268080ea5539acc06a7778a093522d42 backtest_sha256=cd2d3f9ca64209de98f824eaa5791daaaec491219fffe121dcf7b3cfc126e384 portfolio_sha256=168fb89f40bdb95614f7743f13dbd7618e769d5507caf59bde7babd1e58fe502 alpha_sha256=0a7e89e6003b8839e267114d9d9c203f952e786689d929e9a362f1f59d959a68 verify_status=verified_internal_integrity
+BENCH-RESEARCH-BUILD size=800 rows=800 repeats=5 seed=7 source=synthetic-local p50_ms=25.591 p99_ms=25.957 p999_ms=25.957 peak_rss_bytes=47497216
+BENCH-RESEARCH-WRITE size=800 rows=800 repeats=5 seed=7 source=synthetic-local p50_ms=12.031 p99_ms=12.729 p999_ms=12.729 peak_rss_bytes=47497216
+BENCH-RESEARCH-VERIFY size=800 rows=800 repeats=5 seed=7 source=synthetic-local p50_ms=25.202 p99_ms=26.399 p999_ms=26.399 peak_rss_bytes=47497216
+BENCH-RESEARCH-BACKTEST size=800 rows=800 repeats=5 seed=7 source=synthetic-local p50_ms=3.423 p99_ms=3.515 p999_ms=3.515 peak_rss_bytes=47497216
+BENCH-RESEARCH-PORTFOLIO size=800 rows=800 repeats=5 seed=7 source=synthetic-local p50_ms=3.145 p99_ms=3.253 p999_ms=3.253 peak_rss_bytes=47497216
+BENCH-RESEARCH-ALPHA size=800 rows=800 repeats=5 seed=7 source=synthetic-local p50_ms=68.309 p99_ms=68.854 p999_ms=68.854 peak_rss_bytes=47497216
+BENCH-RESEARCH-OUTPUT size=800 rows=800 repeats=5 seed=7 source=synthetic-local deterministic=true output_sha256=ed9d4b6274578f50e02c1390d872b6b8b1d7a971ff343b7d5c024023f93d190f dataset_sha256=1454ddadc63fe128db2f2a99fe6baf364c09821f78ba5bb6bd0b1056e641e981 backtest_sha256=f3e8e8cbc7d1baee68d13721bb7993c5d7da2f858d93ca93b05b6a7d4215ad22 portfolio_sha256=82fe1c32d5cacc7255f08d9f7a59ec38a8e3685cc1ae069b4966b6f3dc38ef27 alpha_sha256=4b778cae6d422bb739afc86586a50e6cfdfd81bb1c3f917cc41e199ba6c90717 verify_status=verified_internal_integrity

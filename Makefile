@@ -1,10 +1,10 @@
-.PHONY: ci assure check perf bench-ingress bench-research bench-experiments bench-risk-oms docs-check shellcheck-check generated-paths-check pollution-check style rust-style source-style python-ruff-style q-style prose-style references-check standards-check style-gate python-format-check rust-test python-test python-check cpp-test cpp-format-check schema-check fundamental-fixture-check verify-local fmt constraints sbom supply-chain wheels packaging-test bundle bundle-verify git-policy kdb-analyze kdb-golden kdb-q-test archive-verify tools
+.PHONY: ci assure check perf bench-ingress bench-research bench-experiments bench-latency bench-risk-oms docs-check shellcheck-check generated-paths-check pollution-check style rust-style source-style python-ruff-style q-style prose-style references-check standards-check style-gate python-format-check rust-test python-test python-check cpp-test cpp-format-check schema-check fundamental-fixture-check verify-local fmt constraints sbom supply-chain wheels packaging-test bundle bundle-verify git-policy kdb-analyze kdb-golden kdb-q-test archive-verify tools
+
 ci:
 	cargo xtask ci
 
 assure:
 	cargo xtask assure
-
 check:
 	$(MAKE) docs-check
 	$(MAKE) shellcheck-check
@@ -84,6 +84,12 @@ bench-research:
 
 bench-experiments:
 	PYTHONPATH=research/python/src python3 -m quantlab.bench --suite experiments --workers 4 --repeats 5 --size 800 --seed 7
+
+# Historical-query and end-to-end data latency on synthetic PIT fixtures. Also
+# opt-in and excluded from check/CI; emits BENCH-HISTORICAL-QUERY and
+# BENCH-E2E-LATENCY lines with measured distributions and no thresholds.
+bench-latency:
+	PYTHONPATH=research/python/src python3 -m quantlab.bench --suite latency --repeats 5 --size 800 --seed 7
 
 bench-risk-oms:
 	cargo test -p risk-authority --test performance -- --ignored --nocapture

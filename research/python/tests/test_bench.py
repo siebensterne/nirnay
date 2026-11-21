@@ -11,6 +11,7 @@ from quantlab.bench import (
     percentile,
     run_core_suite,
     run_experiments_suite,
+    run_latency_suite,
     synthetic_events,
 )
 
@@ -70,3 +71,19 @@ def test_experiments_suite_reads_one_immutable_dataset_concurrently(tmp_path) ->
     assert {_fields(again)["output_sha256"]} == {fields["output_sha256"]}, (
         "worker hashes are deterministic across suite runs"
     )
+
+
+def test_latency_suite_emits_measured_distributions_and_stable_hashes(tmp_path) -> None:
+    first = run_latency_suite(200, 2, 7, tmp_path)
+    second = run_latency_suite(200, 2, 7, tmp_path)
+    assert len(first) == 2
+    assert first[0].startswith("BENCH-HISTORICAL-QUERY ") and "queries=" in first[0]
+    assert first[1].startswith("BENCH-E2E-LATENCY ") and "samples=" in first[1]
+    for line in first:
+        fields = _fields(line)
+        assert int(fields["size"]) == 200
+        assert 0.0 <= float(fields["p50_us"]) <= float(fields["p999_us"])
+        assert int(fields["peak_rss_bytes"]) > 0
+        assert len(fields["output_sha256"]) == 64
+    for before, after in zip(first, second):
+        assert _fields(before)["output_sha256"] == _fields(after)["output_sha256"]

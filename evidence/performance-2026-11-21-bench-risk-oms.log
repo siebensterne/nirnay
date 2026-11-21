@@ -1,0 +1,32 @@
+cargo test -p risk-authority --test performance -- --ignored --nocapture
+   Compiling libc v0.2.191
+   Compiling cpufeatures v0.2.17
+   Compiling sha2 v0.10.9
+   Compiling india-domain v0.1.0 (/Users/tourist/Documents/nirnay-repro/crates/india-domain)
+   Compiling trading-core v0.1.0 (/Users/tourist/Documents/nirnay-repro/crates/trading-core)
+   Compiling risk-engine v0.1.0 (/Users/tourist/Documents/nirnay-repro/crates/risk-engine)
+   Compiling risk-authority v0.1.0 (/Users/tourist/Documents/nirnay-repro/crates/risk-authority)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.77s
+     Running tests/performance.rs (target/debug/deps/performance-5efe9f8be675f79f)
+
+running 1 test
+BENCH-RISK-AUTH intents=4000 workers=8 accepted=4000 rejected=0 seconds=0.114 authorizations_per_sec=34984.2 p50_us=31.5 p99_us=3011.2 p999_us=11942.1 seed=20261121 source=synthetic-local
+test seeded_concurrent_authorization_throughput ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.12s
+
+cargo test -p authoritative-oms --test performance -- --ignored --nocapture
+   Compiling authoritative-oms v0.1.0 (/Users/tourist/Documents/nirnay-repro/crates/authoritative-oms)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.40s
+     Running tests/performance.rs (target/debug/deps/performance-aff0332105a4858c)
+
+running 3 tests
+BENCH-OMS-DUPLICATE attempts=2000 ignored=2000 seconds=0.125 duplicates_per_sec=16038.4 p50_us=61.1 p99_us=74.4 p999_us=82.9 sync_failure_count=0 partial_write_count=0 source=synthetic-local
+test duplicate_event_handling_rate ... ok
+BENCH-OMS-RECON unknown_injected=64 resolved=64 complete=true seconds=1.277 reconciliations_per_sec=50.1 p50_us=19994.9 p99_us=23991.5 p999_us=24024.8 sync_failure_count=0 partial_write_count=0 source=synthetic-local
+test reconciliation_completeness_against_injected_unknown_set ... ok
+BENCH-OMS-RECOVERY commits=201 replayed=201 seconds=1.152 replay_per_sec=174.5 fault=SyncFailure sync_failure_count=1 partial_write_count=0 source=synthetic-local
+test restart_recovery_after_k_commits_with_injected_fault ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 3.61s
+

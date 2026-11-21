@@ -1,0 +1,6 @@
+# Pinned developer tools for the style gate. Install with:
+#   python3 -m pip install -r requirements-dev.txt
+# The versions are pinned so local gates and CI enforce identical behavior.
+pyink==26.5.1
+ruff==0.17.5
+shellcheck-py==0.11.0.1

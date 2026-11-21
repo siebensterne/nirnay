@@ -1,0 +1,2 @@
+PYTHONPATH=research/python/src python3 -m quantlab.bench --suite experiments --workers 4 --repeats 5 --size 800 --seed 7
+BENCH-EXPERIMENTS workers=4 repeats=5 size=800 seed=7 worker_samples=20 p50_ms=84.279 p99_ms=91.960 p999_ms=91.960 throughput_per_sec=17.851 max_worker_rss_bytes=45645824 output_sha256=c92c920cc7b88a01f5a3ff9af30fa6f193724bc1e2388cf7f3c9c08d7782552f verify_status=verified_internal_integrity source=synthetic-local
