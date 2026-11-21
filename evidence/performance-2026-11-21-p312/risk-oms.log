@@ -1,0 +1,24 @@
+cargo test -p risk-authority --test performance -- --ignored --nocapture
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.10s
+     Running tests/performance.rs (target/debug/deps/performance-bdaf7817a8e78070)
+
+running 1 test
+BENCH-RISK-AUTH intents=4000 workers=8 accepted=4000 rejected=0 seconds=0.126 authorizations_per_sec=31766.5 p50_us=33.2 p99_us=4359.5 p999_us=11430.0 seed=20261121 source=synthetic-local
+test seeded_concurrent_authorization_throughput ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.13s
+
+cargo test -p authoritative-oms --test performance -- --ignored --nocapture
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.06s
+     Running tests/performance.rs (target/debug/deps/performance-459940b323730304)
+
+running 3 tests
+BENCH-OMS-DUPLICATE attempts=2000 ignored=2000 seconds=0.125 duplicates_per_sec=15996.4 p50_us=61.2 p99_us=74.5 p999_us=79.0 sync_failure_count=0 partial_write_count=0 source=synthetic-local
+test duplicate_event_handling_rate ... ok
+BENCH-OMS-RECON unknown_injected=64 resolved=64 complete=true seconds=1.273 reconciliations_per_sec=50.3 p50_us=19992.0 p99_us=22061.0 p999_us=22992.5 sync_failure_count=0 partial_write_count=0 source=synthetic-local
+test reconciliation_completeness_against_injected_unknown_set ... ok
+BENCH-OMS-RECOVERY commits=201 replayed=201 seconds=1.248 replay_per_sec=161.0 fault=SyncFailure sync_failure_count=1 partial_write_count=0 source=synthetic-local
+test restart_recovery_after_k_commits_with_injected_fault ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 3.81s
+
