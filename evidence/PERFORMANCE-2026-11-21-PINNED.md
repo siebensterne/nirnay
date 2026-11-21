@@ -11,7 +11,8 @@ HFT result.
 
 | Field | Value |
 |---|---|
-| Commit | `0a726a6b4b2a2b78220a68fffcf5c0f737173235` (clean `main` after PR #107) |
+| Measured workloads | clean `main` `0a726a6b4b2a2b78220a68fffcf5c0f737173235` (after PR #107) |
+| Harness-fix commit | `d1c783fb` (test-only risk benchmark amplitudes; no workload remeasurement after this prose update) |
 | Python | 3.12.13 (`requires-python >=3.12`; constraints pin the research environment) |
 | Rust | rustc/cargo 1.99.1 |
 | Hardware | Apple M1, 8 cores, Darwin 27.0.0 arm64 |
@@ -26,7 +27,7 @@ production risk limit was changed.
 ### Research (100 repeats, sizes 200 and 800)
 
 ```bash
-PYTHONPATH=research/python/src python3 -m quantlab.bench --suite core --repeats 100 --sizes 200,800 --seed 7
+PYTHONPATH=research/python/src python3.12 -m quantlab.bench --suite core --repeats 100 --sizes 200,800 --seed 7
 ```
 
 Size 800, 100 repeats: BUILD p50/p99/p999 28.529/42.135/61.171 ms;
@@ -40,7 +41,7 @@ and dataset SHA-256 `1454ddadc63fe128db2f2a99fe6baf364c09821f78ba5bb6bd0b1056e64
 ### Concurrent experiments (100 repeats, 4 workers)
 
 ```bash
-PYTHONPATH=research/python/src python3 -m quantlab.bench --suite experiments --workers 4 --repeats 100 --size 800 --seed 7
+PYTHONPATH=research/python/src python3.12 -m quantlab.bench --suite experiments --workers 4 --repeats 100 --size 800 --seed 7
 ```
 
 400 worker samples: p50/p99/p999 111.023/243.594/560.381 ms;
@@ -50,7 +51,7 @@ PYTHONPATH=research/python/src python3 -m quantlab.bench --suite experiments --w
 ### Latency (1200 repeats — enough observations for p99.9)
 
 ```bash
-PYTHONPATH=research/python/src python3 -m quantlab.bench --suite latency --repeats 1200 --size 800 --seed 7
+PYTHONPATH=research/python/src python3.12 -m quantlab.bench --suite latency --repeats 1200 --size 800 --seed 7
 ```
 
 `BENCH-HISTORICAL-QUERY`: 1600 lookups, p50/p99/p999 1.041/23.916/958.958 µs,
@@ -84,7 +85,9 @@ recovery 201/201 commits at 161.0/s with one injected `SyncFailure`.
 
 ## Scope limits
 
-These are local synthetic-fixture measurements on one macOS host. They are not
+The commands above name `python3.12` explicitly; the measured runs used
+the same 3.12.13 interpreter via a PATH shim. These are local synthetic-fixture
+measurements on one macOS host. They are not
 pinned-container, Linux deployment, exchange-feed, broker, real-market or HFT
 latency evidence. No threshold is asserted and the benchmarks remain outside
 CI pass/fail gates. The earlier five-repeat Python 3.15 record remains a valid
