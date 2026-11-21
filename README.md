@@ -7,8 +7,8 @@
 <!-- CURRENT-STATE
 code_commit: a34c301631778ff0ad0c304ff4fa8520f5cc4381
 verified_on: 2026-11-21
-ci_run: 44911669537
-scope: make check + xtask ci/assure + CI 44911669537 on 8aecbdc (12/12)
+ci_run: 44920935673
+scope: make check + xtask ci/assure + CI 44920935673 on 17f8267 (12/12)
 -->
 
 ## Implemented scope
