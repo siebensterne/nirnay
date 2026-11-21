@@ -1,6 +1,9 @@
-.PHONY: ci check perf bench-ingress bench-research bench-experiments bench-risk-oms docs-check shellcheck-check generated-paths-check pollution-check style rust-style source-style python-ruff-style q-style prose-style references-check standards-check style-gate python-format-check rust-test python-test python-check cpp-test cpp-format-check schema-check fundamental-fixture-check verify-local fmt constraints sbom supply-chain wheels packaging-test bundle bundle-verify git-policy kdb-analyze kdb-golden kdb-q-test archive-verify tools
+.PHONY: ci assure check perf bench-ingress bench-research bench-experiments bench-risk-oms docs-check shellcheck-check generated-paths-check pollution-check style rust-style source-style python-ruff-style q-style prose-style references-check standards-check style-gate python-format-check rust-test python-test python-check cpp-test cpp-format-check schema-check fundamental-fixture-check verify-local fmt constraints sbom supply-chain wheels packaging-test bundle bundle-verify git-policy kdb-analyze kdb-golden kdb-q-test archive-verify tools
 ci:
 	cargo xtask ci
+
+assure:
+	cargo xtask assure
 
 check:
 	$(MAKE) docs-check

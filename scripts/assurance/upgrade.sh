@@ -77,10 +77,9 @@ else
 fi
 
 if grep -qE "^[[:space:]]*toolchain: ${current}[[:space:]]*$" "$ci_file"; then
-  sed -i.bak \
-    "s|^[[:space:]]*toolchain: ${current}[[:space:]]*$|"
-    "          toolchain: ${toolchain}|" \
-    "$ci_file"
+  pattern="s|^[[:space:]]*toolchain: ${current}[[:space:]]*\$|"
+  replacement="          toolchain: ${toolchain}|"
+  sed -i.bak "${pattern}${replacement}" "$ci_file"
   rm -f "$ci_file.bak"
   printf 'updated the CI pin in %s\n' "$ci_file"
 else

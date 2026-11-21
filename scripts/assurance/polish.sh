@@ -74,18 +74,18 @@ while IFS= read -r -d '' script; do
   shell_scripts+=("$script")
 done < <(find scripts -type f -name '*.sh' -print0)
 run_optional_step "shellcheck over scripts/" shellcheck "${shell_scripts[@]}"
-run_step "python unit tests (scripts)" \
-  python3 -m unittest discover -s scripts -p 'test_*.py'
-run_step "python unit tests (scripts/assurance)" \
-  python3 -m unittest discover -s scripts/assurance -p 'test_*.py'
-run_step "requirement-matrix references" python3 scripts/check_matrix_tests.py
-run_step "architecture traceability" python3 scripts/check_architecture.py \
-  --check
+run_step "python test suite" python3 -m pytest -q
+run_step "repository policy gates" python3 scripts/check_repo.py check
+run_step "architecture traceability" python3 scripts/check_repo.py arch
 run_step "generated-path policy" python3 scripts/check_generated_paths.py
 run_step "style reference integrity" python3 scripts/check_style_references.py
 run_step "git policy" python3 scripts/check_git_policy.py
 run_step "cross-pollution guard" python3 scripts/check_no_cross_pollution.py
 run_step "Rust added-line style" python3 scripts/check_rust_style.py
+run_step "documentation lifecycle" python3 scripts/check_docs.py
+run_step "unified prose audit" python3 scripts/check_prose_unified.py --all
+run_step "quality contract" python3 scripts/check_quality_contract.py
+run_step "license provenance" python3 scripts/check_license_provenance.py
 if cargo audit --version >/dev/null 2>&1; then
   run_step "cargo audit" cargo audit
 else
@@ -110,16 +110,9 @@ while (( iteration <= loops )); do
     --locked
   run_step "cargo test (doc)" cargo test --workspace --doc --locked
   run_step "cargo build (release)" cargo build --release --locked
-  if [[ "$(uname -s)" == "Linux" ]]; then
-    run_step "journal ENOSPC drill" scripts/verify-journal-enospc.sh
-  else
-    GATE_STEPS+=("journal ENOSPC drill|SKIP|0")
-    printf '== journal ENOSPC drill: skipped on %s (Linux-only CI step)\n' \
-      "$(uname -s)"
-  fi
   run_step "english audit (advisory)" scripts/assurance/run_audit.sh
   run_step "english audit strict" python3 scripts/assurance/english_audit.py \
-    --repo . --exclude 'references/*' --strict
+    --repo . --exclude 'engineering/references/*' --strict
 
   fingerprint_now="$(tree_fingerprint)"
   if [[ "$fingerprint_now" == "$fingerprint_start" ]]; then

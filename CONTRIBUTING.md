@@ -20,6 +20,11 @@
    subcommand (`check`, `arch`, `waivers`, `claims`) delegates to the matching
    `scripts/check_repo.py` gate; `list` prints the registered task names. The
    gate's own exit code is propagated, so a red gate fails CI.
+10. Run `cargo xtask assure` (or `make assure`) before publishing a change.
+    This runs `scripts/assurance/polish.sh`: it applies rustfmt, re-checks the
+    full gate, repeats for `--loop N`, and fingerprints the tree so a gate
+    that mutates source cannot pass. `update.sh` and `upgrade.sh` wrap the
+    same gate around lockfile and toolchain bumps and restore pins on failure.
 
 ## Documentation and evidence
 

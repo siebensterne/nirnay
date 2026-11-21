@@ -22,7 +22,7 @@ mkdir -p "$(dirname "${output}")"
 
 # Vendored reference documents are byte-exact third-party material, verified
 # by scripts/check_style_references.py. Their wording is not authored prose.
-audit_excludes=(--exclude 'references/*')
+audit_excludes=(--exclude 'engineering/references/*')
 
 set +e
 if [[ "${#history[@]}" -gt 0 ]]; then

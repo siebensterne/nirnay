@@ -90,6 +90,8 @@ impl Cmd {
 enum Task {
     /// Run the full policy gate suite via the repository's single registry (make check).
     Ci,
+    /// Run the full assurance superset (polish, update and upgrade gates).
+    Assure,
     /// Run every repository policy gate via check_repo.py.
     Check,
     /// Check the architecture dependency graph and manifest hygiene.
@@ -126,6 +128,7 @@ impl Task {
     fn commands(self) -> Vec<Cmd> {
         match self {
             Task::Ci => vec![Cmd::new("make", &["check"])],
+            Task::Assure => vec![Cmd::new("scripts/assurance/polish.sh", &[])],
             Task::Check => vec![script("check")],
             Task::Arch => vec![script("arch")],
             Task::Waivers => vec![script("waivers")],
@@ -270,6 +273,7 @@ mod tests {
     fn every_gate_has_at_least_one_typed_command() {
         for (name, commands) in [
             ("ci", Task::Ci.commands()),
+            ("assure", Task::Assure.commands()),
             ("check", Task::Check.commands()),
             ("arch", Task::Arch.commands()),
             ("waivers", Task::Waivers.commands()),
@@ -301,8 +305,8 @@ mod tests {
         assert_eq!(
             task_names(),
             vec![
-                "arch", "check", "ci", "claims", "docs", "fmt", "lint", "list", "style", "test",
-                "waivers"
+                "arch", "assure", "check", "ci", "claims", "docs", "fmt", "lint", "list", "style",
+                "test", "waivers"
             ],
             "the task list reflects the subcommand enum"
         );
@@ -312,6 +316,7 @@ mod tests {
     fn no_command_uses_a_shell_or_unquoted_path() {
         for (name, commands) in [
             ("ci", Task::Ci.commands()),
+            ("assure", Task::Assure.commands()),
             ("style", Task::Style.commands()),
             ("check", Task::Check.commands()),
             ("fmt", Task::Fmt.commands()),
@@ -339,6 +344,7 @@ mod tests {
     fn each_subcommand_parses_to_its_task() {
         for (input, expected) in [
             ("ci", Task::Ci),
+            ("assure", Task::Assure),
             ("check", Task::Check),
             ("arch", Task::Arch),
             ("waivers", Task::Waivers),
