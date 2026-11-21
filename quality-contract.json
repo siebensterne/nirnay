@@ -15,7 +15,8 @@
     ".gitignore",
     ".shellcheckrc",
     "ruff.toml",
-    "quality-contract.json"
+    "quality-contract.json",
+    "scripts/check_prose_unified.py"
   ],
   "ruff": {
     "config": "ruff.toml",

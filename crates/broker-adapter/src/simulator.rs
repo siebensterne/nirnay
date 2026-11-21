@@ -139,7 +139,7 @@ impl SimulatedBroker {
     }
 
     /// Broker delivery order before adapter normalization. Used by contract
-    /// tests to prove the simulator actually delivers out-of-order events.
+    /// tests to prove the simulator delivers out-of-order events.
     pub fn drain_raw_events(&mut self) -> Vec<BrokerEvent> {
         self.events.drain(..).collect()
     }

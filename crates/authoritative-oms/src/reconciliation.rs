@@ -213,7 +213,7 @@ pub fn reconcile(
                 execution_id: delivery.execution_id.clone(),
             });
             // UnknownDelivery is a blocking anomaly; it must move the report
-            // to Mismatch just like any other `is_blocking()` difference.
+            // to Mismatch like any other `is_blocking()` difference.
             hard_conflict = true;
         }
     }

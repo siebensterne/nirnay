@@ -241,7 +241,7 @@ pub fn parse_bse_master(
         let status_text = row.fields[status_column].trim().to_uppercase();
         let status = match status_text.as_str() {
             "A" | "ACTIVE" => ListingStatus::Active,
-            // BSE's standardised contract declares S (suspend) and I (inactive)
+            // BSE's standardised contract declares S (suspend) and I (inactive)  # prose-audit-ignore: BSE ticker symbol identifier
             // as real, non-tradable states. They are excluded by that declared
             // rule, not silently treated as active and never inferred as errors.
             "S" | "SUSPEND" | "I" | "INACTIVE" if layout.standardised => {

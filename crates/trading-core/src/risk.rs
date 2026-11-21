@@ -1,6 +1,6 @@
 //! Typed risk placeholders and the deterministic permit-to-intent binding.
 //!
-//! These values are deliberately synthetic placeholders: they let the risk
+//! These values are synthetic placeholders by design: they let the risk
 //! engine and authority exercise fail-closed control logic with exact domain
 //! types while real sector, depth, volatility, Greeks and borrow masters stay
 //! out of scope. The digest is an unkeyed integrity check over order terms; it
@@ -53,7 +53,7 @@ pub struct BorrowAvailability {
 ///
 /// The preimage names the reservation identity fields that the OMS carries in
 /// `PermitRef` plus the complete `OrderIntent`. The risk assessment is not
-/// included because the OMS deliberately does not depend on the authority: the
+/// included because the OMS does not depend on the authority by design: the
 /// policy version is the typed proxy for the assessment context. This is an
 /// integrity digest only — no key, signature, KMS identity or authenticity is
 /// claimed.

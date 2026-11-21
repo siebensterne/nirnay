@@ -1,7 +1,7 @@
 # Numeric and book differential corpus — version 1
 
 These files are the shared input to the C++ oracle drivers and the Rust
-counterparts. Both drivers read the exact same bytes from one file; the
+counterparts. Both drivers read the identical bytes from one file; the
 differential gate compares their stdout byte for byte and their exit-status
 class (success versus failure).
 

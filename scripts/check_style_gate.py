@@ -33,6 +33,7 @@ REQUIRED_TEXT: dict[str, tuple[str, ...]] = {
         "prose-style:",
         "python3 scripts/check_prose_style.py --self-test",
         "python3 scripts/check_prose_style.py",
+        "python3 scripts/check_prose_unified.py",
         "python3 scripts/check_q_style.py --self-test",
         "python3 scripts/check_q_style.py",
         "python3 scripts/check_rust_style.py --self-test",
@@ -46,6 +47,7 @@ REQUIRED_TEXT: dict[str, tuple[str, ...]] = {
         "python3 scripts/check_rust_style.py",
         "python3 scripts/check_source_style.py",
         "python3 scripts/check_prose_style.py",
+        "python3 scripts/check_prose_unified.py",
         "python3 scripts/check_q_style.py",
         "python3 scripts/ruff_gate.py",
         "python3 scripts/check_ruff_added_lines.py",
@@ -125,6 +127,7 @@ MIN_TESTS: dict[str, int] = {
     "scripts/check_source_style.py": 26,
     "scripts/check_style_gate.py": 7,
     "scripts/check_prose_style.py": 12,
+    "scripts/check_prose_unified.py": 6,
     "scripts/check_q_style.py": 16,
 }
 

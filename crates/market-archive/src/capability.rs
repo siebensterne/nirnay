@@ -1,6 +1,6 @@
 //! Machine-readable source-product capability contract.
 //!
-//! A product declares what it actually supplies. Missing capabilities are
+//! A product declares what it supplies. Missing capabilities are
 //! rejections, never inferences. Rights and entitlements are recorded as
 //! verification state only; this module never grants or upgrades them.
 

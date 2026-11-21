@@ -115,7 +115,7 @@ pub struct SubmissionAck {
     pub accepted_at_ns: i64,
 }
 
-/// Outcome of a submission. `TimedOut` is deliberately ambiguous: it must be
+/// Outcome of a submission. `TimedOut` is ambiguous by design: it must be
 /// mapped to UNKNOWN at the OMS, never auto-retried.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SubmissionOutcome {

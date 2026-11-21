@@ -42,6 +42,8 @@ python-ruff-style:
 prose-style:
 	python3 scripts/check_prose_style.py --self-test
 	python3 scripts/check_prose_style.py
+	python3 scripts/check_prose_unified.py --self-test
+	python3 scripts/check_prose_unified.py
 q-style:
 	python3 scripts/check_q_style.py --self-test
 	python3 scripts/check_q_style.py

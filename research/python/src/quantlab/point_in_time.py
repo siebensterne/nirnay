@@ -671,7 +671,7 @@ def write_dataset(rows: Iterable[DatasetRow], manifest: DatasetManifest, output_
         if signer is not None and signing_key_id is not None:
             manifest_bytes = canonical_bytes(manifest_payload)
             manifest_digest = hashlib.sha256(manifest_bytes).digest()
-            # Sign a fixed-size digest rather than a potentially very large
+            # Sign a fixed-size digest rather than a potentially large
             # manifest. This fits KMS Ed25519 raw-message limits even when a
             # production dataset contains millions of source hashes.
             signed_bytes = DATASET_SIGNATURE_DOMAIN + manifest_digest

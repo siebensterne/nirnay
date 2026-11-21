@@ -135,7 +135,7 @@ pub(super) struct Projection {
     pub max_quote_age_ns: Option<u64>,
     /// Fee schedule of the opening configuration. Replay recalculates every
     /// charge component for each fill from this schedule; recorded fees are
-    /// not trusted merely because their total balances with cash.
+    /// not trusted from cash-balanced totals alone.
     pub charge_book: Option<ChargeBook>,
 }
 
@@ -751,7 +751,7 @@ impl Projection {
             if *quantity == 0 {
                 continue;
             }
-            // Same exact multiply-then-round boundary as PositionView.
+            // Identical multiply-then-round boundary as PositionView.
             let mark = self.market.mark_price_doubled(instrument_id)?;
             let exposure = i128::from(rounded_gross_paise(*quantity, mark)?.0);
             total = total.checked_add(exposure)?;
@@ -846,7 +846,7 @@ fn inconsistent(sequence: u64, reason: &str) -> ProjectionError {
 /// Prove that a (schema version 2) fill names the quote event that funded
 /// it, and that the fill respects the market-intent execution rules: the
 /// referenced quote must be the active book entry at the time of the fill
-/// (not merely an earlier quote for the same instrument), the book must be
+/// (not an earlier quote for the same instrument), the book must be
 /// executable under the same feed-health gate as live matching, carry the
 /// displayed side (ask liquidity for buys, bid liquidity for sells), price
 /// exactly at the configured slippage rule applied to that displayed

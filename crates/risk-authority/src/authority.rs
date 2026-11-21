@@ -987,7 +987,7 @@ impl RiskAuthority {
         Ok(reservation)
     }
 
-    /// Risk-reducing path. It is deliberately observation-free so positions
+    /// Risk-reducing path. It is observation-free by design so positions
     /// can be flattened when health is degraded; accounting invariants remain
     /// fail-closed. See invariant L5.
     pub fn release(&self, intent_id: IntentId) -> Result<Reservation, AuthorityError> {

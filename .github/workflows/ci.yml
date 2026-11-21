@@ -1,6 +1,6 @@
 name: CI
 # Also reusable, so release.yml can make these gates a precondition of any tag
-# publication rather than a workflow that merely runs alongside it.
+# publication rather than a workflow that runs alongside it.
 on:
   push:
     # Pull requests run the suite too; restricting push to the default branch
@@ -93,7 +93,10 @@ jobs:
           python3 scripts/check_ruff_added_lines.py --self-test
           python3 scripts/check_ruff_added_lines.py
       - name: Prose style on added lines
-        run: python3 scripts/check_prose_style.py
+        run: |
+          python3 scripts/check_prose_style.py
+          python3 scripts/check_prose_unified.py --self-test
+          python3 scripts/check_prose_unified.py
       - name: q / kdb+ style on added lines
         run: python3 scripts/check_q_style.py
       - name: ShellCheck and tool isolation
