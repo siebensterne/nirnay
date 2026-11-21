@@ -5,7 +5,7 @@
 **Release status:** research/paper engineering candidate. This repository is not a certified broker-connected trading system, not a SEBI/exchange-approved algo product, and not evidence of profitable alpha. Live order routing is hard-disabled. Every capability statement below distinguishes code present from external verification still required.
 
 <!-- CURRENT-STATE
-code_commit: 7dd3fe17c1f6c841c71dd0bc9b235fff80640937
+code_commit: d1c783fb54edf54cd51fe477f23841bb177b2af8
 verified_on: 2026-11-21
 ci_run: 44911669537
 scope: make check + xtask ci/assure + CI 44911669537 on 8aecbdc (12/12)
@@ -403,6 +403,7 @@ once published; a new run adds a new dated file instead of rewriting history.
 | Dated evidence | `evidence/A0-ARCHIVE-BUNDLE-2026-11-20.md` | archive Git-bundle defect, correction and verification |
 | Dated evidence | `evidence/PROGRAMME-2026-11-21.md` | external-review remediation programme and verified results |
 | Dated evidence | `evidence/TASK-CLOSURE-2026-11-21.md` | exhaustive Task.md closure, commits, gates and owner-gated residual items |
+| Dated evidence | `evidence/PERFORMANCE-2026-11-21-PINNED.md` | pinned Python 3.12 benchmark re-run with higher-repeat tail statistics |
 | Dated evidence | `evidence/PERFORMANCE-2026-11-21.md` | local synthetic benchmark observations on `ec0b216`, with toolchain, hardware, commands, distributions, hashes and scope limits |
 | Dated evidence | `evidence/RISK-CONTROLS-RECOVERY-DRILL-2026-11-21.md` | typed risk-control fixtures, permit binding and in-process recovery drill |
 

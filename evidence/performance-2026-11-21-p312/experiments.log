@@ -1,0 +1,1 @@
+BENCH-EXPERIMENTS workers=4 repeats=100 size=800 seed=7 worker_samples=400 p50_ms=111.023 p99_ms=243.594 p999_ms=560.381 throughput_per_sec=13.463 max_worker_rss_bytes=44400640 output_sha256=a0e5944e5e056802cb8483f64cf60e024d14777c2d8e5a4211dd186ca476cf8d verify_status=verified_internal_integrity source=synthetic-local
