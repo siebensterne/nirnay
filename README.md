@@ -5,10 +5,10 @@
 **Release status:** research/paper engineering candidate. This repository is not a certified broker-connected trading system, not a SEBI/exchange-approved algo product, and not evidence of profitable alpha. Live order routing is hard-disabled. Every capability statement below distinguishes code present from external verification still required.
 
 <!-- CURRENT-STATE
-code_commit: 185c3ce
+code_commit: 510e1a5
 verified_on: 2026-11-21
 ci_run: none
-scope: local cargo xtask ci on feat/quality-hardening; hardening commits af141cb through 185c3ce
+scope: local cargo xtask ci on feat/quality-hardening; prose remediation through 510e1a5
 -->
 
 ## Implemented scope
@@ -103,7 +103,7 @@ The demo reports `not_real_market_data=true` and `not_alpha_evidence=true`. It i
 
 The first fundamental-data vertical defines source-backed company identity
 and financial fact records.
-It is deliberately offline: source acquisition and data entitlements remain separate decisions.
+It is offline by design: source acquisition and data entitlements remain separate decisions.
 Validate the checked-in synthetic examples with:
 
 ```bash
