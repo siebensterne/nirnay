@@ -23,8 +23,9 @@ record is immutable: this addendum does not edit it or any artifact under
 
 The `EXP-M4-0001` holdout was consumed on 2026-11-21 and is preserved. The
 original dated record and the four artifacts in `evidence/m4/` were not edited,
-regenerated or removed. No experiment was rerun, no new holdout was inspected,
-and no candidate was reselected. No licensed data, provider observation,
+regenerated or removed. No experiment was rerun, no new research holdout was inspected,
+and no candidate was reselected. The contract test suite uses a separate
+synthetic fixture and is not research evidence. No licensed data, provider observation,
 credential or live service was accessed.
 
 ## Corrected contract (implemented, not independently verified)
