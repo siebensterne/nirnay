@@ -1,0 +1,2 @@
+BENCH-HISTORICAL-QUERY size=800 rows=800 repeats=1200 seed=9 queries=1600 p50_us=1.584 p99_us=8.459 p999_us=48.917 peak_rss_bytes=45481984 output_sha256=a181f22c211284a17e7991750cecf7949b89f89d95faa8670c9fe397a3190572 source=synthetic-local
+BENCH-E2E-LATENCY size=800 rows=800 repeats=1200 seed=9 samples=800 p50_us=70793.833 p99_us=91441.667 p999_us=142812.000 peak_rss_bytes=45481984 output_sha256=21ebc9167f173185ba2cedf0d38717addadd7ecc5abda1827510f0eb02cf85d4 source=synthetic-local

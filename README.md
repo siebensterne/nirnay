@@ -405,6 +405,7 @@ once published; a new run adds a new dated file instead of rewriting history.
 | Dated evidence | `evidence/PROGRAMME-2026-11-21.md` | external-review remediation programme and verified results |
 | Dated evidence | `evidence/TASK-CLOSURE-2026-11-21.md` | exhaustive Task.md closure, commits, gates and owner-gated residual items |
 | Dated evidence | `evidence/PERFORMANCE-2026-11-21-PINNED.md` | pinned Python 3.12 benchmark re-run with higher-repeat tail statistics |
+| Dated evidence | `evidence/PERFORMANCE-TAILS-ADDENDUM-2026-11-21.md` | three independent latency runs; unstable p99.9 and ingress-loss caveats |
 | Dated evidence | `evidence/PERFORMANCE-2026-11-21.md` | local synthetic benchmark observations on `ec0b216`, with toolchain, hardware, commands, distributions, hashes and scope limits |
 | Dated evidence | `evidence/RISK-CONTROLS-RECOVERY-DRILL-2026-11-21.md` | typed risk-control fixtures, permit binding and in-process recovery drill |
 | Dated evidence | `evidence/M4-RESEARCH-EVIDENCE-2026-11-21.md` | first synthetic pre-registered experiment and registry evidence |
