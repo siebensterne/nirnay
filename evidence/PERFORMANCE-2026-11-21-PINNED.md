@@ -25,7 +25,7 @@ production risk limit was changed.
 
 ### Research (100 repeats, sizes 200 and 800)
 
-```
+```bash
 PYTHONPATH=research/python/src python3 -m quantlab.bench --suite core --repeats 100 --sizes 200,800 --seed 7
 ```
 
@@ -39,7 +39,7 @@ and dataset SHA-256 `1454ddadc63fe128db2f2a99fe6baf364c09821f78ba5bb6bd0b1056e64
 
 ### Concurrent experiments (100 repeats, 4 workers)
 
-```
+```bash
 PYTHONPATH=research/python/src python3 -m quantlab.bench --suite experiments --workers 4 --repeats 100 --size 800 --seed 7
 ```
 
@@ -49,7 +49,7 @@ PYTHONPATH=research/python/src python3 -m quantlab.bench --suite experiments --w
 
 ### Latency (1200 repeats — enough observations for p99.9)
 
-```
+```bash
 PYTHONPATH=research/python/src python3 -m quantlab.bench --suite latency --repeats 1200 --size 800 --seed 7
 ```
 
