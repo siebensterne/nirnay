@@ -7,8 +7,8 @@
 <!-- CURRENT-STATE
 code_commit: dea4f66aedfbc06460889dbd8d04c070a858450d
 verified_on: 2026-11-21
-ci_run: none
-scope: make check + hosted CI pending at this head (pyproject.toml code/config commit)
+ci_run: 44934825045
+scope: make check + hosted CI 44934825045 on 615f37f (12/12)
 -->
 
 ## Implemented scope
