@@ -31,3 +31,5 @@ build-*/
 # Editor and OS noise
 .DS_Store
 Thumbs.db
+
+Task.md
