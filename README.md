@@ -5,10 +5,10 @@
 **Release status:** research/paper engineering candidate. This repository is not a certified broker-connected trading system, not a SEBI/exchange-approved algo product, and not evidence of profitable alpha. Live order routing is hard-disabled. Every capability statement below distinguishes code present from external verification still required.
 
 <!-- CURRENT-STATE
-code_commit: a34c301631778ff0ad0c304ff4fa8520f5cc4381
+code_commit: dea4f66aedfbc06460889dbd8d04c070a858450d
 verified_on: 2026-11-21
-ci_run: 44920935673
-scope: make check + xtask ci/assure + CI 44920935673 on 17f8267 (12/12)
+ci_run: none
+scope: make check + hosted CI pending at this head (pyproject.toml code/config commit)
 -->
 
 ## Implemented scope
