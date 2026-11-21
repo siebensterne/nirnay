@@ -1,4 +1,4 @@
-.PHONY: check perf bench-ingress bench-research bench-experiments bench-risk-oms docs-check shellcheck-check generated-paths-check pollution-check style rust-style source-style q-style prose-style style-gate python-format-check rust-test python-test python-check cpp-test cpp-format-check schema-check fundamental-fixture-check verify-local fmt constraints sbom supply-chain wheels packaging-test bundle bundle-verify git-policy kdb-analyze kdb-golden kdb-q-test archive-verify
+.PHONY: check perf bench-ingress bench-research bench-experiments bench-risk-oms docs-check shellcheck-check generated-paths-check pollution-check style rust-style source-style python-ruff-style q-style prose-style references-check standards-check style-gate python-format-check rust-test python-test python-check cpp-test cpp-format-check schema-check fundamental-fixture-check verify-local fmt constraints sbom supply-chain wheels packaging-test bundle bundle-verify git-policy kdb-analyze kdb-golden kdb-q-test archive-verify tools
 check:
 	$(MAKE) docs-check
 	$(MAKE) shellcheck-check
@@ -17,30 +17,48 @@ docs-check:
 	python3 scripts/check_docs.py
 shellcheck-check:
 	python3 scripts/check_shellcheck.py
+tools:
+	python3 -m pip install --disable-pip-version-check \
+		ruff==0.17.5 shellcheck-py==0.11.0.1
 generated-paths-check:
 	python3 scripts/check_generated_paths.py
 pollution-check:
 	python3 scripts/check_no_cross_pollution.py
-style: rust-style source-style q-style prose-style style-gate
+style: rust-style source-style python-ruff-style q-style prose-style \
+	references-check standards-check style-gate
 rust-style:
 	python3 scripts/check_rust_style.py --self-test
 	python3 scripts/check_rust_style.py
 source-style:
 	python3 scripts/check_source_style.py --self-test
 	python3 scripts/check_source_style.py
+python-ruff-style:
+	python3 scripts/ruff_gate.py scripts/check_ruff_added_lines.py scripts/check_quality_contract.py scripts/check_style_references.py scripts/check_license_provenance.py scripts/ruff_gate.py
+	python3 scripts/check_ruff_added_lines.py --self-test
+	python3 scripts/check_ruff_added_lines.py
 prose-style:
 	python3 scripts/check_prose_style.py --self-test
 	python3 scripts/check_prose_style.py
 q-style:
 	python3 scripts/check_q_style.py --self-test
 	python3 scripts/check_q_style.py
+references-check:
+	python3 scripts/check_style_references.py --self-test
+	python3 scripts/check_style_references.py
+standards-check:
+	python3 scripts/check_quality_contract.py --self-test
+	python3 scripts/check_quality_contract.py
+	python3 scripts/check_license_provenance.py --self-test
+	python3 scripts/check_license_provenance.py
 style-gate:
 	python3 scripts/check_style_gate.py --self-test
 	python3 scripts/check_style_gate.py
-# Advisory until the existing Python corpus is reformatted in a dedicated PR.
+# Whole-tree Ruff remains advisory until the existing Python corpus is
+# reformatted in a dedicated PR. Added Python lines are already binding via
+# python-ruff-style, which uses the same ruff.toml policy.
 python-format-check:
-	ruff check .
-	ruff format --check .
+	python3 scripts/ruff_gate.py .
+	python3 -m ruff format --check --config ruff.toml .
 # Reproducible cold-build measurement and budget enforcement. Kept separate
 # from `check` so the normal gate cycle stays fast.
 perf:

@@ -1,0 +1,15 @@
+Apache License
+Version 2.0, January 2004
+http://www.apache.org/licenses/
+
+Copyright 2026 Kartik Jangid <22kartikjangid@gmail.com>
+
+This product is developed within the siebensterne GitHub organization.
+fieldbook and nirnay are independent repositories that share a neutral
+quality contract, toolchain policy and license. Neither repository imports,
+vendors or copies source code from the other.
+
+Vendored style references (references/ in fieldbook, engineering/references/
+in nirnay) are third-party documents retained verbatim under their own
+publishers' terms. They are evidence for style decisions, not part of the
+licensed Work, and are excluded from authorship and license checks.

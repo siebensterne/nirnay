@@ -81,10 +81,17 @@ jobs:
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
+      - name: Install pinned Ruff
+        run: python3 -m pip install --disable-pip-version-check -r ruff-requirements.txt
       - name: Rust style guidance on added lines
         run: python3 scripts/check_rust_style.py
       - name: Python/C++/Shell/Makefile/JSON/Markdown style on added lines
         run: python3 scripts/check_source_style.py
+      - name: Ruff on added Python lines
+        run: |
+          python3 scripts/ruff_gate.py scripts/check_ruff_added_lines.py scripts/check_quality_contract.py scripts/check_style_references.py scripts/check_license_provenance.py scripts/ruff_gate.py
+          python3 scripts/check_ruff_added_lines.py --self-test
+          python3 scripts/check_ruff_added_lines.py
       - name: Prose style on added lines
         run: python3 scripts/check_prose_style.py
       - name: q / kdb+ style on added lines
@@ -98,6 +105,20 @@ jobs:
         run: |
           python3 scripts/check_docs.py --self-test
           python3 scripts/check_docs.py
+      - name: Git policy
+        run: python3 scripts/check_git_policy.py
+      - name: Style reference integrity
+        run: |
+          python3 scripts/check_style_references.py --self-test
+          python3 scripts/check_style_references.py
+      - name: Shared quality contract
+        run: |
+          python3 scripts/check_quality_contract.py --self-test
+          python3 scripts/check_quality_contract.py
+      - name: License and provenance
+        run: |
+          python3 scripts/check_license_provenance.py --self-test
+          python3 scripts/check_license_provenance.py
       - name: Style gate self-tests
         run: |
           python3 scripts/check_rust_style.py --self-test

@@ -69,6 +69,14 @@ def check_subjects(policy: dict, base: str) -> list[str]:
     if not subjects:
         subjects = [line for line in git("log", "-1", "--format=%s").splitlines() if line]
 
+    # GitHub generates merge-commit subjects; they are not topic commits and
+    # are exempt from the topic pattern, matching fieldbook's policy.
+    subjects = [
+        subject
+        for subject in subjects
+        if not subject.startswith(("Merge pull request ", "Merge branch "))
+    ]
+
     for subject in subjects:
         if len(subject) > rule["maximum_length"]:
             errors.append(f"subject is {len(subject)} characters (max {rule['maximum_length']}): `{subject}`")
@@ -77,6 +85,28 @@ def check_subjects(policy: dict, base: str) -> list[str]:
         elif not pattern.match(subject):
             errors.append(f"subject does not match `type(scope): description`: `{subject}`")
     return errors
+
+
+def check_authors(policy: dict, base: str) -> list[str]:
+    """Require the configured author email on all unmerged commits."""
+    expected = policy["commit_subject"].get("required_author_email")
+    if not expected:
+        return []
+    try:
+        authors = [
+            line
+            for line in git("log", "--format=%ae", f"{base}..HEAD").splitlines()
+            if line
+        ]
+    except RuntimeError:
+        authors = []
+    if not authors:
+        authors = [git("log", "-1", "--format=%ae").strip()]
+    return [
+        f"commit author `{author}` is not `{expected}`"
+        for author in authors
+        if author != expected
+    ]
 
 
 def check_generated(policy: dict) -> list[str]:
@@ -176,6 +206,7 @@ def main(argv: list[str] | None = None) -> int:
     errors: list[str] = []
     errors.extend(check_branch(policy, branch))
     errors.extend(check_subjects(policy, base))
+    errors.extend(check_authors(policy, base))
     errors.extend(check_generated(policy))
     errors.extend(check_inventory(policy))
     if args.strict:
