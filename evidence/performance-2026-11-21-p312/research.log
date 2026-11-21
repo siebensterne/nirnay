@@ -1,0 +1,14 @@
+BENCH-RESEARCH-BUILD size=200 rows=200 repeats=100 seed=7 source=synthetic-local p50_ms=8.016 p99_ms=11.241 p999_ms=19.069 peak_rss_bytes=34603008
+BENCH-RESEARCH-WRITE size=200 rows=200 repeats=100 seed=7 source=synthetic-local p50_ms=3.946 p99_ms=4.641 p999_ms=4.821 peak_rss_bytes=34603008
+BENCH-RESEARCH-VERIFY size=200 rows=200 repeats=100 seed=7 source=synthetic-local p50_ms=6.533 p99_ms=9.088 p999_ms=9.581 peak_rss_bytes=34603008
+BENCH-RESEARCH-BACKTEST size=200 rows=200 repeats=100 seed=7 source=synthetic-local p50_ms=0.939 p99_ms=1.389 p999_ms=1.428 peak_rss_bytes=34603008
+BENCH-RESEARCH-PORTFOLIO size=200 rows=200 repeats=100 seed=7 source=synthetic-local p50_ms=0.808 p99_ms=1.022 p999_ms=1.040 peak_rss_bytes=34603008
+BENCH-RESEARCH-ALPHA size=200 rows=200 repeats=100 seed=7 source=synthetic-local p50_ms=17.604 p99_ms=19.061 p999_ms=20.037 peak_rss_bytes=34603008
+BENCH-RESEARCH-OUTPUT size=200 rows=200 repeats=100 seed=7 source=synthetic-local deterministic=true output_sha256=e164c2cf8fc43e6232e8d70a29753c9830fe9a17c91facbfaf7132038262d621 dataset_sha256=53fd9c411cf03d5d00295a2bb3876994268080ea5539acc06a7778a093522d42 backtest_sha256=cd2d3f9ca64209de98f824eaa5791daaaec491219fffe121dcf7b3cfc126e384 portfolio_sha256=168fb89f40bdb95614f7743f13dbd7618e769d5507caf59bde7babd1e58fe502 alpha_sha256=2267de63dce5642d6e733a8f3a39e72aeaec77139ae3a2a77e5084f88409df03 verify_status=verified_internal_integrity
+BENCH-RESEARCH-BUILD size=800 rows=800 repeats=100 seed=7 source=synthetic-local p50_ms=28.529 p99_ms=42.135 p999_ms=61.171 peak_rss_bytes=45924352
+BENCH-RESEARCH-WRITE size=800 rows=800 repeats=100 seed=7 source=synthetic-local p50_ms=13.765 p99_ms=24.214 p999_ms=29.796 peak_rss_bytes=45924352
+BENCH-RESEARCH-VERIFY size=800 rows=800 repeats=100 seed=7 source=synthetic-local p50_ms=25.827 p99_ms=52.968 p999_ms=54.964 peak_rss_bytes=45924352
+BENCH-RESEARCH-BACKTEST size=800 rows=800 repeats=100 seed=7 source=synthetic-local p50_ms=3.591 p99_ms=11.800 p999_ms=82.744 peak_rss_bytes=45924352
+BENCH-RESEARCH-PORTFOLIO size=800 rows=800 repeats=100 seed=7 source=synthetic-local p50_ms=3.091 p99_ms=7.406 p999_ms=17.916 peak_rss_bytes=45924352
+BENCH-RESEARCH-ALPHA size=800 rows=800 repeats=100 seed=7 source=synthetic-local p50_ms=70.260 p99_ms=214.893 p999_ms=312.021 peak_rss_bytes=45924352
+BENCH-RESEARCH-OUTPUT size=800 rows=800 repeats=100 seed=7 source=synthetic-local deterministic=true output_sha256=6453f36c9043d7b6f08078432cab66298305bf287806d323b2df53469ed0448d dataset_sha256=1454ddadc63fe128db2f2a99fe6baf364c09821f78ba5bb6bd0b1056e641e981 backtest_sha256=f3e8e8cbc7d1baee68d13721bb7993c5d7da2f858d93ca93b05b6a7d4215ad22 portfolio_sha256=82fe1c32d5cacc7255f08d9f7a59ec38a8e3685cc1ae069b4966b6f3dc38ef27 alpha_sha256=6aa1bd3699fb7f838435a1024573e949aeeb6bdc098b0e051c4420b42289e6a2 verify_status=verified_internal_integrity

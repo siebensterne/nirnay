@@ -141,7 +141,9 @@ fn policy() -> Result<ValidatedRiskPolicy, Box<dyn std::error::Error>> {
         max_price_deviation_ppm: 1_000_000,
         max_quote_age_ns: 1_000_000_000,
         allow_short: false,
-        max_strategy_exposure_paise: Paise(1_000_000),
+        // Amplified for the 4,000-intent workload: the production default is
+        // tighter, but this opt-in harness measures throughput, not policy.
+        max_strategy_exposure_paise: Paise(1_000_000_000),
         max_sector_exposure_paise: None,
         stress_scenario: None,
         max_stress_loss_paise: None,
