@@ -64,3 +64,6 @@ convention = "google"
 
 [lint.per-file-ignores]
 "**/tests/**" = ["E402"]
+# Same documented exception as the sibling workspace: matcher vocabulary is
+# data, not prose, and is reviewed as data by check_source_style.py.
+"scripts/assurance/english_audit.py" = ["E501"]

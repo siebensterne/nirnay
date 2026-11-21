@@ -53,4 +53,6 @@ if (( commit != 0 )) && ! git diff --quiet -- "$lock"; then
   git add "$lock"
   git commit -m "build: refresh the dependency lockfile (cargo update)"
 fi
-printf '\nsuggested commit: build: refresh the dependency lockfile (cargo update)\n'
+commit_note=$'\nsuggested commit: build: refresh the dependency lockfile '
+commit_note+='(cargo update)'
+printf '%s\n' "$commit_note"

@@ -40,6 +40,9 @@ HEADER_EXTS = frozenset({".h", ".hpp", ".hxx"})
 JSON_EXTS = frozenset({".json"})
 JSONL_EXTS = frozenset({".jsonl"})
 MD_EXTS = frozenset({".md"})
+# Matcher vocabulary data: long regex constants cannot be wrapped without
+# changing the expression. Mirrors fieldbook's documented exemption.
+LONG_STRING_FILES = frozenset({"scripts/assurance/english_audit.py"})
 
 FILE_HEADER = re.compile(r"^\+\+\+ b/")
 HUNK_HEADER = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
@@ -224,14 +227,22 @@ def python_docstring_lines(text: str) -> set[int]:
     return result
 
 
-def check_python_line(line: str, *, in_docstring: bool = False) -> list[str]:
+def check_python_line(
+    line: str, *, in_docstring: bool = False, allow_long_lines: bool = False
+) -> list[str]:
+    """Return style findings for one added Python line."""
     errors: list[str] = []
     code = strip_literals(line, "#")
     if trailing_whitespace(line):
         errors.append("trailing whitespace")
     if re.match(r"^\s*\t", line):
         errors.append("tab indentation; use four spaces")
-    if len(line) > MAX_PY_COLUMNS and "http://" not in line and "https://" not in line:
+    if (
+        not allow_long_lines
+        and len(line) > MAX_PY_COLUMNS
+        and "http://" not in line
+        and "https://" not in line
+    ):
         errors.append(f"line exceeds {MAX_PY_COLUMNS} columns")
     if not in_docstring:
         if ";" in code:
@@ -454,7 +465,11 @@ def check_changed_file(path: str, added: list[tuple[int, str]]) -> dict[int, lis
         except OSError:
             docstring_lines = set()
         for number, line in added:
-            for message in check_python_line(line, in_docstring=number in docstring_lines):
+            for message in check_python_line(
+                line,
+                in_docstring=number in docstring_lines,
+                allow_long_lines=path in LONG_STRING_FILES,
+            ):
                 add(number, message)
 
     elif ext in CPP_EXTS:

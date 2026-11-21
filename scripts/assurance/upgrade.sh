@@ -78,7 +78,8 @@ fi
 
 if grep -qE "^[[:space:]]*toolchain: ${current}[[:space:]]*$" "$ci_file"; then
   sed -i.bak \
-    "s|^[[:space:]]*toolchain: ${current}[[:space:]]*$|          toolchain: ${toolchain}|" \
+    "s|^[[:space:]]*toolchain: ${current}[[:space:]]*$|"
+    "          toolchain: ${toolchain}|" \
     "$ci_file"
   rm -f "$ci_file.bak"
   printf 'updated the CI pin in %s\n' "$ci_file"
@@ -107,4 +108,6 @@ if (( commit != 0 )); then
   git commit -m \
     "build: upgrade the toolchain to ${toolchain} and refresh dependencies"
 fi
-printf '\nsuggested commit: build: upgrade the toolchain to %s and refresh dependencies\n' "$toolchain"
+commit_note=$'\nsuggested commit: build: upgrade the toolchain to '
+commit_note+="${toolchain} and refresh dependencies"
+printf '%s\n' "$commit_note"

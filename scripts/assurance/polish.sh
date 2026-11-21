@@ -90,8 +90,9 @@ if cargo audit --version >/dev/null 2>&1; then
   run_step "cargo audit" cargo audit
 else
   GATE_STEPS+=("cargo audit|SKIP|0")
-  printf \
-    '== cargo audit: skipped (cargo-audit is not installed; install it for full coverage)\n'
+  audit_note='== cargo audit: skipped (cargo-audit is not installed;'
+  audit_note+=' install it for full coverage)'
+  printf '%s\n' "$audit_note"
 fi
 
 # ---- phase 1: the CI-parity build-and-verify core, iterated --------------
