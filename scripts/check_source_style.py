@@ -161,7 +161,15 @@ def collect_added_lines(base: str) -> dict[str, list[tuple[int, str]]]:
     )
     # Decode raw bytes: text mode would translate CRLF to LF and hide defects.
     added = parse_added_lines(result.stdout.decode("utf-8", errors="replace"))
-    return {path: lines for path, lines in added.items() if is_supported(path)}
+    # Vendored references are byte-exact third-party documents verified by
+    # check_style_references.py; they are not authored source and are excluded
+    # from formatting and prose checks (same rule as fieldbook).
+    excluded = ("engineering/references/", "references/")
+    return {
+        path: lines
+        for path, lines in added.items()
+        if is_supported(path) and not path.startswith(excluded)
+    }
 
 
 def trailing_whitespace(line: str) -> bool:
