@@ -135,7 +135,7 @@ pub struct OutboxView {
     pub broker_order_id: Option<BrokerOrderId>,
 }
 
-/// How a reconciled UNKNOWN order actually resolved at the broker.
+/// How a reconciled UNKNOWN order resolved at the broker.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Resolution {
     Working {
@@ -258,7 +258,7 @@ fn digest_of(seq: u64, op: &str, state: &OmsState, prev_digest: &str) -> String 
 /// price, currency, charges, charge status, source, scope and provenance.
 ///
 /// The two local-clock fields (`broker_timestamp_ns`, `received_at_ns`) are
-/// deliberately excluded. They are observation times assigned by the receiver,
+/// excluded by design. They are observation times assigned by the receiver,
 /// so a redelivery of the same broker event carries different local times;
 /// including them would turn an idempotent duplicate into a false conflict.
 #[must_use]

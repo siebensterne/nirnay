@@ -23,11 +23,17 @@ ROOT = Path(__file__).resolve().parent.parent
 
 REQUIRED_TEXT: dict[str, tuple[str, ...]] = {
     "Makefile": (
-        "style: rust-style source-style q-style prose-style style-gate",
+        "style: rust-style source-style python-ruff-style q-style prose-style",
         "$(MAKE) style",
+        "python3 scripts/ruff_gate.py",
+        "python3 scripts/check_ruff_added_lines.py",
+        "python3 scripts/check_style_references.py",
+        "python3 scripts/check_quality_contract.py",
+        "python3 scripts/check_license_provenance.py",
         "prose-style:",
         "python3 scripts/check_prose_style.py --self-test",
         "python3 scripts/check_prose_style.py",
+        "python3 scripts/check_prose_unified.py",
         "python3 scripts/check_q_style.py --self-test",
         "python3 scripts/check_q_style.py",
         "python3 scripts/check_rust_style.py --self-test",
@@ -41,11 +47,46 @@ REQUIRED_TEXT: dict[str, tuple[str, ...]] = {
         "python3 scripts/check_rust_style.py",
         "python3 scripts/check_source_style.py",
         "python3 scripts/check_prose_style.py",
+        "python3 scripts/check_prose_unified.py",
         "python3 scripts/check_q_style.py",
+        "python3 scripts/ruff_gate.py",
+        "python3 scripts/check_ruff_added_lines.py",
+        "python3 scripts/check_style_references.py",
+        "python3 scripts/check_quality_contract.py",
+        "python3 scripts/check_license_provenance.py",
         "python3 scripts/check_style_gate.py",
     ),
     "scripts/check_q_style.py": (
         "def check_q_line(",
+        "--self-test",
+        "def main()",
+    ),
+    "scripts/check_license_provenance.py": (
+        "def check_notice(",
+        "def check_spdx(",
+        "--self-test",
+        "def main()",
+    ),
+    "scripts/ruff_gate.py": (
+        "def pinned_binary(",
+        "def pinned_version(",
+        "def main()",
+    ),
+    "scripts/check_quality_contract.py": (
+        "def validate(",
+        "def check_ruff_settings(",
+        "--self-test",
+        "def main()",
+    ),
+    "scripts/check_ruff_added_lines.py": (
+        "def parse_added_lines(",
+        "def findings_on_added_lines(",
+        "--self-test",
+        "def main()",
+    ),
+    "scripts/check_style_references.py": (
+        "def parse_index(",
+        "def check(",
         "--self-test",
         "def main()",
     ),
@@ -78,10 +119,15 @@ EXPECTED_LANGUAGE_FUNCTIONS: tuple[str, ...] = (
 )
 
 MIN_TESTS: dict[str, int] = {
+    "scripts/check_license_provenance.py": 4,
+    "scripts/check_quality_contract.py": 5,
+    "scripts/check_ruff_added_lines.py": 5,
+    "scripts/check_style_references.py": 3,
     "scripts/check_rust_style.py": 13,
     "scripts/check_source_style.py": 26,
     "scripts/check_style_gate.py": 7,
     "scripts/check_prose_style.py": 12,
+    "scripts/check_prose_unified.py": 6,
     "scripts/check_q_style.py": 16,
 }
 

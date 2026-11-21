@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -69,6 +70,14 @@ def check_subjects(policy: dict, base: str) -> list[str]:
     if not subjects:
         subjects = [line for line in git("log", "-1", "--format=%s").splitlines() if line]
 
+    # GitHub generates merge-commit subjects; they are not topic commits and
+    # are exempt from the topic pattern, matching fieldbook's policy.
+    subjects = [
+        subject
+        for subject in subjects
+        if not subject.startswith(("Merge pull request ", "Merge branch "))
+    ]
+
     for subject in subjects:
         if len(subject) > rule["maximum_length"]:
             errors.append(f"subject is {len(subject)} characters (max {rule['maximum_length']}): `{subject}`")
@@ -77,6 +86,28 @@ def check_subjects(policy: dict, base: str) -> list[str]:
         elif not pattern.match(subject):
             errors.append(f"subject does not match `type(scope): description`: `{subject}`")
     return errors
+
+
+def check_authors(policy: dict, base: str) -> list[str]:
+    """Require the configured author email on all unmerged commits."""
+    expected = policy["commit_subject"].get("required_author_email")
+    if not expected:
+        return []
+    try:
+        authors = [
+            line
+            for line in git("log", "--format=%ae", f"{base}..HEAD").splitlines()
+            if line
+        ]
+    except RuntimeError:
+        authors = []
+    if not authors:
+        authors = [git("log", "-1", "--format=%ae").strip()]
+    return [
+        f"commit author `{author}` is not `{expected}`"
+        for author in authors
+        if author != expected
+    ]
 
 
 def check_generated(policy: dict) -> list[str]:
@@ -106,14 +137,20 @@ def check_generated(policy: dict) -> list[str]:
     return errors
 
 
-def check_inventory(policy: dict) -> list[str]:
+def check_inventory(policy: dict, branch: str) -> list[str]:
+    """Check inventory; the finished branch layout is required only on base."""
     rule = policy["inventory"]
     errors: list[str] = []
 
     branches = sorted(
         line for line in git("for-each-ref", "--format=%(refname:short)", "refs/heads").splitlines() if line
     )
-    if branches != sorted(rule["target_local_branches"]):
+    # The policy inventory describes the state after a change is merged. An
+    # active topic branch is expected during work, so equality is enforced
+    # only when checked out on the base branch (same rule as fieldbook).
+    if branch == policy["branch"]["base"] and branches != sorted(
+        rule["target_local_branches"]
+    ):
         errors.append(
             f"local branches are {branches}, target is {sorted(rule['target_local_branches'])}"
         )
@@ -128,6 +165,9 @@ def check_inventory(policy: dict) -> list[str]:
         ref.removeprefix("refs/remotes/")
         for ref in git("for-each-ref", "--format=%(refname)", "refs/remotes").splitlines()
         if ref and not ref.endswith("/HEAD")
+        # A topic branch's own remote-tracking ref is expected while work is in
+        # progress; only the base-branch inventory requires exact equality.
+        and not (branch != policy["branch"]["base"] and ref.endswith("/" + branch))
     )
     if tracking != sorted(rule["target_remote_tracking_branches"]):
         errors.append(
@@ -174,10 +214,18 @@ def main(argv: list[str] | None = None) -> int:
         return fail([str(error)])
 
     errors: list[str] = []
-    errors.extend(check_branch(policy, branch))
-    errors.extend(check_subjects(policy, base))
     errors.extend(check_generated(policy))
-    errors.extend(check_inventory(policy))
+    # GitHub Actions checks out a detached synthetic merge ref and fetches PR
+    # tracking refs. Branch naming, commit subjects, authors and ref inventory
+    # are developer-worktree invariants and are validated by `xtask assure`
+    # locally; applying them to a hosted PR checkout would produce false
+    # failures on a synthetic environment, not a repository defect.
+    hosted_ci = os.environ.get("GITHUB_ACTIONS") == "true"
+    if not hosted_ci:
+        errors.extend(check_branch(policy, branch))
+        errors.extend(check_subjects(policy, base))
+        errors.extend(check_authors(policy, base))
+        errors.extend(check_inventory(policy, branch))
     if args.strict:
         errors.extend(check_clean(policy))
 

@@ -947,7 +947,7 @@ fn repeated_confirm_with_different_amount_rebooks_exactly() -> TestResult {
 }
 
 /// NB-1: an unknown delivery is a blocking anomaly and must be reflected in
-/// the report status, not merely listed in `differences`.
+/// the report status, not listed in `differences`.
 #[test]
 fn unknown_delivery_produces_mismatch_status() -> TestResult {
     let oms_dir = tempfile::tempdir()?;

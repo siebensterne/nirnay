@@ -17,7 +17,9 @@ The SQLite event hash chain detects accidental or unauthorized edits only relati
 
 ## 1.1 Durable OMS conformance and recovery rules
 
-- Accepting an intent is idempotent for the exact same `client_order_id`, broker and canonical intent bytes. Reusing an ID with changed contract data is a conflict.
+- Accepting an intent is idempotent for the identical `client_order_id`,
+  broker and canonical intent bytes. Reusing an ID with changed contract data
+  is a conflict.
 - Intent, `OUTBOX_CREATED`, and the submit command are committed in one SQLite transaction.
 - A command claimed but not yet dispatched can be reclaimed after a lease expires. Once `DISPATCHING` is committed, no automatic resend is allowed after timeout or process loss.
 - Reconciliation must compare broker order book, order updates, executions/trades and local durable state. It must distinguish `not found` from a stale/incomplete broker snapshot.

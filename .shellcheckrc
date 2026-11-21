@@ -1,0 +1,17 @@
+# Google Shell Style Guide: bash only, shellcheck required for scripts.
+# Follow sourced libraries so SC1091 is not suppressed by omission.
+shell=bash
+external-sources=true
+# Resolve sourced libraries so shellcheck follows gate.sh instead of emitting
+# SC1091 and mis-reporting variables defined there as unused.
+source-path=scripts/assurance
+
+# Same curated optional check set as the sibling workspace. `enable=all` is
+# deliberately avoided: subjective checks conflict and make gates unstable.
+enable=add-default-case
+enable=avoid-negated-conditions
+enable=avoid-nullary-conditions
+enable=deprecate-which
+enable=quote-safe-variables
+enable=require-double-brackets
+enable=useless-use-of-cat

@@ -492,7 +492,7 @@ fn cancel_requires_the_bound_client_identity() -> TestResult {
     Ok(())
 }
 
-/// The simulator really delivers reversed/duplicated events; the adapter's
+/// The simulator delivers reversed/duplicated events; the adapter's
 /// poll normalizes them by declared sequence before the OMS sees them.
 #[test]
 fn broker_delivery_is_out_of_order_but_poll_normalizes_it() -> TestResult {

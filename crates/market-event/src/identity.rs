@@ -3,7 +3,7 @@
 //!
 //! Identity is derived only from stable inputs. Locally assigned, reset-prone
 //! metadata (capture counters, connection epochs, receive times and sequence
-//! counters) is deliberately excluded, so a reconnect or replay cannot change
+//! counters) is excluded by design, so a reconnect or replay cannot change
 //! an identity. This implements ADR-M1-005 D-005.1 and D-005.2.
 
 use std::fmt;

@@ -2,7 +2,7 @@
 
 //! Corporate financial facts with explicit provenance and point-in-time semantics.
 //!
-//! This crate is deliberately pure: it performs no filesystem, network, database,
+//! This crate is pure by design: it performs no filesystem, network, database,
 //! clock, broker or exchange operations. Untrusted wire records are deserialized
 //! into typed values and must pass [`FinancialFact::validate`] before use.
 //!
@@ -179,7 +179,7 @@ impl Cin {
 }
 
 /// XBRL expanded name: absolute namespace URI plus an ASCII NCName subset.
-/// Non-ASCII taxonomy local names are intentionally rejected in schema v1.
+/// Non-ASCII taxonomy local names are rejected in schema v1 by design.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExpandedName {

@@ -58,6 +58,8 @@ thiserror = "2"
 
 [workspace.lints.rust]
 unsafe_code = "deny"
+unsafe_op_in_unsafe_fn = "deny"
+unexpected_cfgs = "deny"
 
 [workspace.lints.clippy]
 all = "deny"
@@ -68,6 +70,8 @@ todo = "deny"
 unimplemented = "deny"
 dbg_macro = "deny"
 print_stdout = "deny"
+redundant_else = "deny"
+needless_raw_string_hashes = "deny"
 
 # Development and test builds keep source-line backtraces without emitting
 # full DWARF for every dependency. This is the dominant cost of the workspace

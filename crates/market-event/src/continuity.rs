@@ -1,6 +1,6 @@
 //! Sequence continuity with evidence-gated recovery.
 //!
-//! A stream never becomes clean again merely because a sequence looks normal.
+//! A stream never becomes clean again from a normal-looking sequence.
 //! Only an authoritative snapshot or reset evidence token may clear a gap.
 
 use serde::{

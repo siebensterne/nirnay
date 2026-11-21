@@ -1,7 +1,7 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 //! Real exchange source conformance gate.
 //!
-//! This test is deliberately ignored in the default suite. It certifies parser
+//! This test is ignored in the default suite by design. It certifies parser
 //! compatibility only when an operator supplies dated source files with
 //! provenance in `NIRNAY_SOURCE_FIXTURES_DIR`. Synthetic parser tests prove CSV
 //! grammar and rule behavior; they are not evidence of exchange compatibility.

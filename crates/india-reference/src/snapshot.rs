@@ -210,7 +210,7 @@ impl ReferenceSnapshot {
     }
 
     /// Semantic hash: exactly the four decision-relevant fields. Capture
-    /// provenance, reconciliation and `recorded_at` are deliberately excluded.
+    /// provenance, reconciliation and `recorded_at` are excluded by design.
     pub fn snapshot_hash(&self) -> Result<String, SnapshotError> {
         let value = json!({
             "valid_at": self.valid_at.to_string(),

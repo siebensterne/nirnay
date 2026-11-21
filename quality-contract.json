@@ -1,0 +1,105 @@
+{
+  "schema": 1,
+  "purpose": "Neutral, shared quality contract for both quant workspaces. Every listed setting is binding in each repository's own gate; a drift in any listed file fails the standards check.",
+  "tools": {
+    "ruff": "0.17.5",
+    "pyink": "26.5.1",
+    "shellcheck": "0.11.0.1",
+    "rust": "1.99.1",
+    "clang_format": "21.1.8"
+  },
+  "shared_files": [
+    ".clang-format",
+    ".editorconfig",
+    ".gitattributes",
+    ".gitignore",
+    ".shellcheckrc",
+    "ruff.toml",
+    "quality-contract.json",
+    "scripts/check_prose_unified.py"
+  ],
+  "ruff": {
+    "config": "ruff.toml",
+    "required_version": "==0.17.5",
+    "force_exclude": true,
+    "fix": false,
+    "unsafe_fixes": false,
+    "dummy_variable_rgx": "^_$",
+    "future_annotations": true,
+    "pydocstyle_convention": "google",
+    "rule_families": [
+      "E",
+      "F",
+      "W",
+      "I",
+      "N",
+      "D",
+      "UP",
+      "B",
+      "SIM",
+      "C4",
+      "BLE",
+      "PIE",
+      "RET",
+      "RUF",
+      "ANN"
+    ]
+  },
+  "shellcheck": {
+    "config": ".shellcheckrc",
+    "shell": "bash",
+    "external_sources": true,
+    "optional_checks": [
+      "add-default-case",
+      "avoid-negated-conditions",
+      "avoid-nullary-conditions",
+      "deprecate-which",
+      "quote-safe-variables",
+      "require-double-brackets",
+      "useless-use-of-cat"
+    ]
+  },
+  "editorconfig": {
+    "root": true,
+    "charset": "utf-8",
+    "end_of_line": "lf",
+    "insert_final_newline": true,
+    "trim_trailing_whitespace": true
+  },
+  "rust": {
+    "denied_rust_lints": [
+      "unsafe_code",
+      "unsafe_op_in_unsafe_fn",
+      "unexpected_cfgs"
+    ],
+    "denied_clippy_lints": [
+      "unwrap_used",
+      "expect_used",
+      "panic",
+      "todo",
+      "unimplemented",
+      "dbg_macro",
+      "print_stdout",
+      "redundant_else",
+      "needless_raw_string_hashes"
+    ]
+  },
+  "xtask": {
+    "crate": "xtask/Cargo.toml",
+    "required_tasks": [
+      "style",
+      "fmt",
+      "lint",
+      "test",
+      "docs",
+      "check",
+      "ci",
+      "list"
+    ],
+    "typed_argv": true,
+    "generated_help": true,
+    "self_tests": true,
+    "fail_closed": true,
+    "locked_alias": true
+  }
+}

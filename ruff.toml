@@ -1,0 +1,69 @@
+# Ruff policy for Nirnay, shared with the sibling fieldbook workspace.
+#
+# This file is the single source of truth for Ruff. `make python-format-check`
+# runs the advisory whole-tree check; `scripts/check_ruff_added_lines.py` makes
+# the same policy binding on added Python lines in `make style` and CI, so the
+# existing corpus can be migrated without exempting new code.
+#
+# Zero warning-level suppressions: every selected rule is a failure on added
+# lines. The tests-only E402 exemption is the one documented legacy exception
+# and is kept in lockstep with the added-lines Python checker.
+
+# Deterministic contract shared with the sibling workspace: one pinned Ruff
+# version everywhere, exclusions honoured even for explicit paths, and gates
+# that never mutate code.
+required-version = "==0.17.5"
+force-exclude = true
+fix = false
+unsafe-fixes = false
+
+line-length = 100
+target-version = "py312"
+src = [
+  "research/python/src",
+  "apps",
+  "scripts",
+  "strategies",
+  "verification",
+]
+extend-exclude = [
+  "target",
+  "build",
+  "dist",
+  ".local",
+  ".venv",
+  ".pytest_cache",
+  "__pycache__",
+  "data",
+]
+
+[lint]
+# Only `_` is a dummy binding; postponed annotations are mandatory.
+dummy-variable-rgx = "^_$"
+future-annotations = true
+select = [
+  "E",   # pycodestyle errors
+  "F",   # pyflakes
+  "W",   # pycodestyle warnings
+  "I",   # isort (Google section/import ordering)
+  "N",   # pep8-naming (Google naming conventions)
+  "D",   # pydocstyle with the Google convention below
+  "UP",  # pyupgrade
+  "B",   # flake8-bugbear
+  "SIM", # flake8-simplify
+  "C4",  # flake8-comprehensions
+  "BLE", # flake8-blind-except
+  "PIE", # flake8-pie
+  "RET", # flake8-return
+  "RUF", # ruff-specific rules
+  "ANN", # flake8-annotations
+]
+
+[lint.pydocstyle]
+convention = "google"
+
+[lint.per-file-ignores]
+"**/tests/**" = ["E402"]
+# Same documented exception as the sibling workspace: matcher vocabulary is
+# data, not prose, and is reviewed as data by check_source_style.py.
+"scripts/assurance/english_audit.py" = ["E501"]

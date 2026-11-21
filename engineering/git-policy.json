@@ -15,8 +15,8 @@
     "automatic_remote_branch_deletion": false
   },
   "history": {
-    "merge_strategy": "squash",
-    "require_linear_main": true,
+    "merge_strategy": "merge_commit",
+    "require_linear_main": false,
     "published_commit_rewrite": false,
     "forbidden_operations": [
       "rebase published commits",
@@ -26,6 +26,18 @@
     "grandfathered_merge_commits": [
       "e19a85c",
       "20b4a01"
+    ],
+    "direct_main_commits": false,
+    "pull_request_required": true,
+    "squash_merge": false,
+    "rebase_merge": false,
+    "force_push": false,
+    "merge_conditions": [
+      "a pull request is required for every change to main",
+      "CI status checks must pass on the merged head",
+      "no force-pushes to main",
+      "no rewriting published commits",
+      "only reviewed PR merge commits may enter main"
     ]
   },
   "working_tree": {
@@ -77,12 +89,6 @@
     "forbidden_suffixes": [
       ".pyc",
       ".pyo"
-    ],
-    "exceptions": [
-      {
-        "path": ".local/extras/evidence/conformance_report.json",
-        "reason": "Archived predecessor gate report, retained as evidence that the original conformance gate did not pass. It is not a build output of this repository and is not regenerated; the generator writes to target/evidence/."
-      }
     ]
   },
   "automation": {
@@ -95,6 +101,7 @@
   },
   "commit_subject": {
     "pattern": "^(feat|fix|docs|test|refactor|perf|build|ci|chore|revert)(\\([a-z0-9][a-z0-9._/-]*\\))?: .{1,64}$",
+    "required_author_email": "22kartikjangid@gmail.com",
     "maximum_length": 72,
     "forbidden_exact_subjects": [
       "fix",
@@ -104,5 +111,26 @@
       "final fix"
     ],
     "validate_unmerged_topic_commits_against": "main"
+  },
+  "canonical_repository": "siebensterne/nirnay",
+  "pr_review": {
+    "self_review_checklist_required": true,
+    "ci_evidence_required": true,
+    "required_approving_reviews": 0,
+    "reason": "single-developer repository: explicit self-review plus independent CI, not an unsatisfiable reviewer requirement"
+  },
+  "milestone_tags": {
+    "after_verified_main_merge_only": true
+  },
+  "github_protection_audit": {
+    "restrict_direct_main_pushes": true,
+    "require_pull_request": true,
+    "require_status_checks": true,
+    "require_latest_checks": true,
+    "prevent_force_pushes": true,
+    "prevent_main_deletion": true,
+    "allowed_merge_method": "merge_commit",
+    "require_linear_history": false,
+    "require_conversation_resolution": true
   }
 }

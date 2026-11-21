@@ -14,7 +14,7 @@ and `scripts/check_source_style.py` for every other language, and is wired into
   import layout with a trailing empty comment). No exceptions.
 - **Python**: Google Python Style Guide. This policy keeps its import, exception,
   semicolon, backslash-continuation and mutable-default rules. The repository
-  uses a 100-column limit (`.editorconfig`, `.ruff.toml`) rather than Google's
+  uses a 100-column limit (`.editorconfig`, `ruff.toml`) rather than Google's
   80; the 100-column convention is already established here.
 - **C/C++**: Google C++ Style Guide, expressed by the pinned `.clang-format`
   (LLVM base, two-space indent, 100 columns, `nullptr`, regioned includes).
@@ -56,7 +56,7 @@ enforced by code and tests, not by a formatter.
 | Language | Formatter/linter | Added-lines gate | Where it runs |
 |---|---|---|---|
 | Rust | `cargo fmt`, Clippy `-D warnings` | `check_rust_style.py` | `make check`, CI |
-| Python | `ruff` (advisory, see below) | `check_source_style.py` | `make check`, CI |
+| Python | `ruff` (whole-tree advisory, see below) | `check_source_style.py`, `check_ruff_added_lines.py` | `make check`, CI |
 | C/C++ | pinned `clang-format==21.1.8` | `check_source_style.py` | `make check`, CI |
 | Shell | none available | `check_source_style.py` | `make check`, CI |
 | Makefile | none available | `check_source_style.py` | `make check`, CI |
@@ -72,12 +72,14 @@ python3 scripts/check_source_style.py --self-test
 python3 scripts/check_style_gate.py --self-test
 ```
 
-`ruff` is configured in `.ruff.toml` and available via `make python-format-check`,
-but is **not binding** yet: roughly 59 existing files predate it and would be
-reformatted (measured with ruff 0.16.5; the exact count is version-dependent).
-A dedicated PR must reformat the corpus before whole-tree ruff checks can join
-`make check`. Until then the dependency-free added-lines gate is the
-authoritative Python style check. The new checkers themselves are ruff-formatted.
+`ruff` is configured in `ruff.toml` and available via `make python-format-check`,
+but whole-tree checks are **not binding** yet: roughly 59 existing files predate
+it and would be reformatted (measured with ruff 0.16.5; the exact count is
+version-dependent). A dedicated PR must reformat the corpus before whole-tree
+ruff checks can join `make check`. New Python lines are already binding: the
+same policy is enforced by `scripts/check_ruff_added_lines.py` in `make style`
+and CI, so new code cannot add lint debt. The checkers themselves are
+ruff-formatted.
 
 ## Hardening the gate itself
 

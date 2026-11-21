@@ -2,7 +2,7 @@
 //!
 //! The CSV is the same header-prefixed export consumed by
 //! `analytics/kdb/mbp_metrics.q`. Fields are primitive scalars; quoting and
-//! embedded commas are deliberately outside the contract.
+//! embedded commas sit outside the contract by design.
 
 use std::str::Split;
 
