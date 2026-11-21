@@ -72,9 +72,10 @@ class CandidateScore:
     validation_sharpe: float
     validation_p_value: float
     validation_holm_p: float
-    holdout_net_mean: float
-    holdout_sharpe: float
-    holdout_observations: int
+    holdout_net_mean: float | None
+    holdout_sharpe: float | None
+    holdout_observations: int | None
+    holdout_evaluation: str
 
 
 def _ema(values: Sequence[float], span: int) -> list[float]:
@@ -271,12 +272,21 @@ def search_alpha(bars: Sequence[Bar], *, costs: AlphaCosts | None = None,
     passes = hold_mean > minimum_net_expectancy
     if require_statistical_significance:
         passes = passes and adjusted[selected_index] < 0.05 and hold_p < 0.05
-    scores = [CandidateScore(config=x[0], train_net_mean=x[1], validation_net_mean=x[2],
-                             validation_sharpe=_score(x[4], periods_per_year)[1], validation_p_value=x[3],
-                             validation_holm_p=adjusted[i], holdout_net_mean=hold_mean if i == selected_index else 0.0,
-                             holdout_sharpe=hold_sharpe if i == selected_index else 0.0,
-                             holdout_observations=len(holdout_returns) if i == selected_index else 0)
-              for i, x in enumerate(prelim)]
+    scores = []
+    for index, item in enumerate(prelim):
+        chosen = index == selected_index
+        scores.append(CandidateScore(
+            config=item[0],
+            train_net_mean=item[1],
+            validation_net_mean=item[2],
+            validation_sharpe=_score(item[4], periods_per_year)[1],
+            validation_p_value=item[3],
+            validation_holm_p=adjusted[index],
+            holdout_net_mean=hold_mean if chosen else None,
+            holdout_sharpe=hold_sharpe if chosen else None,
+            holdout_observations=len(holdout_returns) if chosen else None,
+            holdout_evaluation="evaluated" if chosen else "not_evaluated",
+        ))
     dataset_bytes = "\n".join(f"{b.timestamp_ns},{float(b.close):.17g}" for b in bars).encode()
     # Overfitting diagnostics use only the development partition (train + validation).
     # The final holdout is never included in candidate-family/CSCV diagnostics.

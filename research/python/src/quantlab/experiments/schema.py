@@ -2,9 +2,17 @@
 
 The original eleven-field contract is preserved verbatim so existing callers
 remain valid. The registry requires a larger declaration set: immutable dataset
-lineage, a declared search space, complete trial accounting, disjoint validation
-and holdout periods, cost/execution assumptions and terminal results. All fields
-are encoded with strict canonical JSON and validated before any digest is taken.
+lineage, bar cadence and annualisation declarations, a declared search space,
+complete trial accounting, disjoint validation and holdout periods,
+cost/execution assumptions and terminal results. All fields are encoded with
+strict canonical JSON and validated before any digest is taken.
+
+``dataset_point_in_time`` is a narrow boolean. It never certifies universe or
+corporate-action correctness by itself: the separate ``point_in_time_basis``
+declaration states what it certifies. ``chronological_only`` certifies ordered
+timestamps only; ``universe_and_corporate_actions`` additionally requires dated
+universe membership and corporate-action revision lineage. See
+``engineering/research/dataset-acceptance-contract.md``.
 """
 from __future__ import annotations
 
@@ -52,6 +60,14 @@ _DECLARATION_FIELDS = {
     "holdout_key",
     "cost_model",
     "execution_assumptions",
+    "bar_kind",
+    "bar_interval_ns",
+    "timestamp_semantics",
+    "calendar_id",
+    "session_definition",
+    "annualization_basis",
+    "periods_per_year",
+    "point_in_time_basis",
 }
 _RESULT_FIELDS = {"results", "diagnostics", "result", "validation"}
 _OPTIONAL_FIELDS = {"holdout_use", "replicates", "record_sha256",
@@ -70,6 +86,31 @@ _LINEAGE_LIST_FIELDS = (
 _PERIOD_KEYS = {
     frozenset({"start_index", "end_index"}),
     frozenset({"start_ns", "end_ns"}),
+}
+
+_BAR_KINDS = frozenset({"daily", "minute", "tick", "event", "other"})
+_FIXED_INTERVAL_KINDS = frozenset({"daily", "minute"})
+_NON_FIXED_INTERVAL_KINDS = frozenset({"tick", "event"})
+_TIMESTAMP_SEMANTICS = frozenset({"bar_open", "bar_close", "observation_time"})
+_POINT_IN_TIME_BASES = frozenset(
+    {"none", "chronological_only", "universe_and_corporate_actions"}
+)
+_EXECUTION_LATENCY_MODELS = frozenset(
+    {"not_modelled", "bar_close_assumed", "event_level_modelled"}
+)
+
+# Explicit state for bar kinds without a fixed sampling interval. It is not a
+# substitute for a positive integer on fixed-sampling daily/minute bars.
+NOT_APPLICABLE_INTERVAL = "not_applicable"
+
+# An explicit declared basis is the only way to choose an arbitrary positive
+# annualisation factor; named bases carry a fixed period count and bar family.
+SYNTHETIC_ANNUALIZATION_BASIS = "synthetic_declared"
+_NAMED_ANNUALIZATION_BASES: dict[str, tuple[str, float]] = {
+    "daily_252": ("daily", 252.0),
+    "daily_365": ("daily", 365.0),
+    "minute_nse_cash_94500": ("minute", 94_500.0),
+    "minute_continuous_525600": ("minute", 525_600.0),
 }
 
 
@@ -147,6 +188,105 @@ def _require_sha256(value: Any, field: str) -> None:
 def _require_nonempty_string(value: Any, field: str) -> None:
     if not isinstance(value, str) or not value.strip():
         raise ExperimentError(f"{field} must be a non-empty string")
+
+
+def _require_versioned_id(value: object, field: str) -> None:
+    """Require a non-empty ``namespace:version`` identifier without whitespace."""
+    _require_nonempty_string(value, field)
+    parts = value.split(":")
+    if len(parts) < 2 or any(not part or any(char.isspace() for char in part) for part in parts):
+        raise ExperimentError(f"{field} must be a versioned namespace:id string")
+
+
+def _require_positive_int(value: object, field: str) -> None:
+    if type(value) is not int or value <= 0:
+        raise ExperimentError(f"{field} must be a positive integer")
+
+
+def _require_positive_number(value: object, field: str) -> None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ExperimentError(f"{field} must be a positive finite number")
+    if not math.isfinite(float(value)) or value <= 0:
+        raise ExperimentError(f"{field} must be a positive finite number")
+
+
+def _validate_cadence_and_annualization(record: dict[str, Any]) -> None:
+    """Bind bar kind, timestamp semantics, calendar and annualisation in the record."""
+    bar_kind = record["bar_kind"]
+    if bar_kind not in _BAR_KINDS:
+        raise ExperimentError("unknown bar_kind")
+
+    interval = record["bar_interval_ns"]
+    if bar_kind in _FIXED_INTERVAL_KINDS:
+        _require_positive_int(interval, "bar_interval_ns")
+    elif bar_kind in _NON_FIXED_INTERVAL_KINDS:
+        if interval != NOT_APPLICABLE_INTERVAL:
+            raise ExperimentError("tick and event bars require an explicit not_applicable interval")
+    elif interval != NOT_APPLICABLE_INTERVAL:
+        _require_positive_int(interval, "bar_interval_ns")
+
+    if record["timestamp_semantics"] not in _TIMESTAMP_SEMANTICS:
+        raise ExperimentError("unknown timestamp_semantics")
+    _require_versioned_id(record["calendar_id"], "calendar_id")
+    _require_nonempty_string(record["session_definition"], "session_definition")
+
+    basis = record["annualization_basis"]
+    _require_nonempty_string(basis, "annualization_basis")
+    periods = record["periods_per_year"]
+    _require_positive_number(periods, "periods_per_year")
+    if basis == SYNTHETIC_ANNUALIZATION_BASIS:
+        return
+    declared = _NAMED_ANNUALIZATION_BASES.get(basis)
+    if declared is None:
+        raise ExperimentError(
+            "unknown annualization_basis; use synthetic_declared for explicit periods"
+        )
+    expected_kind, expected_periods = declared
+    if bar_kind != expected_kind:
+        raise ExperimentError(f"annualization_basis {basis} requires {expected_kind} bars")
+    if float(periods) != expected_periods:
+        raise ExperimentError(f"periods_per_year differs from the declared basis {basis}")
+
+
+def _validate_point_in_time_declaration(record: dict[str, Any]) -> None:
+    """State exactly what the boolean ``dataset_point_in_time`` certifies."""
+    basis = record["point_in_time_basis"]
+    if basis not in _POINT_IN_TIME_BASES:
+        raise ExperimentError("unknown point_in_time_basis")
+    declared = record["dataset_point_in_time"]
+    if basis == "none" and declared is True:
+        raise ExperimentError("point_in_time_basis none cannot certify point-in-time data")
+    if basis == "universe_and_corporate_actions":
+        if declared is not True:
+            raise ExperimentError("full point-in-time basis requires dataset_point_in_time")
+        if not record.get("universe_version"):
+            raise ExperimentError("full point-in-time basis requires universe_version")
+        lineage = record["dataset_lineage"]
+        for field in ("listing_source_hashes", "corporate_action_source_hashes"):
+            if not lineage[field]:
+                raise ExperimentError(f"full point-in-time basis requires {field}")
+
+
+def _validate_execution_assumptions(value: object) -> None:
+    """Require an explicit latency model; refuse bare numeric latency claims."""
+    if not isinstance(value, dict) or not value:
+        raise ExperimentError("execution_assumptions must be a non-empty object")
+    model = value.get("execution_latency_model")
+    if model not in _EXECUTION_LATENCY_MODELS:
+        raise ExperimentError("execution_latency_model must be an explicit declared state")
+    numeric_latencies = [
+        key for key, item in value.items()
+        if key.endswith("_latency_ns") and isinstance(item, (int, float))
+        and not isinstance(item, bool)
+    ]
+    if numeric_latencies and model != "event_level_modelled":
+        raise ExperimentError(
+            f"numeric latency {numeric_latencies[0]} requires event_level_modelled"
+        )
+    if model != "event_level_modelled" and "order_latency_ns" in value:
+        raise ExperimentError(
+            "order_latency_ns requires execution_latency_model event_level_modelled"
+        )
 
 
 def holdout_key(dataset_version: str, universe_id: str, feature_version: str,
@@ -412,8 +552,9 @@ def validate_registered_experiment(record: dict[str, Any]) -> None:
         raise ExperimentError("cost_model.assumptions must be an object")
     if content_hash(cost_model["assumptions"]) != cost_model["cost_model_sha256"]:
         raise ExperimentError("cost_model digest mismatch")
-    if not isinstance(record["execution_assumptions"], dict) or not record["execution_assumptions"]:
-        raise ExperimentError("execution_assumptions must be a non-empty object")
+    _validate_execution_assumptions(record["execution_assumptions"])
+    _validate_cadence_and_annualization(record)
+    _validate_point_in_time_declaration(record)
 
     holdout_use = record.get("holdout_use", "selection")
     if holdout_use not in _VALID_HOLDOUT_USES:

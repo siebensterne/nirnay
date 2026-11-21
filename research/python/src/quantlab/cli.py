@@ -826,8 +826,9 @@ def build_parser() -> argparse.ArgumentParser:
                        help="experiment registry containing a prior registered record")
     alpha.add_argument("--experiment-id", required=True,
                        help="pre-registered experiment id; unregistered runs are refused")
-    alpha.add_argument("--periods-per-year", type=float, default=252.0,
-                       help="annualisation factor matching bar cadence; not inferred from timestamps")
+    alpha.add_argument("--periods-per-year", type=float, default=None,
+                       help="optional assertion of the registered periods_per_year; "
+                            "the registered value is always used")
     alpha.add_argument("--brokerage-bps", type=float)
     alpha.add_argument("--exchange-regulatory-bps", type=float)
     alpha.add_argument("--taxes-bps", type=float)
