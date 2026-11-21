@@ -5,7 +5,7 @@
 **Release status:** research/paper engineering candidate. This repository is not a certified broker-connected trading system, not a SEBI/exchange-approved algo product, and not evidence of profitable alpha. Live order routing is hard-disabled. Every capability statement below distinguishes code present from external verification still required.
 
 <!-- CURRENT-STATE
-code_commit: d1c783fb54edf54cd51fe477f23841bb177b2af8
+code_commit: a34c301631778ff0ad0c304ff4fa8520f5cc4381
 verified_on: 2026-11-21
 ci_run: 44911669537
 scope: make check + xtask ci/assure + CI 44911669537 on 8aecbdc (12/12)
@@ -389,6 +389,7 @@ once published; a new run adds a new dated file instead of rewriting history.
 | Canonical | `engineering/verification-policy.md` | claim-state vocabulary |
 | Canonical | `engineering/q-kdb-style.md` | q / kdb+ (KDB-X) style rules and their authoritative sources |
 | Canonical | `engineering/research/compute-and-validation.md` | local opt-in research jobs, validation reports and owner-gated compute gaps |
+| Canonical | `engineering/research/dataset-acceptance-contract.md` | evidence required before a licensed dataset is accepted for research |
 | Dated evidence | `BUILD-RESULTS.md` | owner-maintained bundle record; do not edit |
 | Dated evidence | `evidence/VERIFICATION-2026-11-17.md` | executed checks and boundaries |
 | Dated evidence | `evidence/UPGRADE-VERIFICATION-2026-11-13.md` | implementation inventory and upgrade gates |
@@ -406,6 +407,7 @@ once published; a new run adds a new dated file instead of rewriting history.
 | Dated evidence | `evidence/PERFORMANCE-2026-11-21-PINNED.md` | pinned Python 3.12 benchmark re-run with higher-repeat tail statistics |
 | Dated evidence | `evidence/PERFORMANCE-2026-11-21.md` | local synthetic benchmark observations on `ec0b216`, with toolchain, hardware, commands, distributions, hashes and scope limits |
 | Dated evidence | `evidence/RISK-CONTROLS-RECOVERY-DRILL-2026-11-21.md` | typed risk-control fixtures, permit binding and in-process recovery drill |
+| Dated evidence | `evidence/M4-RESEARCH-EVIDENCE-2026-11-21.md` | first synthetic pre-registered experiment and registry evidence |
 
 The current-state block above names the verified commit, date, CI run and
 scope. Update it in the PR that changes the verified baseline. Do not add a

@@ -1,0 +1,137 @@
+{
+  "attempted_configs": [],
+  "code_revision": "0a726a6b4b2a2b78220a68fffcf5c0f737173235",
+  "config": {
+    "cadence": "daily-bars",
+    "source": "synthetic"
+  },
+  "cost_model": {
+    "assumptions": {
+      "brokerage_bps": 2.0,
+      "exchange_and_regulatory_bps": 0.5,
+      "market_impact_bps": 1.0,
+      "slippage_bps": 1.0,
+      "spread_bps": 2.0,
+      "taxes_bps": 0.5
+    },
+    "cost_model_sha256": "31880e6b263bd8a4520cdc39dac63c651623a1b3292a6d09f511ed1016d19318"
+  },
+  "dataset_id": "nse-cash-synthetic-fixture",
+  "dataset_lineage": {
+    "code_digest": "155cdc42090d49de3ca7d5031dd3be1c9292a7829b17ef39077e740062b877cf",
+    "config_digest": "0bd1755dacf6c4440ef3ef5cd8473c71dbb254e597c1a9fc92c2487c7341705a",
+    "corporate_action_source_hashes": [
+      "0348c1437ad9930ea6d6d143b25b6bf3cd2ede9664ee3c58adbae2cb5b539023"
+    ],
+    "data_sha256": "0348c1437ad9930ea6d6d143b25b6bf3cd2ede9664ee3c58adbae2cb5b539023",
+    "input_sha256": "0348c1437ad9930ea6d6d143b25b6bf3cd2ede9664ee3c58adbae2cb5b539023",
+    "listing_source_hashes": [
+      "0348c1437ad9930ea6d6d143b25b6bf3cd2ede9664ee3c58adbae2cb5b539023"
+    ],
+    "source_event_hashes": [
+      "0348c1437ad9930ea6d6d143b25b6bf3cd2ede9664ee3c58adbae2cb5b539023"
+    ],
+    "source_frame_hashes": [
+      "0348c1437ad9930ea6d6d143b25b6bf3cd2ede9664ee3c58adbae2cb5b539023"
+    ]
+  },
+  "dataset_manifest_sha256": "0348c1437ad9930ea6d6d143b25b6bf3cd2ede9664ee3c58adbae2cb5b539023",
+  "dataset_point_in_time": true,
+  "dataset_ref": "synthetic:alpha-bars.synthetic.csv",
+  "dataset_version": "nse-cash-synthetic-fixture:0348c1437ad9930e",
+  "economic_rationale": "Trend persistence is a candidate effect; it is not established by this record.",
+  "execution_assumptions": {
+    "data_rights": "synthetic_only_not_licensed_market_data",
+    "liquidity_model": "not_calibrated",
+    "order_latency_ns": 1,
+    "queue_model": "not_modelled_close_based_screen"
+  },
+  "experiment_id": "EXP-M4-0001",
+  "falsification_rule": "Reject unless the untouched holdout net mean is positive after declared costs; no holdout reuse after inspection.",
+  "feature_version": "close-only-v1",
+  "holdout_key": "5fc7e760aec22f5c7162e827577b03e55eea4fc812a2641836cbb434ef7d94a7",
+  "holdout_period": {
+    "end_index": 420,
+    "start_index": 337
+  },
+  "hypothesis": "A short-horizon momentum screen on synthetic daily bars may earn positive net returns after explicit costs.",
+  "registered_at_utc": "2026-11-21T15:21:48.587073Z",
+  "search_space": {
+    "candidate_configs": [
+      {
+        "family": "momentum",
+        "fast": 3,
+        "lookback": 3,
+        "slow": 10,
+        "threshold_bps": 0.0
+      },
+      {
+        "family": "momentum",
+        "fast": 3,
+        "lookback": 3,
+        "slow": 10,
+        "threshold_bps": 5.0
+      },
+      {
+        "family": "momentum",
+        "fast": 3,
+        "lookback": 3,
+        "slow": 10,
+        "threshold_bps": 10.0
+      },
+      {
+        "family": "momentum",
+        "fast": 3,
+        "lookback": 5,
+        "slow": 10,
+        "threshold_bps": 0.0
+      }
+    ],
+    "configs": [
+      {
+        "family": "momentum",
+        "fast": 3,
+        "lookback": 3,
+        "slow": 10,
+        "threshold_bps": 0.0
+      },
+      {
+        "family": "momentum",
+        "fast": 3,
+        "lookback": 3,
+        "slow": 10,
+        "threshold_bps": 5.0
+      },
+      {
+        "family": "momentum",
+        "fast": 3,
+        "lookback": 3,
+        "slow": 10,
+        "threshold_bps": 10.0
+      },
+      {
+        "family": "momentum",
+        "fast": 3,
+        "lookback": 5,
+        "slow": 10,
+        "threshold_bps": 0.0
+      }
+    ],
+    "dataset_sha256": "bb2fe0232de16fdef7b83bedec0a1b907f02c99048b2a305dde931d434e27c66",
+    "embargo_observations": 1,
+    "expected_trials": 4,
+    "family": "momentum",
+    "search_space_sha256": "37bf1e5ca1dc52200847f7e051db9786642dfaa1a25f188923e00908370223e4",
+    "train_period": {
+      "end_index": 252,
+      "start_index": 1
+    }
+  },
+  "status": "registered",
+  "strategy_code_hash": "6a73623c83cc2c6f9241ab955cac957468e5a6f292ceb006bbd93437e4cdc4d8",
+  "universe_id": "synthetic-single-instrument",
+  "validation_period": {
+    "end_index": 336,
+    "start_index": 253
+  }
+}
