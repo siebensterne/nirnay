@@ -41,7 +41,7 @@ place and the holdout was not used for selection.
 | Result | Value |
 |---|---|
 | Report SHA-256 | `2170dcf955b09b5b267634fd63fc590d43f1f3c066fb51bc321fce5bf14fb04f` |
-| Terminal record hash | `0c8a295987706225cc1599647f32ef6e86787b6d2da93bb328ebd16e28531288` |
+| Terminal record hash | `0c8a295987706225cc1599647f32ef6e86787b6d2da93bb328ebd16e28531288` (committed in `evidence/m4/terminal-receipt.json`) |
 | Selected configuration | momentum lookback 3, threshold 0 bps |
 | Validation net mean | 0.0004373 (return units of the synthetic bars); Holm p 0.0163735 |
 | Untouched holdout net mean | 0.0002292 |
