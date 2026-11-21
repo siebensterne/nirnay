@@ -5,10 +5,10 @@
 **Release status:** research/paper engineering candidate. This repository is not a certified broker-connected trading system, not a SEBI/exchange-approved algo product, and not evidence of profitable alpha. Live order routing is hard-disabled. Every capability statement below distinguishes code present from external verification still required.
 
 <!-- CURRENT-STATE
-code_commit: 012dbe3
+code_commit: 3b9095a
 verified_on: 2026-11-21
 ci_run: none
-scope: local make check on feat/quality-hardening; hardening commits 012dbe3 and af141cb
+scope: local make check on feat/quality-hardening; hardening commits af141cb through 3b9095a
 -->
 
 ## Implemented scope
