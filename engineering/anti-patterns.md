@@ -112,7 +112,9 @@ This document supplements and does not replace:
 - `engineering/git-policy.json`
 - `engineering/operating-envelope.json`
 - `engineering/reference-projects.json`
-- `.editorconfig`, `.gitattributes`, `.clang-format`, `.rustfmt.toml`, `.clippy.toml`, `.pylintrc`, `rust-toolchain.toml`, `pyproject.toml`, `deny.toml`
+- `.editorconfig`, `.gitattributes`, `.clang-format`, `.rustfmt.toml`,
+  `clippy.toml`, `.pylintrc`, `rust-toolchain.toml`, `pyproject.toml`,
+  `deny.toml`
 - `.github/workflows/`
 
 The pinned toolchain and existing formatter/linter files remain the authority for mechanical style. This guide must not create a competing formatter configuration.

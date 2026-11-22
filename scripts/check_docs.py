@@ -73,7 +73,7 @@ CODE_SUFFIXES = (
     ".hpp", ".toml", ".json", ".yml", ".yaml", ".proto",
 )
 CODE_NAMES = frozenset(
-    {"Makefile", "Cargo.lock", "Cargo.toml", ".editorconfig", ".clippy.toml",
+    {"Makefile", "Cargo.lock", "Cargo.toml", ".editorconfig", "clippy.toml",
      ".rustfmt.toml", ".ruff.toml", ".gitattributes"}
 )
 PROSE_DIRS = ("evidence/", "docs/")

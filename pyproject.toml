@@ -4,6 +4,6 @@
 # Style Guide. Ruff's lint policy lives in ruff.toml; both tools are pinned in
 # requirements-dev.txt and invoked by `cargo xtask style`.
 [tool.pyink]
-line-length = 80
+line-length = 100
 pyink-indentation = 4
 pyink-use-majority-quotes = true
