@@ -308,6 +308,7 @@ def test_terminal_requires_result_validation(tmp_path):
         ExperimentRegistry(tmp_path / "registry.sqlite3").append_result(record)
 
 
+@pytest.mark.market_shaped_fixture
 def test_all_attempted_configs_persisted_including_losers(tmp_path):
     registry = ExperimentRegistry(tmp_path / "registry.sqlite3")
     record = _registered(counts=25)
@@ -331,6 +332,7 @@ def test_all_attempted_configs_persisted_including_losers(tmp_path):
     assert receipt.status in {"completed", "rejected"}
 
 
+@pytest.mark.market_shaped_fixture
 def test_dsr_trial_count_equals_registry_attempts(tmp_path):
     registry = ExperimentRegistry(tmp_path / "registry.sqlite3")
     record = _registered()
@@ -342,6 +344,7 @@ def test_dsr_trial_count_equals_registry_attempts(tmp_path):
         "deflated_sharpe_validation_only"]["trials"] == attempts
 
 
+@pytest.mark.market_shaped_fixture
 def test_report_binds_dataset_manifest_digest(tmp_path):
     from quantlab.cli import _load_reference_data as load_references
     from quantlab.experiments.reproducibility import bind_published_dataset
@@ -409,6 +412,7 @@ def test_signed_head_verifies_and_tampered_head_fails(tmp_path):
         bad.verify_integrity(trusted_public_keys=trusted)
 
 
+@pytest.mark.market_shaped_fixture
 def test_cscv_diagnostics_never_use_final_holdout(tmp_path):
     registry = ExperimentRegistry(tmp_path / "registry.sqlite3")
     registry.register(_registered())
@@ -426,6 +430,7 @@ def test_rejected_experiment_is_retained(tmp_path):
     assert registry.record("EXP-0001", terminal_only=True).status == "rejected"
 
 
+@pytest.mark.market_shaped_fixture
 def test_cli_alpha_search_requires_registered_experiment(tmp_path):
     csv_path = tmp_path / "bars.csv"
     bars = _bars()
@@ -454,6 +459,7 @@ def test_cli_alpha_search_requires_registered_experiment(tmp_path):
     assert (tmp_path / "report.json").exists()
 
 
+@pytest.mark.market_shaped_fixture
 def test_minute_registration_runs_with_declared_annualisation(tmp_path: Path) -> None:
     """A new minute fixture runs under its own registration and declared factor."""
     registered = _registered("EXP-CADENCE-0001")
@@ -485,6 +491,7 @@ def test_minute_registration_runs_with_declared_annualisation(tmp_path: Path) ->
             assert score["holdout_net_mean"] is None
 
 
+@pytest.mark.market_shaped_fixture
 def test_daily_registration_rejects_minute_timestamps(tmp_path: Path) -> None:
     """A daily registration never accepts minute-spaced observations."""
     registered = _registered("EXP-CADENCE-DAILY")
@@ -504,6 +511,7 @@ def test_daily_registration_rejects_minute_timestamps(tmp_path: Path) -> None:
         validate_bar_cadence(registered, timestamps)
 
 
+@pytest.mark.market_shaped_fixture
 def test_minute_registration_rejects_incompatible_interval() -> None:
     """A minute registration rejects intervals that disagree with the bars."""
     registered = _registered()
@@ -537,6 +545,7 @@ def test_annualisation_factor_conflicts_with_registered_basis() -> None:
         validate_registered_experiment(registered)
 
 
+@pytest.mark.market_shaped_fixture
 def test_cli_periods_per_year_cannot_override_registration(tmp_path: Path) -> None:
     """The CLI value is an assertion and can never replace the registered factor."""
     csv_path = tmp_path / "bars.csv"
@@ -569,6 +578,7 @@ def test_cli_periods_per_year_cannot_override_registration(tmp_path: Path) -> No
     assert report["periods_per_year_for_sharpe_annualisation"] == 525600.0
 
 
+@pytest.mark.market_shaped_fixture
 def test_calendar_metadata_missing_or_inconsistent_rejected() -> None:
     """Calendar identity must be present and agree with the dataset kind."""
     timestamps = [bar.timestamp_ns for bar in _bars()]

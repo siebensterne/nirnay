@@ -20,6 +20,10 @@ from quantlab.point_in_time import PITDatasetBuilder, verify_published_dataset, 
 from quantlab.portfolio_backtest import MultiInstrumentPortfolioBacktester, PortfolioBacktestConfig
 from quantlab.oms import BrokerOrderIntent
 
+import pytest
+pytestmark = pytest.mark.market_shaped_fixture
+
+
 ROOT = Path(__file__).resolve().parents[3]
 FIXTURES = ROOT / "research" / "python" / "fixtures"
 

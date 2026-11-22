@@ -7,6 +7,8 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = pytest.mark.market_shaped_fixture
+
 from quantlab.cli import _load_reference_data
 from quantlab.features import (FeatureLineage, feature_definition_digest,
                                feature_lineage_digest)

@@ -11,6 +11,10 @@ from pathlib import Path
 from quantlab.cli import main, reference_revision_digest
 from quantlab.market import canonical_bytes
 
+import pytest
+pytestmark = pytest.mark.market_shaped_fixture
+
+
 SRC = Path(__file__).resolve().parents[1] / "src"
 FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "canonical-events.example.jsonl"
 FIXTURES = Path(__file__).resolve().parent / "fixtures"

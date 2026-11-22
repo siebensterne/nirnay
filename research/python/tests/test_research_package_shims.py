@@ -9,6 +9,8 @@ from decimal import Decimal
 
 import pytest
 
+pytestmark = pytest.mark.market_shaped_fixture
+
 from quantlab.alpha_search import AlphaCosts
 from quantlab.cli import _load_reference_data
 from quantlab.data import dataset_identity_from_manifest, dataset_lineage_from_manifest

@@ -12,6 +12,8 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pytest
+
+pytestmark = pytest.mark.market_shaped_fixture
 from test_experiment_registry import FIXTURES, _bars, _registered
 
 from quantlab.cli import _load_reference_data, main
