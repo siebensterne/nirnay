@@ -10,6 +10,7 @@ import pytest
 
 from quantlab.cli import main
 from quantlab.dataset_admission import (
+    CONSUMER_OPERATIONS,
     DatasetAdmissionError,
     admit_published_dataset,
     load_admission,
@@ -33,7 +34,7 @@ def _record() -> dict[str, Any]:
     """Build a valid admission record from declared scalar references only."""
     operations = {
         name: {"state": "PERMITTED", "document_reference": "written:rights-record-2026"}
-        for name in ("store", "replay", "internal_analytics", "retention")
+        for name in CONSUMER_OPERATIONS
     }
     return {
         "contract_version": 1,
@@ -167,8 +168,8 @@ def test_written_rights_source_is_required() -> None:
 def test_denied_rights_state_is_refused(state: object) -> None:
     """Every required operation must carry a PERMITTED state."""
     payload = _record()
-    payload["rights"]["operations"]["store"]["state"] = state
-    _refused(payload, "rights.operations.store.state")
+    payload["rights"]["operations"]["read_release"]["state"] = state
+    _refused(payload, "rights.operations.read_release.state")
 
 
 def test_rights_must_cite_the_written_record_per_operation() -> None:
@@ -181,7 +182,7 @@ def test_rights_must_cite_the_written_record_per_operation() -> None:
 def test_rights_operations_must_cover_the_exact_research_set() -> None:
     """Omitting or adding an operation breaks the exact-scope requirement."""
     payload = _record()
-    del payload["rights"]["operations"]["retention"]
+    del payload["rights"]["operations"]["retain_permitted_derived_data"]
     _refused(payload, "exact research set")
 
     extra = _record()
@@ -190,6 +191,43 @@ def test_rights_operations_must_cover_the_exact_research_set() -> None:
         "document_reference": "written:rights-record-2026",
     }
     _refused(extra, "exact research set")
+
+
+def test_consumer_operations_match_the_documented_set() -> None:
+    """The named constant is the five consumer activities, not producer operations."""
+    assert CONSUMER_OPERATIONS == (
+        "read_release",
+        "store_permitted_research_copy",
+        "replay",
+        "internal_analytics",
+        "retain_permitted_derived_data",
+    )
+
+
+@pytest.mark.parametrize("operation", CONSUMER_OPERATIONS)
+def test_each_consumer_operation_needs_its_own_permitted_evidence(operation: str) -> None:
+    """A denial on one operation cannot be softened by another operation's grant."""
+    payload = _record()
+    payload["rights"]["operations"][operation]["state"] = "UNKNOWN"
+    _refused(payload, f"rights.operations.{operation}.state")
+
+
+def test_extra_producer_grant_never_authorises_a_consumer_operation() -> None:
+    """A permitted producer operation is not an added consumer entitlement."""
+    payload = _record()
+    payload["rights"]["operations"]["source_contact"] = {
+        "state": "PERMITTED",
+        "document_reference": "written:rights-record-2026",
+    }
+    _refused(payload, "exact research set")
+
+
+def test_storing_a_permitted_copy_does_not_imply_derived_retention() -> None:
+    """Holding the accepted dataset does not grant retention of derived data."""
+    payload = _record()
+    payload["rights"]["operations"]["store_permitted_research_copy"]["state"] = "PERMITTED"
+    payload["rights"]["operations"]["retain_permitted_derived_data"]["state"] = "DENIED"
+    _refused(payload, "rights.operations.retain_permitted_derived_data.state")
 
 
 def test_rights_record_reference_must_be_a_named_document() -> None:
@@ -435,13 +473,13 @@ def test_cli_admit_dataset_refuses_denied_record_without_touching_data(
 ) -> None:
     """The CLI names the denied field before reading any dataset."""
     payload = _record()
-    payload["rights"]["operations"]["store"]["state"] = "UNKNOWN"
+    payload["rights"]["operations"]["store_permitted_research_copy"]["state"] = "UNKNOWN"
     path = tmp_path / "admission.json"
     path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
     code = main(["admit-dataset", "--dataset", str(tmp_path / "absent"),
                  "--admission", str(path)])
     assert code == 2
-    assert "rights.operations.store.state" in capsys.readouterr().err
+    assert "rights.operations.store_permitted_research_copy.state" in capsys.readouterr().err
 
 
 def test_cli_verify_dataset_for_research_requires_admission(
