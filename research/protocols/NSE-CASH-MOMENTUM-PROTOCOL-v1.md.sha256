@@ -1,0 +1,8 @@
+# Protocol content digest (sidecar)
+
+This sidecar records the SHA-256 of the protocol artifact named below. It
+contains no digest of itself.
+
+label: NSE-CASH-MOMENTUM-PROTOCOL-v1
+artifact: research/protocols/NSE-CASH-MOMENTUM-PROTOCOL-v1.md
+sha256: b4ba67445755b95e587189dbcdd2eeb8fa612bbce7a5cea15b3fb68e307898f1
