@@ -7,8 +7,8 @@
 <!-- CURRENT-STATE
 code_commit: c4f785de3b93c095378071cb8475522a74c002e4
 verified_on: 2026-11-21
-ci_run: 45018786768
-scope: docs-only change; local docs/prose gates green; hosted CI 45018786768 at 4b38a0f is 11/12 - sole failure cargo-deny advisories on external RUSTSEC-2026-0592 (url crate), unrelated to this change; dependency work not authorized
+ci_run: 45028730509
+scope: make check + hosted CI 45028730509 on f06265a (12/12); active suite 300 passed, 90 market-shaped-fixture tests deselected under owner directive
 -->
 
 **Active regression scope:** under the owner directive of 2026-11-22, tests that consume
