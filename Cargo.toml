@@ -7,7 +7,7 @@ members = ["crates/*", "apps/cost-cli", "apps/upstox-tools", "apps/fundamental-t
 
 [workspace.package]
 edition = "2024"
-license = "MIT"
+license = "Apache-2.0"
 rust-version = "1.99"
 publish = false
 
