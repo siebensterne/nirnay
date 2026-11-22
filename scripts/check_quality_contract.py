@@ -2,10 +2,12 @@
 # SPDX-License-Identifier: Apache-2.0
 """Verify the shared quality contract against this repository's configs.
 
-The contract is byte-identical in the sibling workspaces. This gate fails
-closed when a pinned linter version, rule family, formatter option, shell
-check, editor baseline or Rust lint denial drifts from that contract, so the
-two repositories cannot silently diverge.
+The tool pins and listed settings are shared with the sibling workspace. Files
+under ``shared_files`` carry those settings; files under ``repo_local_files``
+diverge by design and are not compared byte for byte. This gate fails closed
+when a pinned linter version, rule family, formatter option, shell check,
+editor baseline or Rust lint denial drifts from that contract, so the two
+repositories cannot silently diverge on policy.
 
 Run from the repository root. Use ``--self-test`` for adversarial unit tests.
 """

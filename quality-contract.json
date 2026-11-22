@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "purpose": "Neutral, shared quality contract for both quant workspaces. Every listed setting is binding in each repository's own gate; a drift in any listed file fails the standards check.",
+  "purpose": "Neutral, shared quality contract for both quant workspaces. Tool pins and the listed settings are binding in each repository's own gate; a drift in a listed setting fails the standards check. `shared_files` names the files that carry those settings, not files that must be byte-identical; repository-local divergences are declared in `repo_local_files`.",
   "tools": {
     "ruff": "0.17.5",
     "pyink": "26.5.1",
@@ -17,6 +17,36 @@
     "ruff.toml",
     "quality-contract.json",
     "scripts/check_prose_unified.py"
+  ],
+  "repo_local_files": [
+    {
+      "file": "ruff.toml",
+      "reason": "src roots, extend-exclude paths and per-file ignores name repository-specific source trees and data paths; the pinned version, rule families and lint options remain shared"
+    },
+    {
+      "file": "pytest.ini",
+      "reason": "test discovery paths and the market-shaped-fixture deselection marker are repository-local test policy"
+    },
+    {
+      "file": "deny.toml",
+      "reason": "advisories, bans and waivers follow each repository's own dependency graph"
+    },
+    {
+      "file": ".gitignore",
+      "reason": "ignored build outputs and local worktree paths are repository-specific"
+    },
+    {
+      "file": ".gitattributes",
+      "reason": "path attributes for generated and binary files are repository-specific"
+    },
+    {
+      "file": "git-policy.json",
+      "reason": "branch, protection and ownership rules are defined per repository"
+    },
+    {
+      "file": "constraints/",
+      "reason": "resolved Python dependency pins are regenerated per repository from its own project files"
+    }
   ],
   "ruff": {
     "config": "ruff.toml",

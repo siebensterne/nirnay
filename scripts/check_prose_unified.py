@@ -31,11 +31,7 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-BASE = (
-    os.environ.get("QUALITY_STYLE_BASE")
-    or os.environ.get("STYLE_BASE")
-    or "main"
-)
+BASE = os.environ.get("QUALITY_STYLE_BASE") or os.environ.get("STYLE_BASE") or "main"
 
 # (stable_id, compiled pattern, human rationale)
 TAUTOLOGY = re.compile(
@@ -157,10 +153,7 @@ def check_line(path: str, number: int, line: str, fenced: bool) -> list[str]:
     for rule_id, pattern, rationale in RULES:
         match = pattern.search(text)
         if match is not None:
-            errors.append(
-                f"{path}:{number}: {rule_id}: {match.group(0)!r} "
-                f"({rationale})"
-            )
+            errors.append(f"{path}:{number}: {rule_id}: {match.group(0)!r} " f"({rationale})")
     return errors
 
 
@@ -185,14 +178,8 @@ def read_fenced(text: str) -> set[int]:
 
 def tracked_files() -> list[str]:
     """Return tracked text paths with authored prose."""
-    result = subprocess.run(
-        ["git", "ls-files", "-z"], cwd=ROOT, check=True, capture_output=True
-    )
-    paths = [
-        p.decode("utf-8", "surrogateescape")
-        for p in result.stdout.split(b"\0")
-        if p
-    ]
+    result = subprocess.run(["git", "ls-files", "-z"], cwd=ROOT, check=True, capture_output=True)
+    paths = [p.decode("utf-8", "surrogateescape") for p in result.stdout.split(b"\0") if p]
     return [
         p
         for p in paths
@@ -279,16 +266,12 @@ class UnifiedProseTests(unittest.TestCase):
     def test_code_and_fences_are_excluded(self) -> None:
         """Code spans, fences and identifiers are not prose."""
         self.assertEqual(check_line("docs/x.md", 1, "```", True), [])
-        self.assertEqual(
-            check_line("docs/x.md", 1, "use `clearly` here", False), []
-        )
+        self.assertEqual(check_line("docs/x.md", 1, "use `clearly` here", False), [])
         self.assertEqual(check_line("src/x.rs", 1, "let We = 1;", False), [])
 
     def test_first_person_does_not_match_io(self) -> None:
         """The I/O abbreviation is not a pronoun."""
-        self.assertEqual(
-            check_line("docs/x.md", 1, "I/O is buffered.", False), []
-        )
+        self.assertEqual(check_line("docs/x.md", 1, "I/O is buffered.", False), [])
 
     def test_reasoned_ignore_is_honoured(self) -> None:
         """A justified inline marker suppresses a finding."""
@@ -297,9 +280,7 @@ class UnifiedProseTests(unittest.TestCase):
 
     def test_bare_ignore_is_a_finding(self) -> None:
         """An unexplained marker is itself a finding."""
-        findings = check_line(
-            "README.md", 1, "text  # prose-audit-ignore:", False
-        )
+        findings = check_line("README.md", 1, "text  # prose-audit-ignore:", False)
         self.assertTrue(any("U008" in finding for finding in findings))
 
     def test_rule_ids_are_unique(self) -> None:
@@ -311,15 +292,11 @@ class UnifiedProseTests(unittest.TestCase):
 def main() -> int:
     """Print findings and return a process exit status."""
     if "--self-test" in sys.argv[1:]:
-        suite = unittest.defaultTestLoader.loadTestsFromTestCase(
-            UnifiedProseTests
-        )
+        suite = unittest.defaultTestLoader.loadTestsFromTestCase(UnifiedProseTests)
         result = unittest.TextTestRunner(verbosity=2).run(suite)
         return 0 if result.wasSuccessful() else 1
     findings = scan_all() if "--all" in sys.argv[1:] else scan_added(BASE)
-    binding = [
-        f for f in findings if any(f": {rule}:" in f for rule in BINDING_IDS)
-    ]
+    binding = [f for f in findings if any(f": {rule}:" in f for rule in BINDING_IDS)]
     advisory = [f for f in findings if f not in binding]
     for finding in binding:
         print(f"FAIL: {finding}")
@@ -327,14 +304,10 @@ def main() -> int:
         print(f"ADVISORY: {finding}")
     if binding:
         print(
-            f"unified prose audit: {len(binding)} binding finding(s), "
-            f"{len(advisory)} advisory"
+            f"unified prose audit: {len(binding)} binding finding(s), " f"{len(advisory)} advisory"
         )
         return 1
-    print(
-        f"PASS: unified prose audit clean "
-        f"({len(advisory)} advisory review candidates)"
-    )
+    print(f"PASS: unified prose audit clean " f"({len(advisory)} advisory review candidates)")
     return 0
 
 

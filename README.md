@@ -8,7 +8,7 @@ complementary platform under `engineering/architecture/decisions/ADR-0001-data-o
 **Release status:** research/paper engineering candidate. This repository is not a certified broker-connected trading system, not a SEBI/exchange-approved algo product, and not evidence of profitable alpha. Live order routing is hard-disabled. Every capability statement below distinguishes code present from external verification still required.
 
 <!-- CURRENT-STATE
-code_commit: ed88773a60a24b1f544b3e62dc1111b34055f731
+code_commit: 0d4fff94f5c79e38d16a8ada7b0592c957bef7df
 verified_on: 2026-11-21
 ci_run: 45056818108
 scope: make check + hosted CI 45056818108 on bd5f4f7 (12/12); active suite 352 passed, 90 market-shaped-fixture tests deselected under owner directive
@@ -421,6 +421,7 @@ once published; a new run adds a new dated file instead of rewriting history.
 | Research | `engineering/research/procurement/zero-cost-source-availability-2026-11-22.md` | source-availability report at INR 0 from the existing dossier and cited official documentation; SOURCE_DOCUMENTATION_ONLY |
 | Research | `engineering/research/procurement/source-qualification-upstox-nse-2026-11-22.md` | Phase 1 source qualification for Upstox V3 candles and NSE public reports; rights UNKNOWN, collection BLOCKED |
 | Architecture | `engineering/architecture/decisions/ADR-0001-data-ownership.md` | Phase 2 ADR: complementary platform owns acquisition, raw storage, normalization and point-in-time reference data; Nirnay owns research; no second collector |
+| Architecture | `engineering/architecture/decisions/ADR-INDEX.md` | canonical ADR ID namespace |
 | Review | `engineering/architecture/reviews/FIELDBOOK-ARCHITECTURE-REVIEW-2026-11-22.md` | read-only Fieldbook architecture review, ownership map, seven findings and NDC v1 semantic compatibility; no code or provider contact |
 | Review | `engineering/architecture/reviews/FIELDBOOK-REVIEW-REFRESH-2026-11-23.md` | baseline refresh at Fieldbook 28eb877, W1 remediation status, ownership and NDC reconciliation; not a ratification |
 | Review evidence | `engineering/architecture/reviews/fieldbook-audits/` | five full read-only audits: architecture, durability, semantics, governance and distribution at Fieldbook `aee91de` |

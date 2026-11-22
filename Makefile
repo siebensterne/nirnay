@@ -1,23 +1,57 @@
-.PHONY: ci assure check perf bench-ingress bench-research bench-experiments bench-latency bench-risk-oms docs-check shellcheck-check generated-paths-check pollution-check style rust-style source-style python-ruff-style q-style prose-style references-check standards-check style-gate python-format-check rust-test python-test python-check cpp-test cpp-format-check schema-check fundamental-fixture-check verify-local fmt constraints sbom supply-chain wheels packaging-test bundle bundle-verify git-policy kdb-analyze kdb-golden kdb-q-test archive-verify tools
+# Nirnay developer commands. The task runner (cargo xtask) owns the gate
+# definitions; the targets below are the deterministic entry points.
+# Command surface (`make help` prints the same list):
+#   check           full gate: static checks, Rust/Python tests, contracts
+#   check-static    static checks only; no python-test or rust-test
+#   ci              full CI parity task
+#   assure          full assurance superset
+#   lint            Clippy with warnings denied (cargo xtask lint)
+#   test            Rust all-target and doc tests (cargo xtask test)
+#   fmt             non-mutating Rust formatting check
+#   style           all source and standards style gates
+#   bundle          build the release zip from BUNDLE_OUT/BUNDLE_ARTIFACTS
+#   bundle-verify   verify that same zip and its extracted BUNDLE_DIR
+#   tools           install the pinned Python tools
+# See README "Quick start" for dependency setup and gate scope.
+
+.PHONY: help ci assure check check-static lint test perf bench-ingress bench-research bench-experiments bench-latency bench-risk-oms docs-check shellcheck-check generated-paths-check pollution-check style rust-style source-style python-ruff-style q-style prose-style references-check standards-check style-gate python-format-check rust-test python-test python-check cpp-test cpp-format-check schema-check fundamental-fixture-check verify-local fmt constraints sbom supply-chain wheels packaging-test bundle bundle-verify git-policy kdb-analyze kdb-golden kdb-q-test archive-verify tools
+
+help:
+	@echo "check           full gate: static checks, Rust/Python tests, contracts"
+	@echo "check-static    static checks only; no python-test or rust-test"
+	@echo "ci              full CI parity task"
+	@echo "assure          full assurance superset"
+	@echo "lint            Clippy with warnings denied (cargo xtask lint)"
+	@echo "test            Rust all-target and doc tests (cargo xtask test)"
+	@echo "fmt             non-mutating Rust formatting check"
+	@echo "style           all source and standards style gates"
+	@echo "bundle          build the release zip from BUNDLE_OUT/BUNDLE_ARTIFACTS"
+	@echo "bundle-verify   verify that same zip and its extracted BUNDLE_DIR"
+	@echo "tools           install the pinned Python tools"
 
 ci:
 	cargo xtask ci
 
 assure:
 	cargo xtask assure
-check:
-	$(MAKE) docs-check
-	$(MAKE) shellcheck-check
-	$(MAKE) generated-paths-check
-	$(MAKE) pollution-check
-	$(MAKE) fmt
-	cargo xtask check
-	cargo deny check
-	$(MAKE) style
+check: check-static
 	$(MAKE) rust-test
 	$(MAKE) schema-check
 	$(MAKE) fundamental-fixture-check
 	$(MAKE) python-test
+check-static:
+	$(MAKE) docs-check
+	$(MAKE) shellcheck-check
+	$(MAKE) generated-paths-check
+	$(MAKE) pollution-check
+	cargo fmt --all -- --check
+	cargo xtask check
+	cargo deny check
+	$(MAKE) style
+lint:
+	cargo xtask lint
+test:
+	cargo xtask test
 docs-check:
 	python3 scripts/check_docs.py --self-test
 	python3 scripts/check_docs.py
@@ -133,10 +167,14 @@ wheels:
 packaging-test: wheels
 	python3 scripts/check_wheels.py --dist dist
 BUNDLE_OUT ?= ../nirnay-quant-bundle.zip
+BUNDLE_DIR ?= ../nirnay-quant-bundle
 BUNDLE_ARTIFACTS ?= ../artifacts
 bundle:
 	python3 scripts/make_bundle.py --source-dir . --artifacts $(BUNDLE_ARTIFACTS) --output $(BUNDLE_OUT)
 bundle-verify:
+	rm -rf "$(BUNDLE_DIR)"
+	mkdir -p "$(BUNDLE_DIR)"
+	cd "$(BUNDLE_DIR)" && unzip -q "$(abspath $(BUNDLE_OUT))"
 	python3 scripts/verify_bundle.py --bundle $(BUNDLE_DIR) --zip $(BUNDLE_OUT) --self-test
 git-policy:
 	python3 scripts/check_git_policy.py --strict
