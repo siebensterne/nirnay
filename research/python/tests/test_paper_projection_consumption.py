@@ -11,6 +11,9 @@ from pathlib import Path
 from quantlab.cli import main, reference_revision_digest
 from quantlab.market import canonical_bytes
 
+import pytest
+
+
 SRC = Path(__file__).resolve().parents[1] / "src"
 FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "canonical-events.example.jsonl"
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
@@ -39,6 +42,7 @@ def _run(events: Path, output: Path, reference: Path | None = None) -> int:
     return main(argv)
 
 
+@pytest.mark.market_shaped_fixture
 def test_paper_replay_consumes_projected_events(tmp_path):
     events = _events(tmp_path / "valid")
     output = tmp_path / "result.json"
@@ -49,6 +53,7 @@ def test_paper_replay_consumes_projected_events(tmp_path):
     assert result["lineage_events"] == 3
 
 
+@pytest.mark.market_shaped_fixture
 def test_unresolved_instrument_and_missing_lineage_fail(tmp_path):
     unresolved = _events(tmp_path / "unresolved",
                          lambda rows: rows[0].update(instrument_id=None))
@@ -59,6 +64,7 @@ def test_unresolved_instrument_and_missing_lineage_fail(tmp_path):
     assert _run(unlinked, tmp_path / "l.json") == 2
 
 
+@pytest.mark.market_shaped_fixture
 def test_provider_mismatch_fails(tmp_path):
     events = _events(tmp_path / "provider", lambda rows: rows[0].update(provider="fyers"))
     assert main(["paper-replay", "--events", str(events), "--provider", "upstox",
@@ -66,6 +72,7 @@ def test_provider_mismatch_fails(tmp_path):
                  "--registry", str(PERMIT_REGISTRY)]) == 2
 
 
+@pytest.mark.market_shaped_fixture
 def test_reference_binding_must_match_projection_sidecar(tmp_path):
     events = _events(tmp_path / "bound")
     body = {"schema_version": 1, "instruments": {}, "venues": {}}
@@ -84,6 +91,7 @@ def test_reference_binding_must_match_projection_sidecar(tmp_path):
     assert _run(events, tmp_path / "unbound.json", reference) == 2
 
 
+@pytest.mark.market_shaped_fixture
 def test_fresh_process_replay_is_byte_identical(tmp_path):
     events = _events(tmp_path / "replay")
     outputs = []
@@ -100,6 +108,7 @@ def test_fresh_process_replay_is_byte_identical(tmp_path):
     assert outputs[0] == outputs[1]
 
 
+@pytest.mark.market_shaped_fixture
 def test_replay_denied_by_registry_emits_no_output(tmp_path):
     events = _events(tmp_path / "denied")
     output = tmp_path / "denied.json"

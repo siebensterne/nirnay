@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+
 from quantlab.cli import _load_reference_data
 from quantlab.features import (FeatureLineage, feature_definition_digest,
                                feature_lineage_digest)
@@ -69,6 +70,7 @@ def test_decoded_lineage_rejects_unknown_fields():
         feature_lineage_from_dict(body)
 
 
+@pytest.mark.market_shaped_fixture
 def test_builder_binds_feature_lineage_to_rows_and_manifest(tmp_path):
     lineage = _lineage()
     _, rows, manifest = _published(tmp_path, lineage)
@@ -79,6 +81,7 @@ def test_builder_binds_feature_lineage_to_rows_and_manifest(tmp_path):
     assert manifest.feature_lineage_sha256 == lineage.digest()
 
 
+@pytest.mark.market_shaped_fixture
 def test_published_dataset_detects_tampered_manifest_lineage(tmp_path):
     dataset_dir, _, _ = _published(tmp_path, _lineage())
     assert verify_published_dataset(dataset_dir)["status"] == "verified_internal_integrity"
@@ -90,6 +93,7 @@ def test_published_dataset_detects_tampered_manifest_lineage(tmp_path):
         verify_published_dataset(dataset_dir)
 
 
+@pytest.mark.market_shaped_fixture
 def test_published_dataset_detects_tampered_row_lineage(tmp_path):
     dataset_dir, _, _ = _published(tmp_path, _lineage())
     events_path = dataset_dir / "events.jsonl"

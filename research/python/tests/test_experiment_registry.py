@@ -127,6 +127,7 @@ def _bars() -> list[Bar]:
                 for row in csv.DictReader(stream)]
 
 
+@pytest.mark.market_shaped_fixture
 def test_extended_record_freezes_deterministically():
     from quantlab.experiments import freeze_registered_experiment
 
@@ -137,6 +138,7 @@ def test_extended_record_freezes_deterministically():
     assert len(digest) == 64
 
 
+@pytest.mark.market_shaped_fixture
 def test_unknown_and_nonfinite_fields_still_rejected():
     from quantlab.experiments import validate_experiment
 
@@ -150,6 +152,7 @@ def test_unknown_and_nonfinite_fields_still_rejected():
         validate_experiment(record)
 
 
+@pytest.mark.market_shaped_fixture
 def test_append_is_hash_chained_and_sequence_contiguous(tmp_path):
     registry = ExperimentRegistry(tmp_path / "registry.sqlite3")
     first = registry.register(_registered())
@@ -160,6 +163,7 @@ def test_append_is_hash_chained_and_sequence_contiguous(tmp_path):
     assert rows[1].previous_hash == first.record_hash
 
 
+@pytest.mark.market_shaped_fixture
 def test_verify_detects_tampered_body_and_reordered_records(tmp_path):
     registry = ExperimentRegistry(tmp_path / "registry.sqlite3")
     registry.register(_registered())
@@ -189,6 +193,7 @@ def test_verify_detects_tampered_body_and_reordered_records(tmp_path):
         registry.verify_integrity()
 
 
+@pytest.mark.market_shaped_fixture
 def test_storage_rejects_update_and_delete(tmp_path):
     registry = ExperimentRegistry(tmp_path / "registry.sqlite3")
     registry.register(_registered())
@@ -203,6 +208,7 @@ def test_storage_rejects_update_and_delete(tmp_path):
     assert registry.verify_integrity()["record_count"] == 1
 
 
+@pytest.mark.market_shaped_fixture
 def test_duplicate_experiment_id_rejected(tmp_path):
     registry = ExperimentRegistry(tmp_path / "registry.sqlite3")
     registry.register(_registered())
@@ -210,6 +216,7 @@ def test_duplicate_experiment_id_rejected(tmp_path):
         registry.register(_registered())
 
 
+@pytest.mark.market_shaped_fixture
 def test_holdout_reuse_rejected_after_terminal_record(tmp_path):
     registry = ExperimentRegistry(tmp_path / "registry.sqlite3")
     registry.register(_registered("EXP-0001"))
@@ -218,6 +225,7 @@ def test_holdout_reuse_rejected_after_terminal_record(tmp_path):
         registry.register(_registered("EXP-0002"))
 
 
+@pytest.mark.market_shaped_fixture
 def test_universe_version_and_feature_digest_participate_in_holdout_key():
     from quantlab.experiments import validate_registered_experiment
 
@@ -235,6 +243,7 @@ def test_universe_version_and_feature_digest_participate_in_holdout_key():
         validate_registered_experiment(record)
 
 
+@pytest.mark.market_shaped_fixture
 def test_concurrent_registration_claims_holdout_once(tmp_path):
     registry = ExperimentRegistry(tmp_path / "registry.sqlite3")
     barrier = threading.Barrier(2)
@@ -258,6 +267,7 @@ def test_concurrent_registration_claims_holdout_once(tmp_path):
     assert "HoldoutReuseError" in results
 
 
+@pytest.mark.market_shaped_fixture
 def test_verification_only_claim_requires_replicates(tmp_path):
     registry = ExperimentRegistry(tmp_path / "registry.sqlite3")
     record = _registered("EXP-0002")
@@ -274,6 +284,7 @@ def test_verification_only_claim_requires_replicates(tmp_path):
     assert registry.verify_integrity()["holdout_claims"] == 2
 
 
+@pytest.mark.market_shaped_fixture
 def test_validation_holdout_overlap_rejected():
     record = _registered()
     record["holdout_period"] = {"start_index": 330, "end_index": 420}
@@ -282,6 +293,7 @@ def test_validation_holdout_overlap_rejected():
         validate_registered_experiment(record)
 
 
+@pytest.mark.market_shaped_fixture
 def test_nonchronological_periods_rejected():
     record = _registered()
     from quantlab.experiments import build_search_space
@@ -294,6 +306,7 @@ def test_nonchronological_periods_rejected():
         validate_registered_experiment(record)
 
 
+@pytest.mark.market_shaped_fixture
 def test_leaked_dataset_cannot_be_candidate(tmp_path):
     record = _terminal(_registered(), status="candidate")
     record["dataset_point_in_time"] = False
@@ -301,6 +314,7 @@ def test_leaked_dataset_cannot_be_candidate(tmp_path):
         ExperimentRegistry(tmp_path / "registry.sqlite3").append_result(record)
 
 
+@pytest.mark.market_shaped_fixture
 def test_terminal_requires_result_validation(tmp_path):
     record = _registered()
     record["status"] = "completed"
@@ -308,6 +322,7 @@ def test_terminal_requires_result_validation(tmp_path):
         ExperimentRegistry(tmp_path / "registry.sqlite3").append_result(record)
 
 
+@pytest.mark.market_shaped_fixture
 def test_all_attempted_configs_persisted_including_losers(tmp_path):
     registry = ExperimentRegistry(tmp_path / "registry.sqlite3")
     record = _registered(counts=25)
@@ -331,6 +346,7 @@ def test_all_attempted_configs_persisted_including_losers(tmp_path):
     assert receipt.status in {"completed", "rejected"}
 
 
+@pytest.mark.market_shaped_fixture
 def test_dsr_trial_count_equals_registry_attempts(tmp_path):
     registry = ExperimentRegistry(tmp_path / "registry.sqlite3")
     record = _registered()
@@ -342,6 +358,7 @@ def test_dsr_trial_count_equals_registry_attempts(tmp_path):
         "deflated_sharpe_validation_only"]["trials"] == attempts
 
 
+@pytest.mark.market_shaped_fixture
 def test_report_binds_dataset_manifest_digest(tmp_path):
     from quantlab.cli import _load_reference_data as load_references
     from quantlab.experiments.reproducibility import bind_published_dataset
@@ -378,6 +395,7 @@ def test_report_binds_dataset_manifest_digest(tmp_path):
         registry.verify_integrity(dataset_dir=dataset_dir)
 
 
+@pytest.mark.market_shaped_fixture
 def test_signed_head_verifies_and_tampered_head_fails(tmp_path):
     private = Ed25519PrivateKey.generate()
     public = private.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
@@ -409,6 +427,7 @@ def test_signed_head_verifies_and_tampered_head_fails(tmp_path):
         bad.verify_integrity(trusted_public_keys=trusted)
 
 
+@pytest.mark.market_shaped_fixture
 def test_cscv_diagnostics_never_use_final_holdout(tmp_path):
     registry = ExperimentRegistry(tmp_path / "registry.sqlite3")
     registry.register(_registered())
@@ -418,6 +437,7 @@ def test_cscv_diagnostics_never_use_final_holdout(tmp_path):
     assert report["warning"].startswith("Research screening only")
 
 
+@pytest.mark.market_shaped_fixture
 def test_rejected_experiment_is_retained(tmp_path):
     registry = ExperimentRegistry(tmp_path / "registry.sqlite3")
     registry.register(_registered())
@@ -426,6 +446,7 @@ def test_rejected_experiment_is_retained(tmp_path):
     assert registry.record("EXP-0001", terminal_only=True).status == "rejected"
 
 
+@pytest.mark.market_shaped_fixture
 def test_cli_alpha_search_requires_registered_experiment(tmp_path):
     csv_path = tmp_path / "bars.csv"
     bars = _bars()
@@ -454,6 +475,7 @@ def test_cli_alpha_search_requires_registered_experiment(tmp_path):
     assert (tmp_path / "report.json").exists()
 
 
+@pytest.mark.market_shaped_fixture
 def test_minute_registration_runs_with_declared_annualisation(tmp_path: Path) -> None:
     """A new minute fixture runs under its own registration and declared factor."""
     registered = _registered("EXP-CADENCE-0001")
@@ -485,6 +507,7 @@ def test_minute_registration_runs_with_declared_annualisation(tmp_path: Path) ->
             assert score["holdout_net_mean"] is None
 
 
+@pytest.mark.market_shaped_fixture
 def test_daily_registration_rejects_minute_timestamps(tmp_path: Path) -> None:
     """A daily registration never accepts minute-spaced observations."""
     registered = _registered("EXP-CADENCE-DAILY")
@@ -504,6 +527,7 @@ def test_daily_registration_rejects_minute_timestamps(tmp_path: Path) -> None:
         validate_bar_cadence(registered, timestamps)
 
 
+@pytest.mark.market_shaped_fixture
 def test_minute_registration_rejects_incompatible_interval() -> None:
     """A minute registration rejects intervals that disagree with the bars."""
     registered = _registered()
@@ -516,6 +540,7 @@ def test_minute_registration_rejects_incompatible_interval() -> None:
         validate_bar_cadence(registered, timestamps)
 
 
+@pytest.mark.market_shaped_fixture
 def test_annualisation_factor_conflicts_with_registered_basis() -> None:
     """A named basis fixes its period count and bar family."""
     registered = _registered()
@@ -537,6 +562,7 @@ def test_annualisation_factor_conflicts_with_registered_basis() -> None:
         validate_registered_experiment(registered)
 
 
+@pytest.mark.market_shaped_fixture
 def test_cli_periods_per_year_cannot_override_registration(tmp_path: Path) -> None:
     """The CLI value is an assertion and can never replace the registered factor."""
     csv_path = tmp_path / "bars.csv"
@@ -569,6 +595,7 @@ def test_cli_periods_per_year_cannot_override_registration(tmp_path: Path) -> No
     assert report["periods_per_year_for_sharpe_annualisation"] == 525600.0
 
 
+@pytest.mark.market_shaped_fixture
 def test_calendar_metadata_missing_or_inconsistent_rejected() -> None:
     """Calendar identity must be present and agree with the dataset kind."""
     timestamps = [bar.timestamp_ns for bar in _bars()]
@@ -597,6 +624,7 @@ def test_calendar_metadata_missing_or_inconsistent_rejected() -> None:
         validate_bar_cadence(synthetic, timestamps)
 
 
+@pytest.mark.market_shaped_fixture
 def test_numeric_latency_without_model_rejected() -> None:
     """A one-nanosecond latency needs an explicit event-level model."""
     registered = _registered()
@@ -611,6 +639,7 @@ def test_numeric_latency_without_model_rejected() -> None:
     validate_registered_experiment(registered)
 
 
+@pytest.mark.market_shaped_fixture
 def test_point_in_time_basis_limits_boolean_certification() -> None:
     """Ordering alone does not certify universe or corporate-action lineage."""
     registered = _registered()

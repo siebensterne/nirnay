@@ -5,11 +5,17 @@
 **Release status:** research/paper engineering candidate. This repository is not a certified broker-connected trading system, not a SEBI/exchange-approved algo product, and not evidence of profitable alpha. Live order routing is hard-disabled. Every capability statement below distinguishes code present from external verification still required.
 
 <!-- CURRENT-STATE
-code_commit: 4f5d4d43a86354763b6bd3d88b4815de7da56f98
+code_commit: c4f785de3b93c095378071cb8475522a74c002e4
 verified_on: 2026-11-21
 ci_run: 45018786768
 scope: docs-only change; local docs/prose gates green; hosted CI 45018786768 at 4b38a0f is 11/12 - sole failure cargo-deny advisories on external RUSTSEC-2026-0592 (url crate), unrelated to this change; dependency work not authorized
 -->
+
+**Active regression scope:** under the owner directive of 2026-11-22, tests that consume
+checked-in synthetic market-shaped fixtures are registered `market_shaped_fixture` and
+deselected in `pytest.ini`; they no longer run in `make check` or CI. Historical test counts in
+dated notes below are historical records, not current coverage. See
+`evidence/POLICY-BOUNDARY-REGRESSION-WITHDRAWAL-2026-11-22.md`.
 
 ## Implemented scope
 
@@ -108,30 +114,26 @@ under `$RUNNER_TEMP/release`, outside the checkout, and the bundler rejects an
 artifacts directory inside the source tree so wheels and binaries cannot be
 packed twice.
 
-Run the deterministic synthetic strategy/backtest smoke test:
+### Archived synthetic demonstrations (non-executable)
 
-```bash
-quantlab demo
-```
-
-The demo reports `not_real_market_data=true` and `not_alpha_evidence=true`. It is a deterministic systems fixture, not a performance claim.
+The former synthetic `quantlab demo` smoke test has been withdrawn from the normal
+quickstart under the owner directive of 2026-11-22. It reported
+`not_real_market_data=true` and `not_alpha_evidence=true`; those flags did not make
+it an authorised research input. No synthetic market-data demonstration is runnable
+from the normal workflow. See `research/python/fixtures/ARCHIVED.md` and
+`evidence/POLICY-BOUNDARY-REGRESSION-WITHDRAWAL-2026-11-22.md`.
 
 ## Corporate financial fact validation
 
 The first fundamental-data vertical defines source-backed company identity
 and financial fact records.
 It is offline by design: source acquisition and data entitlements remain separate decisions.
-Validate the checked-in synthetic examples with:
+The CLI validates record framing, per-record and aggregate-byte limits, identity and fact keys,
+append-only revisions, derivation dependencies and historical availability. The checked-in
+example records are archived synthetic conformance data under the owner directive of 2026-11-22;
+no runnable command consuming them is provided in this quickstart.
 
-```bash
-cargo run --locked -p fundamental-tools --bin nirnay-fundamental -- validate-facts \
-  --input research/fundamentals/fixtures/financial-facts.example.jsonl
-
-cargo run --locked -p fundamental-tools --bin nirnay-fundamental -- validate-companies \
-  --input research/fundamentals/fixtures/company-identities.example.jsonl
-```
-
-The JSON Schema contracts are in `schemas/fundamentals/`. The committed fixture records are
+The JSON Schema contracts are in `schemas/fundamentals/`. The historical fixture records were
 synthetic conformance data, not records fetched from MCA or an exchange; their document digests
 are test values, not source evidence. The domain stores exact decimal coefficients as canonical
 signed `i128` strings plus decimal scale; it does not use binary floating point for financial
@@ -240,48 +242,40 @@ Reconciliation is diagnostic. A quote-state comparison does not establish that b
 
 ### 2. Build a point-in-time dataset
 
-Reference data must provide bitemporal provider listings, immutable corporate-action source records and (for historical universe analysis) dated universe-membership records. The repository includes illustrative synthetic examples:
+Reference data must provide bitemporal provider listings, immutable corporate-action source
+records and (for historical universe analysis) dated universe-membership records. The former
+quickstart example built a dataset from checked-in synthetic canonical events and reference
+data. It has been withdrawn under the owner directive of 2026-11-22; no runnable command
+consuming those assets is provided here.
 
-```bash
-quantlab build-dataset \
-  --events research/python/fixtures/canonical-events.example.jsonl \
-  --reference-data research/python/fixtures/reference-data.example.json \
-  --dataset-id local-pit-example \
-  --created-at-utc-ns <trusted-utc-nanoseconds> \
-  --universe-id fixture-universe \
-  --output data/research/local-pit-example
-
-quantlab verify-dataset data/research/local-pit-example
-```
-
-The fixture's hashes are fixture provenance IDs, not official exchange source hashes. Outputs are immutable and the destination must not already exist. Optional Parquet output requires PyArrow. Optional detached manifest signing requires an AWS KMS Ed25519 key and workload credentials with narrowly scoped `kms:DescribeKey`, `kms:GetPublicKey` and `kms:Sign` permissions:
-
-```bash
-quantlab build-dataset ... --parquet
-
-# Optional: sign the canonical manifest digest with a customer-managed AWS KMS Ed25519 key.
-quantlab build-dataset ... --kms-key-id arn:aws:kms:REGION:ACCOUNT:key/KEY_ID --kms-region ap-south-1
-
-# Trust the independently distributed public key when verifying a signed release.
-quantlab verify-dataset data/research/local-pit-example \
-  --trusted-key dataset-release-2026=BASE64_ED25519_PUBLIC_KEY
-```
+`build-dataset` emits immutable outputs and requires a destination that does not already exist.
+Optional Parquet output requires PyArrow. Optional detached manifest signing requires an AWS KMS
+Ed25519 key and narrowly scoped `kms:DescribeKey`, `kms:GetPublicKey` and `kms:Sign` permissions.
+These capabilities remain available for an accepted dataset; their previous synthetic
+demonstration is archived and non-executable.
 
 `verify-dataset` establishes internal manifest/artifact/hash consistency; with a trusted key, it additionally verifies the publisher's detached Ed25519 signature over a domain-separated manifest digest. It does not establish source authenticity, entitlements, or source completeness. It cannot certify the source was official, complete, licensed, correct, or independently captured. The builder preserves raw prices and emits exact split/bonus adjustment factors as a separate point-in-time view. Dividends remain cash-flow events; rights, mergers, demergers, delistings and other complex actions fail closed until a reviewed transform exists. If the selected universe membership source is incomplete, survivorship bias remains possible and the manifest does not claim otherwise.
 
 ### 3. Run a bounded alpha-search screen
 
-The CSV interface requires strictly increasing `timestamp_ns` and positive `close` columns. The checked-in series is deterministic and synthetic:
-
-```bash
-quantlab alpha-search research/python/fixtures/alpha-bars.synthetic.csv \
-  --periods-per-year 252 \
-  --brokerage-bps 2 --exchange-regulatory-bps 0.5 --taxes-bps 0.5 \
-  --spread-bps 2 --slippage-bps 1 --market-impact-bps 1 \
-  --output /tmp/alpha-screen.json
-```
+The CSV interface requires strictly increasing `timestamp_ns` and positive `close` columns. The
+former quickstart example consumed a deterministic synthetic bar series. It has been withdrawn
+under the owner directive of 2026-11-22; no runnable command consuming that asset is provided
+here. No experiment parameter may be chosen from synthetic data; see
+`research/protocols/NSE-CASH-MOMENTUM-PROTOCOL-v1-AMENDMENT-1.md`.
 
 The search family is finite and predeclared. It selects on validation only, applies Holm correction across the candidate family, then reports one untouched chronological holdout. Each segment starts flat and pays exit/liquidation turnover cost; one return interval at each fold boundary is embargoed. The report additionally includes development-only CSCV/PBO and validation-only Deflated Sharpe diagnostics. Sharpe annualisation is controlled by the explicit `--periods-per-year`; it is not inferred. The screen uses bar closes and simplified basis-point costs, not full event-level fills or all exchange charges. A positive holdout is a research screen, not validated alpha. Use licensed point-in-time data and the event simulator before any strategy promotion.
+
+## Archived synthetic research assets
+
+All checked-in synthetic market-shaped assets — price bars, canonical events, reference data
+and market calendars — are archived and non-executable under the owner directive of
+2026-11-22. They are preserved unchanged as historical repository material; they must not be
+executed, regenerated, extended, transformed, reused as research evidence, or cited as proof of
+source completeness, rights or real-market verification. See
+`research/python/fixtures/ARCHIVED.md` and
+`evidence/POLICY-BOUNDARY-REGRESSION-WITHDRAWAL-2026-11-22.md` for the marker and the exact
+withdrawn regression coverage.
 
 ## Market and execution model caveats
 
@@ -396,6 +390,7 @@ once published; a new run adds a new dated file instead of rewriting history.
 | Research | `engineering/research/procurement/zero-cost-source-availability-2026-11-22.md` | source-availability report at INR 0 from the existing dossier and cited official documentation; SOURCE_DOCUMENTATION_ONLY |
 | Dated evidence | `evidence/OWNER-DIRECTIVE-2026-11-22.md` | owner data-freeze directive: no synthetic market data, INR 0 data budget, STOP on missing evidence or authorization |
 | Dated evidence | `evidence/M4-2-1-CLAIM-SCOPE-2026-11-22.md` | M4.2.1 narrowed to implemented, not real-market verified; calendar provenance, coverage-bound and bar-anchor findings |
+| Dated evidence | `evidence/POLICY-BOUNDARY-REGRESSION-WITHDRAWAL-2026-11-22.md` | runtime-audit inventory of the 90 deselected market-shaped-fixture tests and the regression coverage withdrawn from active CI |
 | Dated evidence | `BUILD-RESULTS.md` | owner-maintained bundle record; do not edit |
 | Dated evidence | `evidence/VERIFICATION-2026-11-17.md` | executed checks and boundaries |
 | Dated evidence | `evidence/UPGRADE-VERIFICATION-2026-11-13.md` | implementation inventory and upgrade gates |

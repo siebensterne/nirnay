@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import pytest
 from pathlib import Path
 
 from quantlab.cli import main
@@ -95,7 +96,6 @@ def test_jsonl_reader_rejects_blank_lines_as_ambiguous_source_records(tmp_path):
     from quantlab.cli import _read_jsonl
     source = tmp_path / "source.jsonl"
     source.write_text('{"x":1}\n\n', encoding="utf-8")
-    import pytest
     with pytest.raises(ValueError, match="blank lines"):
         _read_jsonl(source)
 
@@ -190,6 +190,7 @@ def test_upstox_normalize_rolls_back_output_if_report_link_fails(tmp_path, monke
     assert not sidecar.exists()
 
 
+@pytest.mark.market_shaped_fixture
 def test_list_experiments_cli_shows_rejected_runs_and_attempt_counts(tmp_path, capsys):
     from quantlab.experiments import ExperimentRegistry, content_hash, make_attempt
     from test_parameter_search import _configs, _registered

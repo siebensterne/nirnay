@@ -74,6 +74,7 @@ def test_robustness_digest_refuses_holdout_flags_and_is_stable():
         robustness_digest({"uses_final_holdout": True, "nested": {"x": 1}})
 
 
+@pytest.mark.market_shaped_fixture
 def test_diagnostic_reading_holdout_fails_terminal_append(tmp_path):
     from quantlab.experiments import content_hash
 

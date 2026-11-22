@@ -9,6 +9,7 @@ from decimal import Decimal
 
 import pytest
 
+
 from quantlab.alpha_search import AlphaCosts
 from quantlab.cli import _load_reference_data
 from quantlab.data import dataset_identity_from_manifest, dataset_lineage_from_manifest
@@ -40,6 +41,7 @@ def _manifest():
     return manifest
 
 
+@pytest.mark.market_shaped_fixture
 def test_dataset_lineage_and_identity_helpers():
     manifest = _manifest()
     lineage = dataset_lineage_from_manifest(manifest)
@@ -51,6 +53,7 @@ def test_dataset_lineage_and_identity_helpers():
     assert identity["dataset_version"] == manifest.dataset_id
 
 
+@pytest.mark.market_shaped_fixture
 def test_bind_dataset_returns_lineage_and_digest():
     binding = bind_dataset(_manifest())
     assert len(binding["dataset_manifest_sha256"]) == 64
