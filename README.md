@@ -7,8 +7,8 @@
 <!-- CURRENT-STATE
 code_commit: 02a0b890e960326f401d4df50a69be6129c4bed0
 verified_on: 2026-11-21
-ci_run: 44992013837
-scope: make check + hosted CI 44992013837 on 990f95b (12/12)
+ci_run: 45018786768
+scope: docs-only change; local docs/prose gates green; hosted CI 45018786768 at 4b38a0f is 11/12 - sole failure cargo-deny advisories on external RUSTSEC-2026-0592 (url crate), unrelated to this change; dependency work not authorized
 -->
 
 ## Implemented scope
