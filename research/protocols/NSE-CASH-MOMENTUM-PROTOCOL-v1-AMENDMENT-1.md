@@ -23,7 +23,7 @@ The following v1 sentence is superseded in full:
 
 > Synthetic fixtures may exercise code paths but must not inform any parameter below.
 
-That sentence appeared in v1 section 0. It is retained here only as the quoted
+That sentence appeared in the v1 preamble, before section 1. It is retained here only as the quoted
 historical text being superseded. It has no authorization effect. It must not
 be read as permission to use synthetic data to exercise a code path, to inform a
 parameter, or to satisfy a protocol requirement.
@@ -61,7 +61,7 @@ rule governs:
    records the absence; it does not create a price.
 3. The actual observation date of every value used in a score or a return is
    preserved in the run record. A value must not be relabelled to an earlier or
-   later date to fill a gap.
+   subsequent date to fill a gap.
 4. A security with a missing endpoint price, or with a price whose observation
    date does not match the required endpoint under the accepted calendar, is
    unscored for that formation. The exclusion is counted and reported.
@@ -104,6 +104,6 @@ stops under `evidence/OWNER-DIRECTIVE-2026-11-22.md`.
 | Assumptions | No dataset has been accepted; no right is established by a public page or a prior session. |
 | Not established | Profitability, data rights, benchmark-constituent availability, cost-schedule completeness, dataset acceptance and exchange-calendar validity. |
 | Failure cases | A synthetic artifact informs a parameter; a fixture calendar certifies market origin; a missing price is filled or substituted without a separate versioned amendment; a run is registered before acceptance and owner approval. |
-| Inspection | Compare this text with v1 section 0 and section 3.3; confirm the v1 file digest is unchanged; confirm no registration, holdout or rights record was modified. |
+| Inspection | Compare this text with the v1 preamble and section 3.3; confirm the v1 file digest is unchanged; confirm no registration, holdout or rights record was modified. |
 | Independent review | Required before registration and before any holdout claim, covering financial method, point-in-time correctness, data rights and cost dating. |
 | Owner dependency | Acceptance, rights, cost and benchmark sources, independent review and the split freeze record; none is satisfiable by an agent edit. |
