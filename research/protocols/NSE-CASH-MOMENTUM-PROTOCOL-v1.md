@@ -39,7 +39,7 @@ untouched holdout periods defined in section 8.
 
 **H0 (null).** The net-of-cost mean return and the net-of-cost benchmark-relative
 return are zero or negative after the multiple-testing adjustment in section
-10.4, or the sign is unstable across the three periods.
+11, or the sign is unstable across the three periods.
 
 ### 1.2 Why the effect might exist
 
