@@ -29,7 +29,7 @@ from jsonschema import Draft202012Validator
 from .bench import synthetic_events
 from .cli import _load_reference_data
 from .experiments import (ExperimentError, ExperimentRegistry, build_search_space,
-                          content_hash, holdout_key, make_attempt)
+                          calendar_binding, content_hash, holdout_key, make_attempt)
 from .experiments.reproducibility import bind_published_dataset, environment_digest
 from .experiments.schema import NOT_APPLICABLE_INTERVAL, SYNTHETIC_ANNUALIZATION_BASIS
 from .point_in_time import PITDatasetBuilder, write_dataset
@@ -308,6 +308,7 @@ def _registered_record(job: dict[str, Any], environment: dict[str, Any],
             "Reject if the dry-run command exits non-zero or the dataset fails verification."
         ),
         "dataset_id": binding["dataset_id"],
+        "dataset_origin": "SYNTHETIC",
         "dataset_version": binding["dataset_version"],
         "dataset_lineage": binding["dataset_lineage"],
         "universe_id": UNIVERSE_ID,
@@ -327,8 +328,10 @@ def _registered_record(job: dict[str, Any], environment: dict[str, Any],
                                   "no_live_routing": True},
         "bar_kind": "other",
         "bar_interval_ns": NOT_APPLICABLE_INTERVAL,
+        "bar_timezone": "UTC",
+        "bar_anchor": "observation_time",
         "timestamp_semantics": "observation_time",
-        "calendar_id": "synthetic:event-sequence-v1",
+        **calendar_binding("synthetic:event-sequence-v1"),
         "session_definition": "Synthetic canonical event sequence; no exchange session",
         "annualization_basis": SYNTHETIC_ANNUALIZATION_BASIS,
         "periods_per_year": 1.0,

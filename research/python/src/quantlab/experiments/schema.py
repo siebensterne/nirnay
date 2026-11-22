@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
 class ExperimentError(ValueError):
@@ -48,6 +49,7 @@ _BASE_REQUIRED_FIELDS = {
 }
 _DECLARATION_FIELDS = {
     "dataset_id",
+    "dataset_origin",
     "dataset_version",
     "dataset_lineage",
     "universe_id",
@@ -62,8 +64,13 @@ _DECLARATION_FIELDS = {
     "execution_assumptions",
     "bar_kind",
     "bar_interval_ns",
+    "bar_timezone",
+    "bar_anchor",
     "timestamp_semantics",
     "calendar_id",
+    "calendar_source",
+    "calendar_timezone",
+    "calendar_sha256",
     "session_definition",
     "annualization_basis",
     "periods_per_year",
@@ -92,6 +99,8 @@ _BAR_KINDS = frozenset({"daily", "minute", "tick", "event", "other"})
 _FIXED_INTERVAL_KINDS = frozenset({"daily", "minute"})
 _NON_FIXED_INTERVAL_KINDS = frozenset({"tick", "event"})
 _TIMESTAMP_SEMANTICS = frozenset({"bar_open", "bar_close", "observation_time"})
+_DATASET_ORIGINS = frozenset({"SYNTHETIC", "MARKET"})
+_CALENDAR_SOURCES = frozenset({"checked_in_fixture"})
 _POINT_IN_TIME_BASES = frozenset(
     {"none", "chronological_only", "universe_and_corporate_actions"}
 )
@@ -106,11 +115,17 @@ NOT_APPLICABLE_INTERVAL = "not_applicable"
 # An explicit declared basis is the only way to choose an arbitrary positive
 # annualisation factor; named bases carry a fixed period count and bar family.
 SYNTHETIC_ANNUALIZATION_BASIS = "synthetic_declared"
-_NAMED_ANNUALIZATION_BASES: dict[str, tuple[str, float]] = {
-    "daily_252": ("daily", 252.0),
-    "daily_365": ("daily", 365.0),
-    "minute_nse_cash_94500": ("minute", 94_500.0),
-    "minute_continuous_525600": ("minute", 525_600.0),
+_DAILY_INTERVAL_NS = 86_400_000_000_000
+_MINUTE_INTERVAL_NS = 60_000_000_000
+# A named basis fixes bar family, bar_interval_ns and periods_per_year together.
+# NSE cash has 375 one-minute bars per trading day: 252 * 375 = 94_500.
+_NAMED_ANNUALIZATION_BASES: dict[str, tuple[str, int, float]] = {
+    "daily_252": ("daily", _DAILY_INTERVAL_NS, 252.0),
+    "daily_365": ("daily", _DAILY_INTERVAL_NS, 365.0),
+    "minute_nse_cash_94500": ("minute", _MINUTE_INTERVAL_NS, 94_500.0),
+    "minute_nse_cash_5m_18900": ("minute", 300_000_000_000, 18_900.0),
+    "minute_nse_cash_15m_6300": ("minute", 900_000_000_000, 6_300.0),
+    "minute_continuous_525600": ("minute", _MINUTE_INTERVAL_NS, 525_600.0),
 }
 
 
@@ -241,11 +256,39 @@ def _validate_cadence_and_annualization(record: dict[str, Any]) -> None:
         raise ExperimentError(
             "unknown annualization_basis; use synthetic_declared for explicit periods"
         )
-    expected_kind, expected_periods = declared
+    expected_kind, expected_interval, expected_periods = declared
     if bar_kind != expected_kind:
         raise ExperimentError(f"annualization_basis {basis} requires {expected_kind} bars")
+    if interval != expected_interval:
+        raise ExperimentError(
+            f"bar_interval_ns differs from the declared basis {basis} ({expected_interval} ns)"
+        )
     if float(periods) != expected_periods:
         raise ExperimentError(f"periods_per_year differs from the declared basis {basis}")
+
+
+def _validate_timezone(value: object, field: str) -> None:
+    _require_nonempty_string(value, field)
+    try:
+        ZoneInfo(value)
+    except (ValueError, ZoneInfoNotFoundError) as exc:
+        raise ExperimentError(f"{field} must be an IANA timezone name or UTC") from exc
+
+
+def _validate_dataset_and_bar_declaration(record: dict[str, Any]) -> None:
+    """Validate explicit origin, bar specification and calendar reference fields."""
+    if record["dataset_origin"] not in _DATASET_ORIGINS:
+        raise ExperimentError("dataset_origin must be SYNTHETIC or MARKET")
+    _validate_timezone(record["bar_timezone"], "bar_timezone")
+    anchor = record["bar_anchor"]
+    if anchor not in _TIMESTAMP_SEMANTICS:
+        raise ExperimentError("unknown bar_anchor")
+    if anchor != record["timestamp_semantics"]:
+        raise ExperimentError("bar_anchor must match timestamp_semantics")
+    if record["calendar_source"] not in _CALENDAR_SOURCES:
+        raise ExperimentError("unknown calendar_source")
+    _validate_timezone(record["calendar_timezone"], "calendar_timezone")
+    _require_sha256(record["calendar_sha256"], "calendar_sha256")
 
 
 def _validate_point_in_time_declaration(record: dict[str, Any]) -> None:
@@ -554,6 +597,7 @@ def validate_registered_experiment(record: dict[str, Any]) -> None:
         raise ExperimentError("cost_model digest mismatch")
     _validate_execution_assumptions(record["execution_assumptions"])
     _validate_cadence_and_annualization(record)
+    _validate_dataset_and_bar_declaration(record)
     _validate_point_in_time_declaration(record)
 
     holdout_use = record.get("holdout_use", "selection")

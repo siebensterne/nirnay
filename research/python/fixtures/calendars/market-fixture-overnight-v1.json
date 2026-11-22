@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "calendar_id": "market:fixture-overnight-v1",
+  "calendar_source": "checked_in_fixture",
+  "calendar_timezone": "Asia/Kolkata",
+  "synthetic": false,
+  "bar_kind": "minute",
+  "bar_interval_ns": 900000000000,
+  "anchor": "bar_close",
+  "mode": "session",
+  "sessions": [
+    {"weekdays": [0, 1, 2, 3, 4], "start": "23:00", "end": "01:00"}
+  ],
+  "auction": null,
+  "scheduled_breaks": [],
+  "early_closes": [],
+  "holidays": [],
+  "note": "Checked-in fixture overnight session schedule; bars may cross local midnight."
+}

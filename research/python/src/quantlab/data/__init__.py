@@ -40,6 +40,15 @@ def dataset_lineage_from_manifest(manifest: dict[str, Any] | DatasetManifest) ->
     return lineage
 
 
+def dataset_origin_from_manifest(manifest: dict[str, Any] | DatasetManifest) -> str:
+    """Return the explicit origin declared by a dataset manifest."""
+    body = manifest.as_dict() if isinstance(manifest, DatasetManifest) else manifest
+    origin = body.get("dataset_origin") if isinstance(body, dict) else None
+    if origin not in {"SYNTHETIC", "MARKET"}:
+        raise ValueError("dataset manifest dataset_origin must be SYNTHETIC or MARKET")
+    return origin
+
+
 def dataset_identity_from_manifest(manifest: dict[str, Any] | DatasetManifest) -> dict[str, str]:
     """Return the base dataset id and its versioned identity."""
     body = manifest.as_dict() if isinstance(manifest, DatasetManifest) else manifest
@@ -68,6 +77,7 @@ __all__ = [
     "adjustment_factors",
     "dataset_identity_from_manifest",
     "dataset_lineage_from_manifest",
+    "dataset_origin_from_manifest",
     "verify_published_dataset",
     "write_dataset",
 ]

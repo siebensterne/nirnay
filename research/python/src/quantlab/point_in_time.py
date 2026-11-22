@@ -391,6 +391,7 @@ def _config_digest(**config: Any) -> str:
 class DatasetManifest:
     schema_version: int
     dataset_id: str
+    dataset_origin: str
     created_at_utc_ns: int
     knowledge_policy: str
     timezone: str
@@ -428,10 +429,13 @@ class PITDatasetBuilder:
               created_at_utc_ns: int, max_event_age_ns: int | None = None,
               universe_id: str | None = None,
               input_sha256: str | None = None,
-              feature_lineage: FeatureLineage | None = None
+              feature_lineage: FeatureLineage | None = None,
+              dataset_origin: str = "SYNTHETIC"
               ) -> tuple[list[DatasetRow], DatasetManifest]:
         if not isinstance(dataset_id, str) or not dataset_id.strip() or type(created_at_utc_ns) is not int or created_at_utc_ns <= 0:
             raise ValueError("dataset_id and positive integer created_at_utc_ns are required")
+        if dataset_origin not in {"SYNTHETIC", "MARKET"}:
+            raise ValueError("dataset_origin must be SYNTHETIC or MARKET")
         if feature_lineage is not None:
             validate_feature_lineage(feature_lineage, created_at_utc_ns=created_at_utc_ns)
         feature_digest = None
@@ -543,7 +547,8 @@ class PITDatasetBuilder:
         provenance_input = input_sha256 or input_hasher.hexdigest()
         code_digest = _source_code_digest()
         config_digest = _config_digest(
-            dataset_id=dataset_id, created_at_utc_ns=created_at_utc_ns,
+            dataset_id=dataset_id, dataset_origin=dataset_origin,
+            created_at_utc_ns=created_at_utc_ns,
             max_event_age_ns=max_event_age_ns, universe_id=universe_id,
         )
         data_digest = hashlib.sha256(b"\n".join(canonical_bytes(r.as_dict()) for r in rows)).hexdigest()
@@ -551,6 +556,7 @@ class PITDatasetBuilder:
         action_hashes = tuple(sorted(used_action_hashes))
         manifest_body = {
             "schema_version": 1, "dataset_id": dataset_id,
+            "dataset_origin": dataset_origin,
             "universe_id": universe_id,
             "universe_membership_filter_applied": universe_id is not None,
             "survivorship_control_source_hashes": sorted(used_membership_hashes),
@@ -571,6 +577,7 @@ class PITDatasetBuilder:
         dataset_hash = hashlib.sha256(canonical_bytes(manifest_body)).hexdigest()
         manifest = DatasetManifest(
             schema_version=1, dataset_id=f"{dataset_id}:{dataset_hash[:16]}",
+            dataset_origin=dataset_origin,
             created_at_utc_ns=created_at_utc_ns,
             knowledge_policy=manifest_body["knowledge_policy"], timezone="Asia/Kolkata",
             session_date_policy=manifest_body["session_date_policy"],

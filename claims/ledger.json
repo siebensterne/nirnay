@@ -659,6 +659,28 @@
         ]
       },
       "falsifier": "A daily registration accepts minute-spaced bars, a minute registration accepts an incompatible interval, a named basis accepts a different period count, a synthetic dataset passes without a synthetic calendar and fixed interval, a CLI value replaces the registered annualisation factor, a bare one-nanosecond latency passes without a declared model, or an unevaluated candidate carries a numeric holdout result."
+    },
+    {
+      "id": "CLM-050",
+      "statement": "Registered bar cadence is checked against an expected schedule resolved from a checked-in, digest-verified calendar artifact rather than one fixed elapsed interval; dataset origin is explicit and manifest-bound, scheduled market gaps are accepted, missing scheduled bars fail unless covered by an explicit status, and no absent price is fabricated into a zero or forward-filled observation.",
+      "status": "implemented",
+      "scope": {
+        "files": [
+          "research/python/src/quantlab/experiments/calendar.py",
+          "research/python/src/quantlab/experiments/coverage.py",
+          "research/python/src/quantlab/experiments/cadence.py",
+          "research/python/src/quantlab/experiments/schema.py",
+          "research/python/src/quantlab/experiments/verify.py",
+          "research/python/src/quantlab/experiments/reproducibility.py",
+          "research/python/src/quantlab/data/__init__.py",
+          "research/python/src/quantlab/point_in_time.py",
+          "research/python/src/quantlab/research_jobs.py",
+          "research/python/fixtures/calendars/",
+          "research/python/tests/test_calendar_cadence.py",
+          "evidence/M4-2-1-CALENDAR-CADENCE-ADDENDUM-2026-11-22.md"
+        ]
+      },
+      "falsifier": "An unknown calendar id or a wrong calendar digest resolves; a config boolean or identifier substring overrides an explicit MARKET origin; a record origin disagrees with its manifest; a bar falls in an auction, break, holiday, weekend or after an early close; a missing session or minute bar inside an active session passes without a status; a status observation carries a numeric price; a five-minute bar passes under the one-minute basis; or a CLI value replaces the registered annualisation basis. Implemented, not independently verified; no provider data, rights, completeness or live-readiness claim is made."
     }
   ]
 }

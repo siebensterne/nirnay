@@ -8,8 +8,8 @@ import pytest
 
 from quantlab.alpha_search import AlphaCosts
 from quantlab.cli import main
-from quantlab.experiments import (ExperimentRegistry, build_search_space, content_hash, holdout_key,
-                                  make_attempt)
+from quantlab.experiments import (ExperimentRegistry, build_search_space, calendar_binding,
+                                  content_hash, holdout_key, make_attempt)
 from quantlab.experiments.schema import ExperimentError
 from quantlab.reporting import research_report_bytes
 from quantlab.reporting.comparison import (ComparisonError, compare_experiments,
@@ -49,6 +49,7 @@ def _terminal(experiment_id: str, *, start: int = 337, point_in_time: bool = Tru
         "registered_at_utc": "2026-11-12T00:00:00Z",
         "falsification_rule": "Reject unless net holdout expectancy is positive after costs.",
         "dataset_id": "fixture:nse-cash",
+        "dataset_origin": "SYNTHETIC",
         "dataset_version": "fixture:nse-cash:" + "a" * 16,
         "dataset_lineage": _lineage(),
         "universe_id": "fixture-universe",
@@ -67,9 +68,11 @@ def _terminal(experiment_id: str, *, start: int = 337, point_in_time: bool = Tru
                                   "queue_model": "not_modelled"},
         "bar_kind": "minute",
         "bar_interval_ns": 60_000_000_000,
+        "bar_timezone": "UTC",
+        "bar_anchor": "bar_close",
         "timestamp_semantics": "bar_close",
-        "calendar_id": "fixture:continuous-minute-v1",
-        "session_definition": "Fixture continuous minute bars; no exchange session",
+        **calendar_binding("synthetic:fixed-1m-v1"),
+        "session_definition": "Synthetic continuous one-minute bars; no exchange session",
         "annualization_basis": "synthetic_declared",
         "periods_per_year": 525_600.0,
         "point_in_time_basis": "chronological_only",

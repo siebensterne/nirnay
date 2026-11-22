@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "calendar_id": "market:fixture-daily-v1",
+  "calendar_source": "checked_in_fixture",
+  "calendar_timezone": "Asia/Kolkata",
+  "synthetic": false,
+  "bar_kind": "daily",
+  "bar_interval_ns": 86400000000000,
+  "anchor": "bar_close",
+  "mode": "session",
+  "sessions": [
+    {"weekdays": [0, 1, 2, 3, 4], "start": "09:15", "end": "15:30"}
+  ],
+  "auction": null,
+  "scheduled_breaks": [],
+  "early_closes": [
+    {"date": "2025-02-14", "end": "12:30"}
+  ],
+  "holidays": ["2025-01-20"],
+  "note": "Checked-in fixture session schedule for cadence tests; not licensed exchange reference data."
+}

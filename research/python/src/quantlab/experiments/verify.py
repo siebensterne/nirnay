@@ -12,7 +12,9 @@ import json
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from ..data import dataset_identity_from_manifest, dataset_lineage_from_manifest
+from ..data import (dataset_identity_from_manifest, dataset_lineage_from_manifest,
+                    dataset_origin_from_manifest)
+from .cadence import assert_dataset_origin
 from .schema import ExperimentError, content_hash
 
 
@@ -94,6 +96,8 @@ def verify_dataset_binding(body: Mapping[str, Any], dataset_dir: str | Path) -> 
         raise ExperimentError("dataset manifest must be an object")
     if content_hash(publication) != body.get("dataset_manifest_sha256"):
         raise ExperimentError("dataset_manifest_sha256 differs from the published manifest")
+    dataset_origin_from_manifest(dataset)
+    assert_dataset_origin(body, dataset)
     identity = dataset_identity_from_manifest(dataset)
     if body.get("dataset_id") != identity["dataset_id"]:
         raise ExperimentError("record dataset_id differs from the published manifest")
