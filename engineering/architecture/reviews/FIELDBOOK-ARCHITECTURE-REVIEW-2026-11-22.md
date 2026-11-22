@@ -14,7 +14,7 @@ Method: a fresh clone of public `main` at commit
 against source, not documentation claims: A1 architecture, A2 durability, A3 data semantics,
 A4 governance, A5 distribution. Full reports are in `fieldbook-audits/`.
 
-Boundaries actually observed:
+Boundaries observed:
 
 - No Fieldbook file was modified; the separate dirty working checkout at
   `/Users/tourist/Documents/fieldbook` was not touched.
@@ -149,7 +149,7 @@ N2, not code to be written now.
 
 ## 5. Required changes before integration
 
-1. **Governance must actually fail closed (A4, blocking).** Wire registry and certification
+1. **Governance must fail closed (A4, blocking).** Wire registry and certification
    into collection, discovery, latency probes and publication; remove the live default
    command and runnable live recipe; add a venue dimension to rights identity.
 2. **Fix the distribution verifier and release identity (A5, blocking).** A normal

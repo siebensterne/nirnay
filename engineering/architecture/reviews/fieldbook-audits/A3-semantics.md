@@ -12,12 +12,13 @@ NSE/BSE cash equities or any other cash-equity venue today.** The V2 types are a
 side-car modules; the live collector neither constructs them nor routes its data through them.
 The docs are honest about this (`docs/global-data-architecture.md:3-6,118-123`;
 `docs/specifications/event-model.md:85-89`; `docs/specifications/data-taxonomy.md:117-126`;
-`docs/specifications/instrument-master.md:187-201`; `docs/specifications/acquisition-framework.md:177-184`).
+`docs/specifications/instrument-master.md:187-201`;
+`docs/specifications/acquisition-framework.md:177-184`).
 The risk is that "universal" naming and an *Accepted* ADR are read as delivered capability.
 
 ## Implemented vs aspirational (explicit)
 
-**Actually implemented (live path):** 7 connector selectors in `ExchangeKind`
+**Implemented (live path):** 7 connector selectors in `ExchangeKind`
 (`src/governance/config.rs:19-32`): Kalshi, Polymarket, Hyperliquid, Coinbase, Kraken, OKX,
 Binance. OKX and Binance are documented as reference-data/offline-discovery only
 (`config.rs:26-31`); the other five are websocket adapters (`src/acquisition/exchange/mod.rs:1-15`).
@@ -37,7 +38,8 @@ opaque identity/PIT catalog (`src/domain/identity.rs:31-384`), reference graph
 source manifests (`src/governance/adapter.rs:23-282`; `src/domain/products.rs:222-363`).
 Verified by usage search: `CanonicalEnvelope<CanonicalEvent>`, `UniversalEnvelope`,
 `DomainPayload`, `InformationPayload`, `ReferenceCatalog`, `ReferenceGraph`,
-`venue_mappings_from_markets`, `resolve_venue_as_of` appear only in their own modules' `#[cfg(test)]`
+`venue_mappings_from_markets`, `resolve_venue_as_of` appear only in their own modules'
+`#[cfg(test)]`
 blocks. `DomainPayload` also appears in `src/acquisition/codec.rs:255-316,474-515`, but that
 typed-normalization path is reached only via `ProcessingStages::run`
 (`src/acquisition/evidence.rs:520-572`) → `EvidencePipeline::with_stages` → `run_stream_slice`
@@ -102,7 +104,7 @@ change the numeric model" `:625-641`, migration deferred `:606-620`.
    products.
 2. **`ReferenceGraph::resolve_venue` ignores its observation-time argument**
    (`reference_data.rs:314-321`, `let _ = observed_at_us;`), acknowledged at
-   `docs/specifications/instrument-master.md:90-92`. Venue PIT is therefore not actually applied.
+   `docs/specifications/instrument-master.md:90-92`. Venue PIT is therefore not applied.
 3. **Two incompatible "canonical" payload families.** `domain::canonical::CanonicalEvent`
    (book taxonomy) vs `storage::application::CanonicalBusinessEvent` (entity/kind/value)
    (`src/storage/application.rs:389-394,427-479`), both serialized with
