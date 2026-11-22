@@ -7,7 +7,7 @@ import pytest
 
 from quantlab.alpha_search import AlphaCosts
 from quantlab.experiments import (ExperimentError, ExperimentRegistry, build_search_space,
-                                  content_hash, holdout_key)
+                                  calendar_binding, content_hash, holdout_key)
 from quantlab.experiments.parameter_search import generate_configs, grid_search
 from quantlab.experiments.reproducibility import assert_report_hash
 
@@ -37,7 +37,8 @@ def _registered(count: int = 4) -> dict:
         "dataset_point_in_time": True, "code_revision": "test-revision", "config": {},
         "status": "registered", "registered_at_utc": "2026-11-12T00:00:00Z",
         "falsification_rule": "Reject unless every declared config has an outcome.",
-        "dataset_id": DATASET_ID, "dataset_version": DATASET_VERSION,
+        "dataset_id": DATASET_ID, "dataset_origin": "SYNTHETIC",
+        "dataset_version": DATASET_VERSION,
         "dataset_lineage": lineage, "universe_id": "fixture-universe",
         "feature_version": "features.v1", "strategy_code_hash": "7" * 64,
         "search_space": build_search_space("momentum", configs,
@@ -51,9 +52,11 @@ def _registered(count: int = 4) -> dict:
                                   "queue_model": "not_modelled"},
         "bar_kind": "minute",
         "bar_interval_ns": 60_000_000_000,
+        "bar_timezone": "UTC",
+        "bar_anchor": "bar_close",
         "timestamp_semantics": "bar_close",
-        "calendar_id": "fixture:continuous-minute-v1",
-        "session_definition": "Fixture continuous minute bars; no exchange session",
+        **calendar_binding("synthetic:fixed-1m-v1"),
+        "session_definition": "Synthetic continuous one-minute bars; no exchange session",
         "annualization_basis": "synthetic_declared",
         "periods_per_year": 525_600.0,
         "point_in_time_basis": "chronological_only",

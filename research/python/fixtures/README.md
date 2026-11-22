@@ -12,5 +12,10 @@ All files in this directory are **synthetic examples**. They demonstrate canonic
   recurrence. It is paired with a registration declaring `bar_kind: minute`,
   `bar_interval_ns: 60000000000`, a synthetic calendar and an explicit
   annualisation basis. It is synthetic test data, not market data.
+- `calendars/`: checked-in calendar artifacts resolved by
+  `quantlab.experiments.calendar`. Synthetic artifacts declare a fixed interval;
+  `market:fixture-*` artifacts model regular sessions, auction exclusion,
+  scheduled breaks, early closes, holidays and an overnight session. These are
+  fixture schedules for cadence tests, not licensed exchange reference data.
 
 A real dataset must replace every fixture source with licensed, independently acquired source artifacts and accurate source-retrieval/knowledge timestamps. Do not label output built from these files as market data.

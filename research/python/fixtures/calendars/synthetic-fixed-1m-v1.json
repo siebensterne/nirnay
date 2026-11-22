@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "calendar_id": "synthetic:fixed-1m-v1",
+  "calendar_source": "checked_in_fixture",
+  "calendar_timezone": "UTC",
+  "synthetic": true,
+  "bar_kind": "minute",
+  "bar_interval_ns": 60000000000,
+  "anchor": "bar_close",
+  "mode": "continuous",
+  "sessions": [],
+  "auction": null,
+  "scheduled_breaks": [],
+  "early_closes": [],
+  "holidays": [],
+  "note": "Synthetic fixed one-minute interval; no exchange session is modelled."
+}

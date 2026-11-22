@@ -5,7 +5,7 @@
 **Release status:** research/paper engineering candidate. This repository is not a certified broker-connected trading system, not a SEBI/exchange-approved algo product, and not evidence of profitable alpha. Live order routing is hard-disabled. Every capability statement below distinguishes code present from external verification still required.
 
 <!-- CURRENT-STATE
-code_commit: 00cdbfaf41cc0e76fe50360ff28c8b3fcfdb4528
+code_commit: 1f0aaefc1980785b792d35bcc1cc64244cb88011
 verified_on: 2026-11-21
 ci_run: 44939616362
 scope: make check + hosted CI 44939616362 on 4a66f14 (12/12)
@@ -412,6 +412,7 @@ once published; a new run adds a new dated file instead of rewriting history.
 | Dated evidence | `evidence/RISK-CONTROLS-RECOVERY-DRILL-2026-11-21.md` | typed risk-control fixtures, permit binding and in-process recovery drill |
 | Dated evidence | `evidence/M4-RESEARCH-EVIDENCE-2026-11-21.md` | first synthetic pre-registered experiment and registry evidence |
 | Dated evidence | `evidence/M4-CADENCE-CORRECTION-2026-11-21.md` | immutable addendum correcting the M4 cadence and annualisation registration |
+| Dated evidence | `evidence/M4-2-1-CALENDAR-CADENCE-ADDENDUM-2026-11-22.md` | generalized calendar-based cadence validation; implemented, not verified |
 
 The current-state block above names the verified commit, date, CI run and
 scope. Update it in the PR that changes the verified baseline. Do not add a

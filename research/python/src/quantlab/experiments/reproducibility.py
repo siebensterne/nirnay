@@ -11,7 +11,8 @@ import json
 from pathlib import Path
 from typing import Any
 
-from ..data import dataset_identity_from_manifest, dataset_lineage_from_manifest
+from ..data import (dataset_identity_from_manifest, dataset_lineage_from_manifest,
+                    dataset_origin_from_manifest)
 from ..market import canonical_bytes
 from .schema import ExperimentError, content_hash
 
@@ -49,7 +50,8 @@ def bind_dataset(manifest: dict[str, Any] | Any, *, artifacts: dict[str, str] | 
     identity = dataset_identity_from_manifest(body)
     payload = {"dataset": body, "artifacts": artifacts or {}, "publication": publication}
     manifest_digest = hashlib.sha256(canonical_bytes(payload)).hexdigest()
-    return {**identity, "dataset_manifest_sha256": manifest_digest,
+    return {**identity, "dataset_origin": dataset_origin_from_manifest(body),
+            "dataset_manifest_sha256": manifest_digest,
             "dataset_lineage": dataset_lineage_from_manifest(body)}
 
 
@@ -67,7 +69,8 @@ def bind_published_dataset(dataset_dir: str | Path) -> dict[str, Any]:
         raise ExperimentError("dataset publication manifest has an invalid shape")
     body = payload["dataset"]
     identity = dataset_identity_from_manifest(body)
-    return {**identity, "dataset_manifest_sha256": content_hash(payload),
+    return {**identity, "dataset_origin": dataset_origin_from_manifest(body),
+            "dataset_manifest_sha256": content_hash(payload),
             "dataset_lineage": dataset_lineage_from_manifest(body)}
 
 

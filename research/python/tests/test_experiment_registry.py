@@ -16,8 +16,8 @@ from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 from quantlab.alpha_search import AlphaCosts, Bar, default_candidate_family
 from quantlab.cli import main
 from quantlab.experiments import (DuplicateExperimentError, ExperimentError, ExperimentRegistry,
-                                  HoldoutReuseError, build_search_space, content_hash, holdout_key,
-                                  make_attempt)
+                                  HoldoutReuseError, build_search_space, calendar_binding,
+                                  content_hash, holdout_key, make_attempt)
 from quantlab.experiments.cadence import validate_bar_cadence
 from quantlab.experiments.schema import (NOT_APPLICABLE_INTERVAL,
                                          SYNTHETIC_ANNUALIZATION_BASIS,
@@ -66,6 +66,7 @@ def _registered(experiment_id: str = "EXP-0001", *, counts: int = 4) -> dict:
         "registered_at_utc": "2026-11-12T00:00:00Z",
         "falsification_rule": "Reject if net holdout expectancy is not positive after costs.",
         "dataset_id": DATASET_ID,
+        "dataset_origin": "SYNTHETIC",
         "dataset_version": DATASET_VERSION,
         "dataset_lineage": _lineage(),
         "universe_id": "fixture-universe",
@@ -83,9 +84,11 @@ def _registered(experiment_id: str = "EXP-0001", *, counts: int = 4) -> dict:
                                   "liquidity_model": "not_calibrated"},
         "bar_kind": "minute",
         "bar_interval_ns": MINUTE_INTERVAL_NS,
+        "bar_timezone": "UTC",
+        "bar_anchor": "bar_close",
         "timestamp_semantics": "bar_close",
-        "calendar_id": "synthetic:continuous-minute-v1",
-        "session_definition": "Synthetic continuous minute bars; no exchange session",
+        **calendar_binding("synthetic:fixed-1m-v1"),
+        "session_definition": "Synthetic continuous one-minute bars; no exchange session",
         "annualization_basis": SYNTHETIC_ANNUALIZATION_BASIS,
         "periods_per_year": 525_600.0,
         "point_in_time_basis": "chronological_only",
@@ -487,12 +490,13 @@ def test_daily_registration_rejects_minute_timestamps(tmp_path: Path) -> None:
     registered = _registered("EXP-CADENCE-DAILY")
     registered["bar_kind"] = "daily"
     registered["bar_interval_ns"] = DAILY_INTERVAL_NS
+    registered.update(calendar_binding("synthetic:fixed-1d-v1"))
     timestamps = [bar.timestamp_ns for bar in _bars()]
-    with pytest.raises(ExperimentError, match="bar interval"):
+    with pytest.raises(ExperimentError, match="unexpected bar timestamp"):
         validate_bar_cadence(registered, timestamps)
     registry = ExperimentRegistry(tmp_path / "registry.sqlite3")
     registry.register(registered)
-    with pytest.raises(ExperimentError, match="bar interval"):
+    with pytest.raises(ExperimentError, match="unexpected bar timestamp"):
         run_registered_search(registry, "EXP-CADENCE-DAILY", _bars())
     assert registry.record("EXP-CADENCE-DAILY").status == "registered"
     registered["bar_interval_ns"] = MINUTE_INTERVAL_NS
@@ -576,18 +580,18 @@ def test_calendar_metadata_missing_or_inconsistent_rejected() -> None:
         validate_bar_cadence(missing, timestamps)
 
     market = _registered()
-    market["dataset_id"] = "fixture:nse-cash"
-    market["dataset_ref"] = "fixture:nse-cash:2026-11-11"
-    market["config"] = {"lookback": 5}
-    market["calendar_id"] = "synthetic:continuous-minute-v1"
+    market["dataset_origin"] = "MARKET"
+    market["config"] = {"lookback": 5, "synthetic": True}
     with pytest.raises(ExperimentError, match="market dataset cannot use a synthetic calendar"):
         validate_bar_cadence(market, timestamps)
 
     synthetic = _registered()
-    synthetic["calendar_id"] = "fixture:continuous-minute-v1"
+    synthetic.update(calendar_binding("market:fixture-minute-v1"))
+    synthetic["bar_timezone"] = "Asia/Kolkata"
     with pytest.raises(ExperimentError, match="synthetic dataset requires a synthetic calendar"):
         validate_bar_cadence(synthetic, timestamps)
-    synthetic["calendar_id"] = "synthetic:continuous-minute-v1"
+    synthetic.update(calendar_binding("synthetic:fixed-1m-v1"))
+    synthetic["bar_timezone"] = "UTC"
     synthetic["bar_interval_ns"] = NOT_APPLICABLE_INTERVAL
     with pytest.raises(ExperimentError, match="synthetic dataset requires a fixed"):
         validate_bar_cadence(synthetic, timestamps)
