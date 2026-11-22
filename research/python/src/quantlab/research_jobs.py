@@ -28,6 +28,7 @@ from jsonschema import Draft202012Validator
 
 from .bench import synthetic_events
 from .cli import _load_reference_data
+from .dataset_admission import DatasetAdmissionError, admit_published_dataset
 from .experiments import (ExperimentError, ExperimentRegistry, build_search_space,
                           calendar_binding, content_hash, holdout_key, make_attempt)
 from .experiments.reproducibility import bind_published_dataset, environment_digest
@@ -374,7 +375,8 @@ def _terminal_record(registered: dict[str, Any], job: dict[str, Any],
 
 
 def run_job(manifest_path: str | Path, out_dir: str | Path, registry_path: str | Path, *,
-            job_id: str | None = None, root: Path = ROOT) -> JobRunResult:
+            job_id: str | None = None, admission: str | Path | None = None,
+            root: Path = ROOT) -> JobRunResult:
     """Validate, dry-run and append one structured run record for a manifest job."""
     manifest = load_manifest(manifest_path)
     environment = manifest["environment"]
@@ -384,6 +386,11 @@ def run_job(manifest_path: str | Path, out_dir: str | Path, registry_path: str |
         raise ExperimentError(f"research job id not found in manifest: {job_id}")
     pins = assert_pinned_environment(environment, job, root=root)
     dataset_dir, binding = build_synthetic_dataset(out_dir)
+    if admission is None:
+        raise DatasetAdmissionError(
+            "research jobs require a dataset-admission record before any research use"
+        )
+    admit_published_dataset(dataset_dir, admission)
     assert_dataset_binding(job, binding)
 
     argv = _resolve_command(job["command"], dataset_dir)

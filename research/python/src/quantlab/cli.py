@@ -15,6 +15,7 @@ from typing import Any
 from .alpha_search import AlphaCosts, Bar
 from .backtest import BacktestConfig, EventDrivenBacktester
 from .data_rights import ProductKey, REPLAY, authorize
+from .dataset_admission import DatasetAdmissionError, admit_published_dataset
 from .demo import run_demo
 from .experiments.registry import ExperimentRegistry
 from .experiments.schema import load_experiment
@@ -598,6 +599,10 @@ def _cmd_build_dataset(args: argparse.Namespace) -> int:
 
 
 def _cmd_verify_dataset(args: argparse.Namespace) -> int:
+    if args.for_research and args.admission is None:
+        raise DatasetAdmissionError(
+            "research verification requires --admission with a valid dataset-admission record"
+        )
     trusted: dict[str, str] = {}
     for item in args.trusted_key:
         key_id, separator, public_key = item.partition("=")
@@ -605,7 +610,15 @@ def _cmd_verify_dataset(args: argparse.Namespace) -> int:
             raise ValueError("--trusted-key must be unique KEY_ID=BASE64 values")
         trusted[key_id] = public_key
     result = verify_published_dataset(args.dataset, trusted_public_keys=trusted or None)
+    if args.admission is not None:
+        result["admission"] = admit_published_dataset(args.dataset, args.admission)
     print(json.dumps(result, sort_keys=True, indent=2))
+    return 0
+
+
+def _cmd_admit_dataset(args: argparse.Namespace) -> int:
+    receipt = admit_published_dataset(args.dataset, args.admission)
+    print(json.dumps(receipt, sort_keys=True, indent=2))
     return 0
 
 
@@ -725,7 +738,12 @@ def _cmd_validation_report(args: argparse.Namespace) -> int:
 def _cmd_run_research_job(args: argparse.Namespace) -> int:
     from .research_jobs import run_job
 
-    result = run_job(args.manifest, args.out, args.registry, job_id=args.job_id)
+    if args.admission is None:
+        raise DatasetAdmissionError(
+            "research jobs require --admission with a valid dataset-admission record"
+        )
+    result = run_job(args.manifest, args.out, args.registry, job_id=args.job_id,
+                     admission=args.admission)
     payload = json.dumps(result.as_dict(), sort_keys=True, separators=(",", ":"),
                          allow_nan=False).encode("utf-8")
     sys.stdout.buffer.write(payload + b"\n")
@@ -796,7 +814,19 @@ def build_parser() -> argparse.ArgumentParser:
     verify.add_argument("dataset", type=Path)
     verify.add_argument("--trusted-key", action="append", default=[], metavar="KEY_ID=BASE64",
                         help="trusted Ed25519 public key for signed datasets; repeat per key")
+    verify.add_argument("--admission", type=Path,
+                        help="dataset-admission record required before research use")
+    verify.add_argument("--for-research", action="store_true",
+                        help="refuse verification unless a valid admission record is supplied")
     verify.set_defaults(handler=_cmd_verify_dataset)
+
+    admit = sub.add_parser("admit-dataset",
+                           help="validate a dataset-admission record against a published release")
+    admit.add_argument("--dataset", type=Path, required=True,
+                       help="published immutable dataset directory")
+    admit.add_argument("--admission", type=Path, required=True,
+                       help="versioned dataset-admission record")
+    admit.set_defaults(handler=_cmd_admit_dataset)
 
     normalize = sub.add_parser("normalize", help="normalize decoded Upstox V3 JSON or FYERS SDK journal to canonical MarketEvent JSONL")
     normalize.add_argument("--provider", choices=("upstox", "fyers"), required=True)
@@ -889,6 +919,8 @@ def build_parser() -> argparse.ArgumentParser:
     job.add_argument("--registry", type=Path, required=True,
                      help="append-only experiment registry that receives the run record")
     job.add_argument("--job-id", help="job id from the manifest; defaults to the first job")
+    job.add_argument("--admission", type=Path,
+                     help="dataset-admission record required before any research use")
     job.set_defaults(handler=_cmd_run_research_job)
 
 
