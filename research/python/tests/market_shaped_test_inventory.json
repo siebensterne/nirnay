@@ -1,0 +1,513 @@
+{
+  "schema_version": 1,
+  "record": "research/python/tests/market_shaped_test_inventory.json",
+  "policy": "Owner directive 2026-11-22 D1-D3: no synthetic market data as research evidence.",
+  "scope": "All tests that construct or consume invented market observations, plus tests registered market_shaped_fixture.",
+  "enforcement": "research/python/tests/conftest.py deselects these tests in pytest_collection_modifyitems and blocks uninventoried modules with market-domain constructs.",
+  "deselection_is_independent_of_marker_expression": true,
+  "source_preserved": true,
+  "note": "Dated record: evidence/SYNTHETIC-TEST-POLICY-NIRNAY-2026-11-23.md",
+  "modules": {
+    "research/python/tests/test_backtest_and_alpha.py": {
+      "category": "mixed",
+      "reason": "Contains prohibited market-shaped tests from more than one category.",
+      "constructs": [
+        "constructor:Bar",
+        "constructor:BookLevel",
+        "constructor:MarketEvent",
+        "price_array:bars",
+        "price_array:down_prices",
+        "price_array:prices",
+        "synthetic_demo_driver"
+      ],
+      "deselect": [
+        "AlphaSearchTests::test_rejects_frequency_ambiguous_sharpe_annualisation_value",
+        "AlphaSearchTests::test_requires_chronologically_ordered_bars_and_enough_data",
+        "AlphaSearchTests::test_search_is_deterministic_and_uses_untouched_holdout",
+        "BacktestTests::test_cancel_latency_is_part_of_tif_expiry",
+        "BacktestTests::test_demo_is_deterministic_and_explicitly_synthetic",
+        "BacktestTests::test_marketable_limit_partial_fills_are_replay_deterministic",
+        "BacktestTests::test_mixed_provider_replay_requires_explicit_provider_selection",
+        "BacktestTests::test_passive_queue_consumes_prints_before_simulated_order",
+        "BacktestTests::test_passive_touch_with_unknown_aggressor_is_not_a_fill",
+        "BacktestTests::test_static_mid_market_cost_decomposition_separates_spread_and_impact",
+        "BacktestTests::test_streaming_ema_strategy_exits_full_position",
+        "BacktestTests::test_unchanged_book_snapshot_does_not_recreate_taker_liquidity"
+      ],
+      "retain": []
+    },
+    "research/python/tests/test_bench.py": {
+      "category": "market_shaped_fixture_consumer",
+      "reason": "Consumes a checked-in market-shaped fixture or is registered market_shaped_fixture.",
+      "constructs": [],
+      "deselect": [
+        "test_core_suite_emits_measured_distributions_and_stable_hashes",
+        "test_experiments_suite_reads_one_immutable_dataset_concurrently",
+        "test_latency_suite_emits_measured_distributions_and_stable_hashes",
+        "test_synthetic_fixture_scales_and_is_byte_stable"
+      ],
+      "retain": [
+        "test_percentile_selects_known_ranks"
+      ]
+    },
+    "research/python/tests/test_calendar_cadence.py": {
+      "category": "market_shaped_fixture_consumer",
+      "reason": "Consumes a checked-in market-shaped fixture or is registered market_shaped_fixture.",
+      "constructs": [
+        "fixture_path:canonical-events.example.jsonl",
+        "fixture_path:reference-data.example.json"
+      ],
+      "deselect": [
+        "test_auction_and_scheduled_break_bars_rejected",
+        "test_cli_cannot_override_registered_annualisation",
+        "test_config_cannot_mark_market_dataset_synthetic",
+        "test_daily_friday_to_monday_on_valid_calendar_pass",
+        "test_daily_missing_expected_trading_day_fails",
+        "test_dataset_origin_matches_published_manifest",
+        "test_declared_early_close_pass",
+        "test_fifteen_minute_bars_with_fifteen_minute_basis_pass",
+        "test_five_minute_bars_with_five_minute_basis_pass",
+        "test_five_minute_bars_with_one_minute_basis_fail",
+        "test_incorrect_calendar_digest_fails",
+        "test_intraday_overnight_boundary_pass",
+        "test_legacy_record_without_dataset_origin_fails_new_search",
+        "test_missing_minute_inside_active_session_fails",
+        "test_no_trade_and_suspended_instruments_yield_explicit_status",
+        "test_scheduled_holiday_pass",
+        "test_synthetic_daily_fixed_interval_pass",
+        "test_synthetic_one_minute_regular_bars_pass",
+        "test_unknown_calendar_id_fails"
+      ],
+      "retain": []
+    },
+    "research/python/tests/test_canonical_projection.py": {
+      "category": "inline_market_constructors",
+      "reason": "Builds invented market events, books, orders, trades, bars or corporate actions in-process.",
+      "constructs": [
+        "key:askP",
+        "key:askQ",
+        "key:bidAskQuote",
+        "key:bidP",
+        "key:bidQ"
+      ],
+      "deselect": [
+        "test_fresh_process_replay_is_byte_identical",
+        "test_projection_binds_reference_revision_and_records_versions",
+        "test_reference_drift_fails_closed",
+        "test_unknown_instrument_stays_unresolved"
+      ],
+      "retain": []
+    },
+    "research/python/tests/test_cli_pipeline.py": {
+      "category": "mixed",
+      "reason": "Contains prohibited market-shaped tests from more than one category.",
+      "constructs": [
+        "key:askP",
+        "key:askQ",
+        "key:bidAskQuote",
+        "key:bidP",
+        "key:bidQ"
+      ],
+      "deselect": [
+        "test_list_experiments_cli_shows_rejected_runs_and_attempt_counts",
+        "test_normalize_cli_group_publication_refuses_existing_sidecar_without_partial_output",
+        "test_upstox_normalize_cli_links_canonical_events_to_raw_frames"
+      ],
+      "retain": [
+        "test_fyers_normalize_refuses_journal_gap_by_default",
+        "test_iter_jsonl_streams_rows_without_materializing",
+        "test_jsonl_reader_rejects_blank_lines_as_ambiguous_source_records",
+        "test_reconcile_cli_is_deterministic_and_serializes_decimal_results",
+        "test_upstox_normalize_marks_sequence_gaps_not_research_grade",
+        "test_upstox_normalize_rejects_missing_capture_sequence",
+        "test_upstox_normalize_rejects_non_increasing_capture_sequence",
+        "test_upstox_normalize_rolls_back_output_if_report_link_fails"
+      ]
+    },
+    "research/python/tests/test_corporate_actions.py": {
+      "category": "inline_market_constructors",
+      "reason": "Builds invented market events, books, orders, trades, bars or corporate actions in-process.",
+      "constructs": [
+        "constructor:SyntheticCorporateAction"
+      ],
+      "deselect": [
+        "test_action_declaration_is_strict",
+        "test_cancelled_and_other_instrument_actions_are_ignored",
+        "test_composed_factors_respect_knowledge_time_and_effective_date",
+        "test_split_and_bonus_factors_are_exact_decimals",
+        "test_unsupported_action_kinds_never_yield_a_factor"
+      ],
+      "retain": []
+    },
+    "research/python/tests/test_experiment_comparison.py": {
+      "category": "market_shaped_fixture_consumer",
+      "reason": "Consumes a checked-in market-shaped fixture or is registered market_shaped_fixture.",
+      "constructs": [],
+      "deselect": [
+        "test_byte_stable_comparison_output",
+        "test_cli_compare_experiments_is_byte_stable_and_refuses_mismatch",
+        "test_differing_dataset_hash_rejected",
+        "test_holdout_reuse_rejected",
+        "test_leaky_record_rejected",
+        "test_non_terminal_record_rejected",
+        "test_registry_backed_comparison",
+        "test_tampered_record_rejected"
+      ],
+      "retain": []
+    },
+    "research/python/tests/test_experiment_registry.py": {
+      "category": "mixed",
+      "reason": "Contains prohibited market-shaped tests from more than one category.",
+      "constructs": [
+        "constructor:Bar",
+        "fixture_path:alpha-bars-minute.seed-20261121.csv",
+        "fixture_path:canonical-events.example.jsonl",
+        "fixture_path:reference-data.example.json",
+        "price_array:_bars"
+      ],
+      "deselect": [
+        "test_all_attempted_configs_persisted_including_losers",
+        "test_annualisation_factor_conflicts_with_registered_basis",
+        "test_append_is_hash_chained_and_sequence_contiguous",
+        "test_calendar_metadata_missing_or_inconsistent_rejected",
+        "test_cli_alpha_search_requires_registered_experiment",
+        "test_cli_periods_per_year_cannot_override_registration",
+        "test_concurrent_registration_claims_holdout_once",
+        "test_cscv_diagnostics_never_use_final_holdout",
+        "test_daily_registration_rejects_minute_timestamps",
+        "test_dsr_trial_count_equals_registry_attempts",
+        "test_duplicate_experiment_id_rejected",
+        "test_extended_record_freezes_deterministically",
+        "test_holdout_reuse_rejected_after_terminal_record",
+        "test_leaked_dataset_cannot_be_candidate",
+        "test_minute_registration_rejects_incompatible_interval",
+        "test_minute_registration_runs_with_declared_annualisation",
+        "test_nonchronological_periods_rejected",
+        "test_numeric_latency_without_model_rejected",
+        "test_point_in_time_basis_limits_boolean_certification",
+        "test_rejected_experiment_is_retained",
+        "test_report_binds_dataset_manifest_digest",
+        "test_signed_head_verifies_and_tampered_head_fails",
+        "test_storage_rejects_update_and_delete",
+        "test_terminal_requires_result_validation",
+        "test_universe_version_and_feature_digest_participate_in_holdout_key",
+        "test_unknown_and_nonfinite_fields_still_rejected",
+        "test_validation_holdout_overlap_rejected",
+        "test_verification_only_claim_requires_replicates",
+        "test_verify_detects_tampered_body_and_reordered_records"
+      ],
+      "retain": []
+    },
+    "research/python/tests/test_feature_computation.py": {
+      "category": "mixed",
+      "reason": "Contains prohibited market-shaped tests from more than one category.",
+      "constructs": [
+        "constructor:OhlcvBar",
+        "price_array:_bars",
+        "price_array:closes"
+      ],
+      "deselect": [
+        "test_append_future_bar_does_not_change_earlier_rows",
+        "test_batch_is_deterministic_and_lineage_binds",
+        "test_future_knowledge_declaration_is_refused",
+        "test_ohlcv_bar_validation_is_strict",
+        "test_volatility_primitives_are_finite_and_causal"
+      ],
+      "retain": [
+        "test_statistical_primitives_reject_non_finite_and_short_windows",
+        "test_technical_primitives_match_direct_calculation"
+      ]
+    },
+    "research/python/tests/test_feature_lineage.py": {
+      "category": "market_shaped_fixture_consumer",
+      "reason": "Consumes a checked-in market-shaped fixture or is registered market_shaped_fixture.",
+      "constructs": [
+        "fixture_path:canonical-events.example.jsonl",
+        "fixture_path:reference-data.example.json"
+      ],
+      "deselect": [
+        "test_builder_binds_feature_lineage_to_rows_and_manifest",
+        "test_published_dataset_detects_tampered_manifest_lineage",
+        "test_published_dataset_detects_tampered_row_lineage"
+      ],
+      "retain": [
+        "test_decoded_lineage_rejects_unknown_fields",
+        "test_definition_digest_is_stable_and_rejects_empty",
+        "test_future_as_of_for_event_rejected",
+        "test_knowledge_time_after_as_of_rejected"
+      ]
+    },
+    "research/python/tests/test_market_pipeline.py": {
+      "category": "mixed",
+      "reason": "Contains prohibited market-shaped tests from more than one category.",
+      "constructs": [
+        "constructor:BookLevel",
+        "constructor:MarketEvent",
+        "key:askP",
+        "key:askQ",
+        "key:bidAskQuote",
+        "key:bidP",
+        "key:bidQ",
+        "market_reference_observation"
+      ],
+      "deselect": [
+        "PointInTimeTests::test_bitemporal_listing_and_known_split_are_preserved",
+        "PointInTimeTests::test_cancelled_action_does_not_adjust_but_retains_audit_lineage",
+        "PointInTimeTests::test_complex_action_requires_explicit_transform",
+        "PointInTimeTests::test_dataset_manifest_carries_input_code_and_config_digests",
+        "PointInTimeTests::test_dataset_marks_local_receive_date_fallback_and_missing_wire_lineage",
+        "PointInTimeTests::test_dataset_rejects_duplicate_canonical_event_ids",
+        "PointInTimeTests::test_dataset_rejects_provider_listing_venue_mismatch",
+        "PointInTimeTests::test_dataset_uses_provider_observation_date_not_late_receive_date",
+        "PointInTimeTests::test_dataset_verifier_detects_artifact_tampering",
+        "PointInTimeTests::test_dataset_verifier_recomputes_nested_capture_frame_hashes",
+        "PointInTimeTests::test_dataset_writer_is_immutable_and_refuses_overwrite",
+        "PointInTimeTests::test_late_mapping_does_not_rewrite_historical_knowledge",
+        "PointInTimeTests::test_listing_correction_does_not_rewrite_earlier_knowledge",
+        "PointInTimeTests::test_parquet_roundtrip_is_semantically_verified_against_canonical_jsonl",
+        "PointInTimeTests::test_point_in_time_universe_membership_filters_without_current_constituent_lookahead",
+        "PointInTimeTests::test_revised_corporate_action_is_bitemporal_and_preserves_superseded_lineage",
+        "PointInTimeTests::test_signed_dataset_requires_trusted_key_and_verifies_detached_signature",
+        "ProviderTests::test_cross_feed_reconciliation_requires_comparable_trade_timestamps",
+        "ProviderTests::test_fyers_emits_trade_only_after_last_trade_tuple_advances",
+        "ProviderTests::test_fyers_symbol_and_depth_are_distinct_shapes",
+        "ProviderTests::test_fyers_timestamp_regression_does_not_rewind_trade_deduplication",
+        "ProviderTests::test_inferred_last_trade_observation_is_not_a_confirmed_print",
+        "ProviderTests::test_reconcile_latest_ignores_last_trade_observations",
+        "ProviderTests::test_upstox_emits_new_last_trade_observation_not_on_repeated_snapshot",
+        "ProviderTests::test_upstox_normalizes_market_ff_and_keeps_timestamp_semantics",
+        "ProviderTests::test_upstox_timestamp_regression_does_not_rewind_trade_deduplication"
+      ],
+      "retain": []
+    },
+    "research/python/tests/test_paper_projection_consumption.py": {
+      "category": "market_shaped_fixture_consumer",
+      "reason": "Consumes a checked-in market-shaped fixture or is registered market_shaped_fixture.",
+      "constructs": [
+        "fixture_path:canonical-events.example.jsonl"
+      ],
+      "deselect": [
+        "test_fresh_process_replay_is_byte_identical",
+        "test_paper_replay_consumes_projected_events",
+        "test_provider_mismatch_fails",
+        "test_reference_binding_must_match_projection_sidecar",
+        "test_replay_denied_by_registry_emits_no_output",
+        "test_unresolved_instrument_and_missing_lineage_fail"
+      ],
+      "retain": []
+    },
+    "research/python/tests/test_parameter_search.py": {
+      "category": "market_shaped_fixture_consumer",
+      "reason": "Consumes a checked-in market-shaped fixture or is registered market_shaped_fixture.",
+      "constructs": [],
+      "deselect": [
+        "test_count_mismatch_is_refused_before_evaluation",
+        "test_grid_search_persists_all_attempts_including_losers",
+        "test_nonfinite_evaluator_outcome_is_refused",
+        "test_out_of_space_config_is_refused_before_evaluation"
+      ],
+      "retain": [
+        "test_generate_configs_is_deterministic_and_refuses_empty_axes",
+        "test_unregistered_search_refuses_before_evaluation"
+      ]
+    },
+    "research/python/tests/test_portfolio_backtest.py": {
+      "category": "inline_market_constructors",
+      "reason": "Builds invented market events, books, orders, trades, bars or corporate actions in-process.",
+      "constructs": [
+        "constructor:BookLevel",
+        "constructor:MarketEvent"
+      ],
+      "deselect": [
+        "test_portfolio_backtest_handles_two_symbols_and_marks_equity",
+        "test_portfolio_enforces_participation_without_minimum_one_share_override",
+        "test_portfolio_refuses_to_double_count_two_provider_feeds",
+        "test_portfolio_reserves_cash_for_all_open_buy_orders"
+      ],
+      "retain": []
+    },
+    "research/python/tests/test_quant_pipeline_e2e.py": {
+      "category": "mixed",
+      "reason": "Contains prohibited market-shaped tests from more than one category.",
+      "constructs": [
+        "constructor:Bar",
+        "fixture_path:alpha-bars.synthetic.csv",
+        "fixture_path:canonical-events.example.jsonl",
+        "fixture_path:reference-data.example.json",
+        "price_array:bars"
+      ],
+      "deselect": [
+        "test_synthetic_research_to_paper_pipeline_composes_without_claiming_live_readiness"
+      ],
+      "retain": []
+    },
+    "research/python/tests/test_research_jobs.py": {
+      "category": "market_shaped_fixture_consumer",
+      "reason": "Consumes a checked-in market-shaped fixture or is registered market_shaped_fixture.",
+      "constructs": [],
+      "deselect": [
+        "test_cli_run_research_job",
+        "test_dry_run_is_deterministic_and_appends_a_run_record",
+        "test_manifest_accepts_valid_declaration",
+        "test_manifest_cross_field_invariants",
+        "test_manifest_schema_rejects_invalid_cases",
+        "test_stale_dataset_hash_is_refused",
+        "test_unpinned_environment_is_refused"
+      ],
+      "retain": []
+    },
+    "research/python/tests/test_research_package_shims.py": {
+      "category": "market_shaped_fixture_consumer",
+      "reason": "Consumes a checked-in market-shaped fixture or is registered market_shaped_fixture.",
+      "constructs": [
+        "fixture_path:canonical-events.example.jsonl",
+        "fixture_path:reference-data.example.json"
+      ],
+      "deselect": [
+        "test_bind_dataset_returns_lineage_and_digest",
+        "test_dataset_lineage_and_identity_helpers"
+      ],
+      "retain": [
+        "test_cost_assumptions_digest_matches_canonical_values",
+        "test_environment_digest_is_path_order_stable_and_refuses_duplicates",
+        "test_report_bytes_are_byte_stable",
+        "test_report_digest_helpers_reject_tampering",
+        "test_signed_head_message_is_domain_separated",
+        "test_strategy_shim_keeps_deterministic_fixture",
+        "test_validation_shim_keeps_diagnostics_and_adds_leakage_detector"
+      ]
+    },
+    "research/python/tests/test_robustness.py": {
+      "category": "market_shaped_fixture_consumer",
+      "reason": "Consumes a checked-in market-shaped fixture or is registered market_shaped_fixture.",
+      "constructs": [],
+      "deselect": [
+        "test_diagnostic_reading_holdout_fails_terminal_append"
+      ],
+      "retain": [
+        "test_parameter_sensitivity_detects_rank_reversal",
+        "test_parameter_sensitivity_refuses_short_or_nonfinite_attempts",
+        "test_robustness_digest_refuses_holdout_flags_and_is_stable",
+        "test_segment_stability_accepts_consistent_signs",
+        "test_segment_stability_flags_sign_reversal_with_different_magnitudes",
+        "test_segment_stability_refuses_nonfinite"
+      ]
+    },
+    "research/python/tests/test_sim_core.py": {
+      "category": "inline_market_constructors",
+      "reason": "Builds invented market events, books, orders, trades, bars or corporate actions in-process.",
+      "constructs": [
+        "constructor:BookLevel",
+        "constructor:BookSnapshot",
+        "constructor:MarketEvent",
+        "constructor:OrderAdd",
+        "constructor:OrderCancel",
+        "constructor:SimBookLevel",
+        "constructor:TradePrint"
+      ],
+      "deselect": [
+        "AdapterTests::test_adapter_quarantines_ltp_and_unknown_aggressor",
+        "AdapterTests::test_mark_clears_stale_unmarked_residual",
+        "LiquidityDisciplineTests::test_book_delta_zero_quantity_deletes_a_level_without_new_liquidity",
+        "LiquidityDisciplineTests::test_cancel_exposure_persists_until_cancel_ack",
+        "LiquidityDisciplineTests::test_execution_reports_are_the_only_cash_and_position_channel",
+        "LiquidityDisciplineTests::test_no_free_liquidity_from_identical_snapshots",
+        "LiquidityDisciplineTests::test_partial_fill_from_trade_print_is_emitted_once",
+        "LiquidityDisciplineTests::test_unknown_aggressor_never_queue_advances",
+        "LiquidityDisciplineTests::test_unmarked_residual_is_flagged_never_zero_valued",
+        "ReplayDeterminismTests::test_deterministic_replay_byte_identical_in_fresh_process",
+        "ReplayDeterminismTests::test_event_ordering_key_is_venue_scoped_and_five_part",
+        "ReplayDeterminismTests::test_verifier_excludes_copied_pnl_and_recording_has_no_basis_field",
+        "ValidationTests::test_ack_precedes_any_fill",
+        "ValidationTests::test_config_and_lineage_validation_fails_closed",
+        "ValidationTests::test_effective_dated_fees_change_across_boundary",
+        "ValidationTests::test_queue_truth_guard_refuses_fifo_claims"
+      ],
+      "retain": [
+        "ReplayDeterminismTests::test_state_hash_is_deterministic_and_exact",
+        "ValidationTests::test_cost_assumptions_require_artifact_or_assumption"
+      ]
+    },
+    "research/python/tests/test_sim_extensions.py": {
+      "category": "inline_market_constructors",
+      "reason": "Builds invented market events, books, orders, trades, bars or corporate actions in-process.",
+      "constructs": [
+        "constructor:BookSnapshot",
+        "constructor:OrderAdd",
+        "constructor:SimBookLevel",
+        "constructor:TradePrint"
+      ],
+      "deselect": [
+        "AuctionHaltTests::test_book_and_trade_fills_blocked_during_halt_then_resume",
+        "AuctionHaltTests::test_orders_submitted_during_halt_are_rejected",
+        "AuctionHaltTests::test_synthetic_uncross_fills_once_at_declared_reference_price",
+        "ChargeMechanicsTests::test_borrow_cost_accrues_over_two_logical_times",
+        "ChargeMechanicsTests::test_funding_rate_changes_across_effective_boundary",
+        "ChargeMechanicsTests::test_margin_breach_rejects_a_fill",
+        "ChargeMechanicsTests::test_short_with_and_without_borrow",
+        "LatencySamplerTests::test_fresh_replay_byte_identical_with_sampled_latency_across_hash_seeds",
+        "LatencySamplerTests::test_no_fill_before_sampled_activation_and_two_distributions_change_fills",
+        "SimReplayCliTests::test_subprocess_replay_byte_identical_across_seeds",
+        "TickRoundingTests::test_effective_dated_tick_change_rounds_a_fill_price",
+        "TickRoundingTests::test_tick_change_effective_after_fill_does_not_round_it",
+        "VerifierCashTests::test_charged_record_recomputes_ending_cash_from_cash_rows",
+        "VerifierCashTests::test_ending_cash_recomputed_from_fills_detects_tampered_cash",
+        "VerifierCashTests::test_tampered_fill_price_is_detected_by_recomputation"
+      ],
+      "retain": [
+        "CalibrationArtifactTests::test_assumption_only_summary_never_claims_calibrated",
+        "CalibrationArtifactTests::test_dated_schema_probe_fixture_does_not_grant_calibrated",
+        "CalibrationArtifactTests::test_missing_or_mismatched_artifact_fails_closed",
+        "LatencySamplerTests::test_seeded_draws_reproducible_and_latency_seed_is_consulted",
+        "TrialStoreTests::test_duplicate_key_refused_and_differing_payload_fails_closed"
+      ]
+    },
+    "research/python/tests/test_strategy_families.py": {
+      "category": "inline_price_sequence",
+      "reason": "Builds an invented price or bar sequence and derives signals or returns from it.",
+      "constructs": [
+        "price_array:CLOSES",
+        "price_array:_prices"
+      ],
+      "deselect": [
+        "test_appending_future_bar_does_not_change_earlier_signal",
+        "test_ema_cross_dispatch_matches_existing_screen_and_unknown_family_raises",
+        "test_pair_intents_are_two_leg_and_research_only",
+        "test_pair_spread_and_zscore_signals_are_causal",
+        "test_promoted_signals_match_existing_screen_byte_for_byte",
+        "test_strategy_config_validation_is_strict"
+      ],
+      "retain": [
+        "test_factor_budget_falsifier_and_invalid_scores",
+        "test_factor_weights_are_deterministic_net_flat_and_budgeted"
+      ]
+    },
+    "research/python/tests/test_universe.py": {
+      "category": "inline_market_constructors",
+      "reason": "Builds invented market events, books, orders, trades, bars or corporate actions in-process.",
+      "constructs": [
+        "constructor:UniverseMembershipRow"
+      ],
+      "deselect": [
+        "test_digest_changes_with_selection_and_inputs_are_validated",
+        "test_membership_known_after_as_of_cannot_enter",
+        "test_select_is_synthetic_only_and_deterministic",
+        "test_supersession_status_and_validity_are_applied"
+      ],
+      "retain": []
+    },
+    "research/python/tests/test_validation_report.py": {
+      "category": "market_shaped_fixture_consumer",
+      "reason": "Consumes a checked-in market-shaped fixture or is registered market_shaped_fixture.",
+      "constructs": [],
+      "deselect": [
+        "test_cli_validation_report_writes_stable_bytes",
+        "test_registry_report_resolves_stored_record",
+        "test_reordered_registry_chain_is_refused",
+        "test_tampered_record_is_refused",
+        "test_validation_report_is_deterministic"
+      ],
+      "retain": []
+    }
+  }
+}

@@ -149,8 +149,9 @@ jobs:
           python scripts/supply_chain.py audit research
       - name: Require PyArrow
         run: python -c "import pyarrow; print('pyarrow', pyarrow.__version__)"
-      - name: Parquet round-trip
-        run: python -m pytest -q research/python/tests/test_market_pipeline.py -k parquet
+      # The Parquet round-trip test consumed market-shaped synthetic events and
+      # was withdrawn under the 2026-11-23 test-policy record. Do not restore it
+      # without an owner decision. PyArrow availability remains checked above.
       - name: Research and repository tests
         run: python -m pytest -q research/python/tests scripts
       - name: Compile Python sources
