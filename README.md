@@ -391,7 +391,11 @@ once published; a new run adds a new dated file instead of rewriting history.
 | Canonical | `engineering/research/compute-and-validation.md` | local opt-in research jobs, validation reports and owner-gated compute gaps |
 | Canonical | `engineering/research/dataset-acceptance-contract.md` | evidence required before a licensed dataset is accepted for research |
 | Protocol | `research/protocols/NSE-CASH-MOMENTUM-PROTOCOL-v1.md` | frozen proposed real-data-only NSE cash-equity momentum protocol; not registered or run, dataset-blocked |
+| Protocol | `research/protocols/NSE-CASH-MOMENTUM-PROTOCOL-v1-AMENDMENT-1.md` | amendment 1 supersedes the v1 synthetic-fixture sentence and the nearest-price rule; v1 unchanged; SHA-256 sidecar beside it |
 | Research | `engineering/research/procurement/m43-source-qualification-dossier.md` | M4.3 NSE source qualification: coverage, rights, tariffs and inquiry pack |
+| Research | `engineering/research/procurement/zero-cost-source-availability-2026-11-22.md` | source-availability report at INR 0 from the existing dossier and cited official documentation; SOURCE_DOCUMENTATION_ONLY |
+| Dated evidence | `evidence/OWNER-DIRECTIVE-2026-11-22.md` | owner data-freeze directive: no synthetic market data, INR 0 data budget, STOP on missing evidence or authorization |
+| Dated evidence | `evidence/M4-2-1-CLAIM-SCOPE-2026-11-22.md` | M4.2.1 narrowed to implemented, not real-market verified; calendar provenance, coverage-bound and bar-anchor findings |
 | Dated evidence | `BUILD-RESULTS.md` | owner-maintained bundle record; do not edit |
 | Dated evidence | `evidence/VERIFICATION-2026-11-17.md` | executed checks and boundaries |
 | Dated evidence | `evidence/UPGRADE-VERIFICATION-2026-11-13.md` | implementation inventory and upgrade gates |
