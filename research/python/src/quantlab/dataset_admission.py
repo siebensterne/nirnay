@@ -19,11 +19,16 @@ from pathlib import Path
 from typing import Any
 
 ADMISSION_CONTRACT_VERSION = 1
-REQUIRED_OPERATIONS: tuple[str, ...] = (
-    "store",
+# The exact consumer-operation set of engineering/ndc-consumer-requirements-v1.md.
+# These are Nirnay-side activities, not Fieldbook producer operations. The gate
+# requires all five with a PERMITTED state and one written record; an extra
+# operation is a mismatch, not an added entitlement.
+CONSUMER_OPERATIONS: tuple[str, ...] = (
+    "read_release",
+    "store_permitted_research_copy",
     "replay",
     "internal_analytics",
-    "retention",
+    "retain_permitted_derived_data",
 )
 PERMITTED = "PERMITTED"
 WRITTEN_PERMISSION = "WRITTEN_PERMISSION"
@@ -207,14 +212,14 @@ def _validate_rights(record: Mapping[str, Any], scope: dict[str, str],
     _validity_date(rights, "valid_until", "rights.valid_until", as_of_date)
     _bounded_retention(rights, "retention_period", "rights.retention_period")
     operations = _object(rights.get("operations"), "rights.operations")
-    expected = set(REQUIRED_OPERATIONS)
+    expected = set(CONSUMER_OPERATIONS)
     if set(operations) != expected:
         missing = sorted(expected - set(operations))
         extra = sorted(set(operations) - expected)
         raise DatasetAdmissionError(
             f"rights.operations must cover the exact research set; missing={missing} extra={extra}"
         )
-    for operation in REQUIRED_OPERATIONS:
+    for operation in CONSUMER_OPERATIONS:
         evidence = _object(operations[operation], f"rights.operations.{operation}")
         _enum(evidence, "state", f"rights.operations.{operation}.state", PERMITTED)
         cited = _text(evidence, "document_reference",
