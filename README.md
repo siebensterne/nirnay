@@ -390,6 +390,7 @@ once published; a new run adds a new dated file instead of rewriting history.
 | Canonical | `engineering/q-kdb-style.md` | q / kdb+ (KDB-X) style rules and their authoritative sources |
 | Canonical | `engineering/research/compute-and-validation.md` | local opt-in research jobs, validation reports and owner-gated compute gaps |
 | Canonical | `engineering/research/dataset-acceptance-contract.md` | evidence required before a licensed dataset is accepted for research |
+| Protocol | `research/protocols/NSE-CASH-MOMENTUM-PROTOCOL-v1.md` | frozen proposed real-data-only NSE cash-equity momentum protocol; not registered or run, dataset-blocked |
 | Research | `engineering/research/procurement/m43-source-qualification-dossier.md` | M4.3 NSE source qualification: coverage, rights, tariffs and inquiry pack |
 | Dated evidence | `BUILD-RESULTS.md` | owner-maintained bundle record; do not edit |
 | Dated evidence | `evidence/VERIFICATION-2026-11-17.md` | executed checks and boundaries |
