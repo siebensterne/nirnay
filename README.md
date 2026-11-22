@@ -8,7 +8,7 @@ complementary platform under `engineering/architecture/decisions/ADR-0001-data-o
 **Release status:** research/paper engineering candidate. This repository is not a certified broker-connected trading system, not a SEBI/exchange-approved algo product, and not evidence of profitable alpha. Live order routing is hard-disabled. Every capability statement below distinguishes code present from external verification still required.
 
 <!-- CURRENT-STATE
-code_commit: 0d4fff94f5c79e38d16a8ada7b0592c957bef7df
+code_commit: 56491d56b151ae0b999c70d81a765e9ec9570860
 verified_on: 2026-11-21
 ci_run: 45062286601
 scope: make check + hosted CI 45062286601 on f250fee (12/12); active suite 352 passed, 90 market-shaped-fixture tests deselected under owner directive
@@ -19,6 +19,13 @@ checked-in synthetic market-shaped fixtures are registered `market_shaped_fixtur
 deselected in `pytest.ini`; they no longer run in `make check` or CI. Historical test counts in
 dated notes below are historical records, not current coverage. See
 `evidence/POLICY-BOUNDARY-REGRESSION-WITHDRAWAL-2026-11-22.md`.
+
+Withdrawal is now enforced at collection time by
+`research/python/tests/conftest.py` and the checked-in
+`research/python/tests/market_shaped_test_inventory.json`; overriding the
+marker expression cannot restore a prohibited test. Counts and withdrawn
+coverage are recorded in
+`evidence/SYNTHETIC-TEST-POLICY-NIRNAY-2026-11-23.md`.
 
 ## Implemented scope
 
@@ -425,6 +432,9 @@ once published; a new run adds a new dated file instead of rewriting history.
 | Review | `engineering/architecture/reviews/FIELDBOOK-ARCHITECTURE-REVIEW-2026-11-22.md` | read-only Fieldbook architecture review, ownership map, seven findings and NDC v1 semantic compatibility; no code or provider contact |
 | Review | `engineering/architecture/reviews/FIELDBOOK-REVIEW-REFRESH-2026-11-23.md` | baseline refresh at Fieldbook 28eb877, W1 remediation status, ownership and NDC reconciliation; not a ratification |
 | Review evidence | `engineering/architecture/reviews/fieldbook-audits/` | five full read-only audits: architecture, durability, semantics, governance and distribution at Fieldbook `aee91de` |
+| Test policy | `research/python/tests/conftest.py` | collection-time gate that deselects inventoried market-shaped tests and blocks uninventoried market-domain modules |
+| Test policy | `research/python/tests/market_shaped_test_inventory.json` | checked-in authority listing prohibited test modules, categories and test names |
+| Dated evidence | `evidence/SYNTHETIC-TEST-POLICY-NIRNAY-2026-11-23.md` | enforced inventory counts, inspection commands, withdrawn coverage and current test figures |
 | Dated evidence | `evidence/OWNER-DIRECTIVE-2026-11-22.md` | owner data-freeze directive: no synthetic market data, INR 0 data budget, STOP on missing evidence or authorization |
 | Dated evidence | `evidence/M4-2-1-CLAIM-SCOPE-2026-11-22.md` | M4.2.1 narrowed to implemented, not real-market verified; calendar provenance, coverage-bound and bar-anchor findings |
 | Dated evidence | `evidence/POLICY-BOUNDARY-REGRESSION-WITHDRAWAL-2026-11-22.md` | runtime-audit inventory of the 90 deselected market-shaped-fixture tests and the regression coverage withdrawn from active CI |
