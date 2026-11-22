@@ -104,6 +104,7 @@ def _refreeze(record: dict) -> dict:
     return {**body, "record_sha256": content_hash(body)}
 
 
+@pytest.mark.market_shaped_fixture
 def test_byte_stable_comparison_output():
     left = _frozen("EXP-0001")
     right = _frozen("EXP-0002", start=500)
@@ -114,6 +115,7 @@ def test_byte_stable_comparison_output():
     assert json.loads(first)["integrity"]["signature_verified"] is False
 
 
+@pytest.mark.market_shaped_fixture
 def test_differing_dataset_hash_rejected():
     left = _frozen("EXP-0001")
     right = _frozen("EXP-0002")
@@ -122,6 +124,7 @@ def test_differing_dataset_hash_rejected():
         compare_experiments(left, right)
 
 
+@pytest.mark.market_shaped_fixture
 def test_tampered_record_rejected():
     left = _frozen("EXP-0001")
     right = _frozen("EXP-0002")
@@ -130,6 +133,7 @@ def test_tampered_record_rejected():
         compare_experiments(left, right)
 
 
+@pytest.mark.market_shaped_fixture
 def test_non_terminal_record_rejected():
     left = _frozen("EXP-0001")
     right = _frozen("EXP-0002")
@@ -138,6 +142,7 @@ def test_non_terminal_record_rejected():
         compare_experiments(left, right)
 
 
+@pytest.mark.market_shaped_fixture
 def test_leaky_record_rejected():
     left = _frozen("EXP-0001")
     right = _frozen("EXP-0002", point_in_time=False)
@@ -145,6 +150,7 @@ def test_leaky_record_rejected():
         compare_experiments(left, right)
 
 
+@pytest.mark.market_shaped_fixture
 def test_holdout_reuse_rejected():
     left = _frozen("EXP-0001")
     right = _frozen("EXP-0002")
@@ -152,6 +158,7 @@ def test_holdout_reuse_rejected():
         compare_experiments(left, right)
 
 
+@pytest.mark.market_shaped_fixture
 def test_cli_compare_experiments_is_byte_stable_and_refuses_mismatch(tmp_path):
     left = _frozen("EXP-0001")
     right = _frozen("EXP-0002", start=400)
@@ -171,6 +178,7 @@ def test_cli_compare_experiments_is_byte_stable_and_refuses_mismatch(tmp_path):
                  "--right", str(mismatched)]) == 2
 
 
+@pytest.mark.market_shaped_fixture
 def test_registry_backed_comparison(tmp_path):
     registry = ExperimentRegistry(tmp_path / "registry.sqlite3")
     for experiment_id, start in (("EXP-0001", 337), ("EXP-0002", 500)):

@@ -13,7 +13,6 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-pytestmark = pytest.mark.market_shaped_fixture
 from test_experiment_registry import FIXTURES, _bars, _registered
 
 from quantlab.cli import _load_reference_data, main
@@ -66,6 +65,7 @@ def _grid(start_ns: int, count: int, interval_ns: int) -> list[int]:
     return [start_ns + offset * interval_ns for offset in range(count)]
 
 
+@pytest.mark.market_shaped_fixture
 def test_synthetic_one_minute_regular_bars_pass() -> None:
     """Verify synthetic one minute regular bars pass."""
     record = _record("synthetic:fixed-1m-v1")
@@ -73,6 +73,7 @@ def test_synthetic_one_minute_regular_bars_pass() -> None:
     validate_bar_cadence(record, _grid(BASE_NS, 24, MINUTE_NS))
 
 
+@pytest.mark.market_shaped_fixture
 def test_synthetic_daily_fixed_interval_pass() -> None:
     """Verify synthetic daily fixed interval pass."""
     record = _record("synthetic:fixed-1d-v1", bar_kind="daily", interval=DAILY_NS,
@@ -81,6 +82,7 @@ def test_synthetic_daily_fixed_interval_pass() -> None:
     validate_bar_cadence(record, _grid(BASE_NS, 12, DAILY_NS))
 
 
+@pytest.mark.market_shaped_fixture
 def test_daily_friday_to_monday_on_valid_calendar_pass() -> None:
     """Verify daily friday to monday on valid calendar pass."""
     record = _record("market:fixture-daily-v1", bar_kind="daily", interval=DAILY_NS,
@@ -90,6 +92,7 @@ def test_daily_friday_to_monday_on_valid_calendar_pass() -> None:
     validate_bar_cadence(record, timestamps)
 
 
+@pytest.mark.market_shaped_fixture
 def test_daily_missing_expected_trading_day_fails() -> None:
     """Verify daily missing expected trading day fails."""
     record = _record("market:fixture-daily-v1", bar_kind="daily", interval=DAILY_NS,
@@ -99,6 +102,7 @@ def test_daily_missing_expected_trading_day_fails() -> None:
         validate_bar_cadence(record, timestamps)
 
 
+@pytest.mark.market_shaped_fixture
 def test_scheduled_holiday_pass() -> None:
     """Verify scheduled holiday pass."""
     record = _record("market:fixture-daily-v1", bar_kind="daily", interval=DAILY_NS,
@@ -110,6 +114,7 @@ def test_scheduled_holiday_pass() -> None:
         validate_bar_cadence(record, with_holiday)
 
 
+@pytest.mark.market_shaped_fixture
 def test_five_minute_bars_with_one_minute_basis_fail() -> None:
     """Verify five minute bars with one minute basis fail."""
     wrong_basis = _record("synthetic:fixed-5m-v1", interval=FIVE_MINUTE_NS,
@@ -124,6 +129,7 @@ def test_five_minute_bars_with_one_minute_basis_fail() -> None:
         validate_bar_cadence(one_minute, bars)
 
 
+@pytest.mark.market_shaped_fixture
 def test_five_minute_bars_with_five_minute_basis_pass() -> None:
     """Verify five minute bars with five minute basis pass."""
     record = _record("synthetic:fixed-5m-v1", interval=FIVE_MINUTE_NS,
@@ -132,6 +138,7 @@ def test_five_minute_bars_with_five_minute_basis_pass() -> None:
     validate_bar_cadence(record, _grid(BASE_NS, 12, FIVE_MINUTE_NS))
 
 
+@pytest.mark.market_shaped_fixture
 def test_fifteen_minute_bars_with_fifteen_minute_basis_pass() -> None:
     """Verify fifteen minute bars with fifteen minute basis pass."""
     record = _record("synthetic:fixed-15m-v1", interval=FIFTEEN_MINUTE_NS,
@@ -140,6 +147,7 @@ def test_fifteen_minute_bars_with_fifteen_minute_basis_pass() -> None:
     validate_bar_cadence(record, _grid(BASE_NS, 12, FIFTEEN_MINUTE_NS))
 
 
+@pytest.mark.market_shaped_fixture
 def test_intraday_overnight_boundary_pass() -> None:
     """Verify intraday overnight boundary pass."""
     record = _record("market:fixture-overnight-v1", interval=FIFTEEN_MINUTE_NS,
@@ -159,6 +167,7 @@ def test_intraday_overnight_boundary_pass() -> None:
     validate_bar_cadence(record, timestamps)
 
 
+@pytest.mark.market_shaped_fixture
 def test_missing_minute_inside_active_session_fails() -> None:
     """Verify missing minute inside active session fails."""
     record = _record("market:fixture-minute-v1", basis="minute_nse_cash_94500",
@@ -173,6 +182,7 @@ def test_missing_minute_inside_active_session_fails() -> None:
         validate_bar_cadence(record, timestamps)
 
 
+@pytest.mark.market_shaped_fixture
 def test_auction_and_scheduled_break_bars_rejected() -> None:
     """Verify auction and scheduled break bars rejected."""
     record = _record("market:fixture-minute-v1", basis="minute_nse_cash_94500",
@@ -186,6 +196,7 @@ def test_auction_and_scheduled_break_bars_rejected() -> None:
         validate_bar_cadence(record, during_break)
 
 
+@pytest.mark.market_shaped_fixture
 def test_declared_early_close_pass() -> None:
     """Verify declared early close pass."""
     record = _record("market:fixture-minute-v1", basis="minute_nse_cash_94500",
@@ -201,6 +212,7 @@ def test_declared_early_close_pass() -> None:
         validate_bar_cadence(record, with_late_bar)
 
 
+@pytest.mark.market_shaped_fixture
 def test_unknown_calendar_id_fails() -> None:
     """Verify unknown calendar id fails."""
     record = _record("synthetic:fixed-1m-v1")
@@ -209,6 +221,7 @@ def test_unknown_calendar_id_fails() -> None:
         validate_bar_cadence(record, _grid(BASE_NS, 12, MINUTE_NS))
 
 
+@pytest.mark.market_shaped_fixture
 def test_incorrect_calendar_digest_fails() -> None:
     """Verify incorrect calendar digest fails."""
     record = _record("synthetic:fixed-1m-v1")
@@ -217,6 +230,7 @@ def test_incorrect_calendar_digest_fails() -> None:
         validate_bar_cadence(record, _grid(BASE_NS, 12, MINUTE_NS))
 
 
+@pytest.mark.market_shaped_fixture
 def test_config_cannot_mark_market_dataset_synthetic() -> None:
     """Verify config cannot mark market dataset synthetic."""
     record = _record("synthetic:fixed-1m-v1", origin="MARKET")
@@ -227,6 +241,7 @@ def test_config_cannot_mark_market_dataset_synthetic() -> None:
         validate_bar_cadence(record, _grid(BASE_NS, 12, MINUTE_NS))
 
 
+@pytest.mark.market_shaped_fixture
 def test_no_trade_and_suspended_instruments_yield_explicit_status() -> None:
     """Verify no trade and suspended instruments yield explicit status."""
     record = _record("synthetic:fixed-1m-v1")
@@ -244,6 +259,7 @@ def test_no_trade_and_suspended_instruments_yield_explicit_status() -> None:
         validate_status_observations([{**no_trade, "price": 0.0}])
 
 
+@pytest.mark.market_shaped_fixture
 def test_legacy_record_without_dataset_origin_fails_new_search(tmp_path: Path) -> None:
     """Verify legacy record without dataset origin fails new search."""
     record = _registered("EXP-CALENDAR-LEGACY")
@@ -264,6 +280,7 @@ def test_legacy_record_without_dataset_origin_fails_new_search(tmp_path: Path) -
         validate_bar_cadence(stored.body, _grid(BASE_NS, 12, MINUTE_NS))
 
 
+@pytest.mark.market_shaped_fixture
 def test_dataset_origin_matches_published_manifest(tmp_path: Path) -> None:
     """Verify dataset origin matches published manifest."""
     from quantlab.experiments.reproducibility import bind_published_dataset
@@ -295,6 +312,7 @@ def test_dataset_origin_matches_published_manifest(tmp_path: Path) -> None:
         verify_dataset_binding(record, dataset_dir)
 
 
+@pytest.mark.market_shaped_fixture
 def test_cli_cannot_override_registered_annualisation(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

@@ -6,6 +6,8 @@ threshold is a gate.
 """
 from __future__ import annotations
 
+import pytest
+
 from quantlab.bench import (
     digest,
     percentile,
@@ -33,6 +35,7 @@ def test_percentile_selects_known_ranks() -> None:
     assert percentile([], 0.5) == 0.0
 
 
+@pytest.mark.market_shaped_fixture
 def test_synthetic_fixture_scales_and_is_byte_stable() -> None:
     small = synthetic_events(40, 7)
     large = synthetic_events(200, 7)
@@ -43,6 +46,7 @@ def test_synthetic_fixture_scales_and_is_byte_stable() -> None:
     ), "the synthetic fixture is byte-stable for a fixed seed"
 
 
+@pytest.mark.market_shaped_fixture
 def test_core_suite_emits_measured_distributions_and_stable_hashes(tmp_path) -> None:
     lines = run_core_suite(200, 3, 7, tmp_path)
     expected = ("BUILD", "WRITE", "VERIFY", "BACKTEST", "PORTFOLIO", "ALPHA", "OUTPUT")
@@ -60,6 +64,7 @@ def test_core_suite_emits_measured_distributions_and_stable_hashes(tmp_path) -> 
     assert output["verify_status"] == "verified_internal_integrity"
 
 
+@pytest.mark.market_shaped_fixture
 def test_experiments_suite_reads_one_immutable_dataset_concurrently(tmp_path) -> None:
     first = run_experiments_suite(200, 2, 2, 7, tmp_path)[0]
     again = run_experiments_suite(200, 2, 2, 7, tmp_path)[0]
@@ -73,6 +78,7 @@ def test_experiments_suite_reads_one_immutable_dataset_concurrently(tmp_path) ->
     )
 
 
+@pytest.mark.market_shaped_fixture
 def test_latency_suite_emits_measured_distributions_and_stable_hashes(tmp_path) -> None:
     first = run_latency_suite(200, 2, 7, tmp_path)
     second = run_latency_suite(200, 2, 7, tmp_path)

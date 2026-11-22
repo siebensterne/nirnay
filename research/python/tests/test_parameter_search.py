@@ -79,6 +79,7 @@ def test_generate_configs_is_deterministic_and_refuses_empty_axes():
         generate_configs({"a": []})
 
 
+@pytest.mark.market_shaped_fixture
 def test_grid_search_persists_all_attempts_including_losers(tmp_path):
     registry = ExperimentRegistry(tmp_path / "registry.sqlite3")
     registry.register(_registered())
@@ -106,6 +107,7 @@ def test_unregistered_search_refuses_before_evaluation(tmp_path):
     assert calls == []
 
 
+@pytest.mark.market_shaped_fixture
 def test_out_of_space_config_is_refused_before_evaluation(tmp_path):
     registry = ExperimentRegistry(tmp_path / "registry.sqlite3")
     registry.register(_registered())
@@ -117,6 +119,7 @@ def test_out_of_space_config_is_refused_before_evaluation(tmp_path):
     assert calls == []
 
 
+@pytest.mark.market_shaped_fixture
 def test_count_mismatch_is_refused_before_evaluation(tmp_path):
     registry = ExperimentRegistry(tmp_path / "registry.sqlite3")
     registry.register(_registered())
@@ -128,6 +131,7 @@ def test_count_mismatch_is_refused_before_evaluation(tmp_path):
     assert calls == []
 
 
+@pytest.mark.market_shaped_fixture
 def test_nonfinite_evaluator_outcome_is_refused(tmp_path):
     registry = ExperimentRegistry(tmp_path / "registry.sqlite3")
     registry.register(_registered())

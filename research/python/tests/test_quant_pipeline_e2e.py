@@ -21,7 +21,6 @@ from quantlab.portfolio_backtest import MultiInstrumentPortfolioBacktester, Port
 from quantlab.oms import BrokerOrderIntent
 
 import pytest
-pytestmark = pytest.mark.market_shaped_fixture
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -73,6 +72,7 @@ def _canonical_events():
     ]
 
 
+@pytest.mark.market_shaped_fixture
 def test_synthetic_research_to_paper_pipeline_composes_without_claiming_live_readiness(tmp_path):
     # 1. Raw-fixture canonical observations -> bitemporal PIT dataset.
     events = _canonical_events()

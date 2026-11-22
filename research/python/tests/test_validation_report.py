@@ -30,6 +30,7 @@ def _frozen_case(tmp_path):
     return registry, frozen, record_path, dataset_dir
 
 
+@pytest.mark.market_shaped_fixture
 def test_validation_report_is_deterministic(tmp_path) -> None:
     _registry, frozen, record_path, dataset_dir = _frozen_case(tmp_path)
     first = build_validation_report(frozen, dataset_dir)
@@ -42,6 +43,7 @@ def test_validation_report_is_deterministic(tmp_path) -> None:
     assert first["integrity"]["chain_verified"] is False
 
 
+@pytest.mark.market_shaped_fixture
 def test_tampered_record_is_refused(tmp_path) -> None:
     _registry, frozen, _record_path, dataset_dir = _frozen_case(tmp_path)
     tampered = dict(frozen)
@@ -55,6 +57,7 @@ def test_tampered_record_is_refused(tmp_path) -> None:
         build_validation_report(removed, dataset_dir)
 
 
+@pytest.mark.market_shaped_fixture
 def test_registry_report_resolves_stored_record(tmp_path) -> None:
     registry, frozen, _record_path, dataset_dir = _frozen_case(tmp_path)
     report = build_validation_report(frozen, dataset_dir, registry=registry)
@@ -63,6 +66,7 @@ def test_registry_report_resolves_stored_record(tmp_path) -> None:
     assert report["frozen_record_sha256"] == frozen["record_sha256"]
 
 
+@pytest.mark.market_shaped_fixture
 def test_reordered_registry_chain_is_refused(tmp_path) -> None:
     registry, frozen, _record_path, dataset_dir = _frozen_case(tmp_path)
     connection = sqlite3.connect(registry.path)
@@ -75,6 +79,7 @@ def test_reordered_registry_chain_is_refused(tmp_path) -> None:
         build_validation_report(frozen, dataset_dir, registry=registry)
 
 
+@pytest.mark.market_shaped_fixture
 def test_cli_validation_report_writes_stable_bytes(tmp_path) -> None:
     _registry, _frozen, record_path, dataset_dir = _frozen_case(tmp_path)
     output = tmp_path / "report.json"

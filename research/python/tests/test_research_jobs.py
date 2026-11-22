@@ -34,10 +34,12 @@ def _write(manifest: dict, path: Path) -> Path:
     return path
 
 
+@pytest.mark.market_shaped_fixture
 def test_manifest_accepts_valid_declaration(environment: dict, binding: dict) -> None:
     assert validate_manifest(_manifest(environment, binding))["schema_version"] == 1
 
 
+@pytest.mark.market_shaped_fixture
 def test_manifest_schema_rejects_invalid_cases(environment: dict, binding: dict) -> None:
     cases = []
     wrong_version = _manifest(environment, binding)
@@ -73,6 +75,7 @@ def test_manifest_schema_rejects_invalid_cases(environment: dict, binding: dict)
             validate_manifest(case)
 
 
+@pytest.mark.market_shaped_fixture
 def test_manifest_cross_field_invariants(environment: dict, binding: dict) -> None:
     mismatch = _manifest(environment, binding)
     mismatch["jobs"][0]["code_digest"] = "0" * 64
@@ -85,6 +88,7 @@ def test_manifest_cross_field_invariants(environment: dict, binding: dict) -> No
         validate_manifest(duplicate)
 
 
+@pytest.mark.market_shaped_fixture
 def test_unpinned_environment_is_refused(environment: dict, binding: dict, tmp_path) -> None:
     manifest = _manifest(environment, binding)
     manifest["environment"]["constraint_sha256"] = "0" * 64
@@ -100,6 +104,7 @@ def test_unpinned_environment_is_refused(environment: dict, binding: dict, tmp_p
                 tmp_path / "registry2.sqlite3")
 
 
+@pytest.mark.market_shaped_fixture
 def test_stale_dataset_hash_is_refused(environment: dict, binding: dict, tmp_path) -> None:
     manifest = _manifest(environment, binding)
     manifest["jobs"][0]["dataset_sha256"] = "0" * 64
@@ -116,6 +121,7 @@ def test_stale_dataset_hash_is_refused(environment: dict, binding: dict, tmp_pat
                 tmp_path / "registry2.sqlite3")
 
 
+@pytest.mark.market_shaped_fixture
 def test_dry_run_is_deterministic_and_appends_a_run_record(
     environment: dict, binding: dict, tmp_path
 ) -> None:
@@ -137,6 +143,7 @@ def test_dry_run_is_deterministic_and_appends_a_run_record(
         assert registry.verify_integrity()["record_count"] == 2
 
 
+@pytest.mark.market_shaped_fixture
 def test_cli_run_research_job(environment: dict, binding: dict, tmp_path) -> None:
     path = _write(_manifest(environment, binding), tmp_path / "jobs.json")
     registry = tmp_path / "registry.sqlite3"
