@@ -662,7 +662,7 @@
     },
     {
       "id": "CLM-050",
-      "statement": "Registered bar cadence is checked against an expected schedule resolved from a checked-in, digest-verified calendar artifact rather than one fixed elapsed interval; dataset origin is explicit and manifest-bound, scheduled market gaps are accepted, missing scheduled bars fail unless covered by an explicit status, and no absent price is fabricated into a zero or forward-filled observation.",
+      "statement": "Registered bar cadence is checked against an expected schedule resolved from a checked-in, digest-verified TEST_FIXTURE calendar artifact rather than one fixed elapsed interval; dataset origin is explicit and manifest-bound, scheduled fixture gaps are accepted, missing scheduled bars fail unless covered by an explicit status, and no absent price is fabricated into a zero or forward-filled observation. Implemented, not real-market verified: no real-market calendar validator, source completeness or profitability claim; fixture provenance cannot certify MARKET origin or exchange-calendar validity.",
       "status": "implemented",
       "scope": {
         "files": [
@@ -680,7 +680,7 @@
           "evidence/M4-2-1-CALENDAR-CADENCE-ADDENDUM-2026-11-22.md"
         ]
       },
-      "falsifier": "An unknown calendar id or a wrong calendar digest resolves; a config boolean or identifier substring overrides an explicit MARKET origin; a record origin disagrees with its manifest; a bar falls in an auction, break, holiday, weekend or after an early close; a missing session or minute bar inside an active session passes without a status; a status observation carries a numeric price; a five-minute bar passes under the one-minute basis; or a CLI value replaces the registered annualisation basis. Implemented, not independently verified; no provider data, rights, completeness or live-readiness claim is made."
+      "falsifier": "An unknown calendar id or a wrong calendar digest resolves; a config boolean or identifier substring overrides an explicit MARKET origin; a record origin disagrees with its manifest; a bar falls in an auction, break, holiday, weekend or after an early close; a missing session or minute bar inside an active session passes without a status; a status observation carries a numeric price; a five-minute bar passes under the one-minute basis; a CLI value replaces the registered annualisation basis; a fixture calendar marked synthetic:false certifies MARKET origin without EXCHANGE_PUBLISHED, PROVIDER_PUBLISHED or OWNER_VERIFIED provenance; an expected schedule generated from observed first and last timestamps passes a missing first or last bar without independent manifest coverage bounds; or a close-anchored inclusive 09:15-15:30 session yields 376 bars while the registered one-minute basis fixes 375 bars per session and 94500 periods per year without defined bar-open/close schedule math. Implemented, not independently verified; no provider data, rights, completeness, real-market calendar validity or live-readiness claim is made."
     }
   ]
 }
