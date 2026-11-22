@@ -422,6 +422,7 @@ once published; a new run adds a new dated file instead of rewriting history.
 | Research | `engineering/research/procurement/source-qualification-upstox-nse-2026-11-22.md` | Phase 1 source qualification for Upstox V3 candles and NSE public reports; rights UNKNOWN, collection BLOCKED |
 | Architecture | `engineering/architecture/decisions/ADR-0001-data-ownership.md` | Phase 2 ADR: complementary platform owns acquisition, raw storage, normalization and point-in-time reference data; Nirnay owns research; no second collector |
 | Review | `engineering/architecture/reviews/FIELDBOOK-ARCHITECTURE-REVIEW-2026-11-22.md` | read-only Fieldbook architecture review, ownership map, seven findings and NDC v1 semantic compatibility; no code or provider contact |
+| Review | `engineering/architecture/reviews/FIELDBOOK-REVIEW-REFRESH-2026-11-23.md` | baseline refresh at Fieldbook 28eb877, W1 remediation status, ownership and NDC reconciliation; not a ratification |
 | Review evidence | `engineering/architecture/reviews/fieldbook-audits/` | five full read-only audits: architecture, durability, semantics, governance and distribution at Fieldbook `aee91de` |
 | Dated evidence | `evidence/OWNER-DIRECTIVE-2026-11-22.md` | owner data-freeze directive: no synthetic market data, INR 0 data budget, STOP on missing evidence or authorization |
 | Dated evidence | `evidence/M4-2-1-CLAIM-SCOPE-2026-11-22.md` | M4.2.1 narrowed to implemented, not real-market verified; calendar provenance, coverage-bound and bar-anchor findings |
