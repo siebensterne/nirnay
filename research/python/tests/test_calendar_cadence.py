@@ -7,21 +7,30 @@ receipt, provider observation or live service is read or modified.
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pytest
+from test_experiment_registry import FIXTURES, _bars, _registered
 
 from quantlab.cli import _load_reference_data, main
-from quantlab.experiments import (ExperimentError, ExperimentRegistry, assert_dataset_origin,
-                                  build_search_space, calendar_binding, dataset_origin,
-                                  explicit_status_observation, holdout_key, validate_bar_cadence,
-                                  validate_registered_experiment, validate_status_observations)
+from quantlab.experiments import (
+    ExperimentError,
+    ExperimentRegistry,
+    assert_dataset_origin,
+    build_search_space,
+    calendar_binding,
+    dataset_origin,
+    explicit_status_observation,
+    holdout_key,
+    validate_bar_cadence,
+    validate_registered_experiment,
+    validate_status_observations,
+)
 from quantlab.experiments.verify import verify_dataset_binding
 from quantlab.market import market_event_from_dict
 from quantlab.point_in_time import PITDatasetBuilder, write_dataset
-from test_experiment_registry import FIXTURES, _bars, _registered
 
 MINUTE_NS = 60_000_000_000
 FIVE_MINUTE_NS = 300_000_000_000
@@ -47,7 +56,7 @@ def _record(calendar_id: str, *, bar_kind: str = "minute", interval: int = MINUT
 def _local_ns(year: int, month: int, day: int, hour: int, minute: int,
               zone: str = "Asia/Kolkata") -> int:
     moment = datetime(year, month, day, hour, minute, tzinfo=ZoneInfo(zone))
-    delta = moment.astimezone(timezone.utc) - datetime(1970, 1, 1, tzinfo=timezone.utc)
+    delta = moment.astimezone(UTC) - datetime(1970, 1, 1, tzinfo=UTC)
     return (delta.days * 86400 + delta.seconds) * 1_000_000_000 + delta.microseconds * 1000
 
 
@@ -56,12 +65,14 @@ def _grid(start_ns: int, count: int, interval_ns: int) -> list[int]:
 
 
 def test_synthetic_one_minute_regular_bars_pass() -> None:
+    """Verify synthetic one minute regular bars pass."""
     record = _record("synthetic:fixed-1m-v1")
     validate_registered_experiment(record)
     validate_bar_cadence(record, _grid(BASE_NS, 24, MINUTE_NS))
 
 
 def test_synthetic_daily_fixed_interval_pass() -> None:
+    """Verify synthetic daily fixed interval pass."""
     record = _record("synthetic:fixed-1d-v1", bar_kind="daily", interval=DAILY_NS,
                      basis="daily_252", periods=252.0)
     validate_registered_experiment(record)
@@ -69,6 +80,7 @@ def test_synthetic_daily_fixed_interval_pass() -> None:
 
 
 def test_daily_friday_to_monday_on_valid_calendar_pass() -> None:
+    """Verify daily friday to monday on valid calendar pass."""
     record = _record("market:fixture-daily-v1", bar_kind="daily", interval=DAILY_NS,
                      basis="daily_252", periods=252.0, origin="MARKET")
     timestamps = [_local_ns(2025, 1, 3, 15, 30), _local_ns(2025, 1, 6, 15, 30)]
@@ -77,6 +89,7 @@ def test_daily_friday_to_monday_on_valid_calendar_pass() -> None:
 
 
 def test_daily_missing_expected_trading_day_fails() -> None:
+    """Verify daily missing expected trading day fails."""
     record = _record("market:fixture-daily-v1", bar_kind="daily", interval=DAILY_NS,
                      basis="daily_252", periods=252.0, origin="MARKET")
     timestamps = [_local_ns(2025, 1, 3, 15, 30), _local_ns(2025, 1, 7, 15, 30)]
@@ -85,6 +98,7 @@ def test_daily_missing_expected_trading_day_fails() -> None:
 
 
 def test_scheduled_holiday_pass() -> None:
+    """Verify scheduled holiday pass."""
     record = _record("market:fixture-daily-v1", bar_kind="daily", interval=DAILY_NS,
                      basis="daily_252", periods=252.0, origin="MARKET")
     timestamps = [_local_ns(2025, 1, 17, 15, 30), _local_ns(2025, 1, 21, 15, 30)]
@@ -95,6 +109,7 @@ def test_scheduled_holiday_pass() -> None:
 
 
 def test_five_minute_bars_with_one_minute_basis_fail() -> None:
+    """Verify five minute bars with one minute basis fail."""
     wrong_basis = _record("synthetic:fixed-5m-v1", interval=FIVE_MINUTE_NS,
                           basis="minute_nse_cash_94500", periods=94_500.0)
     with pytest.raises(ExperimentError, match="bar_interval_ns differs"):
@@ -108,6 +123,7 @@ def test_five_minute_bars_with_one_minute_basis_fail() -> None:
 
 
 def test_five_minute_bars_with_five_minute_basis_pass() -> None:
+    """Verify five minute bars with five minute basis pass."""
     record = _record("synthetic:fixed-5m-v1", interval=FIVE_MINUTE_NS,
                      basis="minute_nse_cash_5m_18900", periods=18_900.0)
     validate_registered_experiment(record)
@@ -115,6 +131,7 @@ def test_five_minute_bars_with_five_minute_basis_pass() -> None:
 
 
 def test_fifteen_minute_bars_with_fifteen_minute_basis_pass() -> None:
+    """Verify fifteen minute bars with fifteen minute basis pass."""
     record = _record("synthetic:fixed-15m-v1", interval=FIFTEEN_MINUTE_NS,
                      basis="minute_nse_cash_15m_6300", periods=6_300.0)
     validate_registered_experiment(record)
@@ -122,6 +139,7 @@ def test_fifteen_minute_bars_with_fifteen_minute_basis_pass() -> None:
 
 
 def test_intraday_overnight_boundary_pass() -> None:
+    """Verify intraday overnight boundary pass."""
     record = _record("market:fixture-overnight-v1", interval=FIFTEEN_MINUTE_NS,
                      basis="minute_nse_cash_15m_6300", periods=6_300.0, origin="MARKET")
     timestamps = [
@@ -140,6 +158,7 @@ def test_intraday_overnight_boundary_pass() -> None:
 
 
 def test_missing_minute_inside_active_session_fails() -> None:
+    """Verify missing minute inside active session fails."""
     record = _record("market:fixture-minute-v1", basis="minute_nse_cash_94500",
                      periods=94_500.0, origin="MARKET")
     timestamps = [
@@ -153,6 +172,7 @@ def test_missing_minute_inside_active_session_fails() -> None:
 
 
 def test_auction_and_scheduled_break_bars_rejected() -> None:
+    """Verify auction and scheduled break bars rejected."""
     record = _record("market:fixture-minute-v1", basis="minute_nse_cash_94500",
                      periods=94_500.0, origin="MARKET")
     opening = [_local_ns(2025, 1, 9, 9, 15), _local_ns(2025, 1, 9, 9, 16)]
@@ -165,6 +185,7 @@ def test_auction_and_scheduled_break_bars_rejected() -> None:
 
 
 def test_declared_early_close_pass() -> None:
+    """Verify declared early close pass."""
     record = _record("market:fixture-minute-v1", basis="minute_nse_cash_94500",
                      periods=94_500.0, origin="MARKET")
     first = _local_ns(2025, 2, 14, 9, 15)
@@ -179,6 +200,7 @@ def test_declared_early_close_pass() -> None:
 
 
 def test_unknown_calendar_id_fails() -> None:
+    """Verify unknown calendar id fails."""
     record = _record("synthetic:fixed-1m-v1")
     record["calendar_id"] = "synthetic:not-registered-v1"
     with pytest.raises(ExperimentError, match="unknown calendar_id"):
@@ -186,6 +208,7 @@ def test_unknown_calendar_id_fails() -> None:
 
 
 def test_incorrect_calendar_digest_fails() -> None:
+    """Verify incorrect calendar digest fails."""
     record = _record("synthetic:fixed-1m-v1")
     record["calendar_sha256"] = "0" * 64
     with pytest.raises(ExperimentError, match="calendar_sha256 differs"):
@@ -193,6 +216,7 @@ def test_incorrect_calendar_digest_fails() -> None:
 
 
 def test_config_cannot_mark_market_dataset_synthetic() -> None:
+    """Verify config cannot mark market dataset synthetic."""
     record = _record("synthetic:fixed-1m-v1", origin="MARKET")
     record["config"] = {"synthetic": True}
     record["dataset_ref"] = "synthetic:identifier-that-must-not-be-inferred"
@@ -202,6 +226,7 @@ def test_config_cannot_mark_market_dataset_synthetic() -> None:
 
 
 def test_no_trade_and_suspended_instruments_yield_explicit_status() -> None:
+    """Verify no trade and suspended instruments yield explicit status."""
     record = _record("synthetic:fixed-1m-v1")
     timestamps = [BASE_NS, BASE_NS + 2 * MINUTE_NS]
     no_trade = explicit_status_observation(BASE_NS + MINUTE_NS, "no_trade", instrument_id="INST-1")
@@ -218,6 +243,7 @@ def test_no_trade_and_suspended_instruments_yield_explicit_status() -> None:
 
 
 def test_legacy_record_without_dataset_origin_fails_new_search(tmp_path: Path) -> None:
+    """Verify legacy record without dataset origin fails new search."""
     record = _registered("EXP-CALENDAR-LEGACY")
     record.pop("dataset_origin")
     record["config"] = {"synthetic": True}
@@ -237,6 +263,7 @@ def test_legacy_record_without_dataset_origin_fails_new_search(tmp_path: Path) -
 
 
 def test_dataset_origin_matches_published_manifest(tmp_path: Path) -> None:
+    """Verify dataset origin matches published manifest."""
     from quantlab.experiments.reproducibility import bind_published_dataset
 
     events = [market_event_from_dict(json.loads(line)) for line in
@@ -266,7 +293,10 @@ def test_dataset_origin_matches_published_manifest(tmp_path: Path) -> None:
         verify_dataset_binding(record, dataset_dir)
 
 
-def test_cli_cannot_override_registered_annualisation(tmp_path: Path, capsys) -> None:
+def test_cli_cannot_override_registered_annualisation(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Verify cli cannot override registered annualisation."""
     csv_path = tmp_path / "bars.csv"
     bars = _bars()
     csv_path.write_text("timestamp_ns,close\n" + "".join(

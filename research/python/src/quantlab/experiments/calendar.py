@@ -15,7 +15,8 @@ breaks and overnight windows) are absent from that grid rather than filled.
 from __future__ import annotations
 
 import json
-from datetime import date, datetime, time, timedelta, timezone
+from collections.abc import Iterator
+from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -23,7 +24,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from .schema import NOT_APPLICABLE_INTERVAL, ExperimentError, content_hash
 
 _FIXTURES = Path(__file__).resolve().parents[3] / "fixtures" / "calendars"
-_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 
 CALENDAR_ARTIFACTS: dict[str, str] = {
     "synthetic:fixed-1m-v1": "synthetic-fixed-1m-v1.json",
@@ -74,7 +75,7 @@ def calendar_binding(calendar_id: str) -> dict[str, str]:
     }
 
 
-def _timezone(name: Any) -> ZoneInfo:
+def _timezone(name: object) -> ZoneInfo:
     if not isinstance(name, str) or not name.strip():
         raise ExperimentError("calendar timezone must be an IANA name or UTC")
     try:
@@ -118,17 +119,19 @@ def _local_datetime(day: date, clock: str, zone: ZoneInfo) -> datetime:
 
 
 def _to_ns(moment: datetime) -> int:
-    utc = moment.astimezone(timezone.utc)
+    utc = moment.astimezone(UTC)
     delta = utc - _EPOCH
     return (delta.days * 86400 + delta.seconds) * 1_000_000_000 + delta.microseconds * 1000
 
 
 def _to_local_date(timestamp_ns: int, zone: ZoneInfo) -> date:
-    utc = datetime.fromtimestamp(timestamp_ns // 1_000_000_000, tz=timezone.utc)
+    utc = datetime.fromtimestamp(timestamp_ns // 1_000_000_000, tz=UTC)
     return utc.astimezone(zone).date()
 
 
-def _session_windows(artifact: dict[str, Any], day: date, zone: ZoneInfo):
+def _session_windows(
+    artifact: dict[str, Any], day: date, zone: ZoneInfo
+) -> Iterator[tuple[int, int, str]]:
     """Yield active session windows as (start_ns, end_ns, session) tuples."""
     if day.isoformat() in set(artifact["holidays"]):
         return
@@ -181,7 +184,7 @@ def expected_timestamps(artifact: dict[str, Any], start_ns: int, end_ns: int) ->
     values: set[int] = set()
     day = first_day
     while day <= last_day:
-        for start, end, _session in _session_windows(artifact, day, zone):
+        for start, end, _ in _session_windows(artifact, day, zone):
             if artifact["bar_kind"] == "daily":
                 values.add(start if artifact["anchor"] == "bar_open" else end)
                 continue
