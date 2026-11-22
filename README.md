@@ -242,15 +242,27 @@ Reconciliation is diagnostic. A quote-state comparison does not establish that b
 
 ### 2. Build a point-in-time dataset
 
-Reference data must provide bitemporal provider listings, immutable corporate-action source records and (for historical universe analysis) dated universe-membership records. The former quickstart example built a dataset from checked-in synthetic canonical events and reference data. It has been withdrawn under the owner directive of 2026-11-22; no runnable command consuming those assets is provided here.
+Reference data must provide bitemporal provider listings, immutable corporate-action source
+records and (for historical universe analysis) dated universe-membership records. The former
+quickstart example built a dataset from checked-in synthetic canonical events and reference
+data. It has been withdrawn under the owner directive of 2026-11-22; no runnable command
+consuming those assets is provided here.
 
-`build-dataset` emits immutable outputs and requires a destination that does not already exist. Optional Parquet output requires PyArrow. Optional detached manifest signing requires an AWS KMS Ed25519 key and workload credentials with narrowly scoped `kms:DescribeKey`, `kms:GetPublicKey` and `kms:Sign` permissions. These capabilities remain available for an accepted dataset; their previous synthetic demonstration is archived and non-executable.
+`build-dataset` emits immutable outputs and requires a destination that does not already exist.
+Optional Parquet output requires PyArrow. Optional detached manifest signing requires an AWS KMS
+Ed25519 key and narrowly scoped `kms:DescribeKey`, `kms:GetPublicKey` and `kms:Sign` permissions.
+These capabilities remain available for an accepted dataset; their previous synthetic
+demonstration is archived and non-executable.
 
 `verify-dataset` establishes internal manifest/artifact/hash consistency; with a trusted key, it additionally verifies the publisher's detached Ed25519 signature over a domain-separated manifest digest. It does not establish source authenticity, entitlements, or source completeness. It cannot certify the source was official, complete, licensed, correct, or independently captured. The builder preserves raw prices and emits exact split/bonus adjustment factors as a separate point-in-time view. Dividends remain cash-flow events; rights, mergers, demergers, delistings and other complex actions fail closed until a reviewed transform exists. If the selected universe membership source is incomplete, survivorship bias remains possible and the manifest does not claim otherwise.
 
 ### 3. Run a bounded alpha-search screen
 
-The CSV interface requires strictly increasing `timestamp_ns` and positive `close` columns. The former quickstart example consumed a deterministic synthetic bar series. It has been withdrawn under the owner directive of 2026-11-22; no runnable command consuming that asset is provided here. No experiment parameter may be chosen from synthetic data; see `research/protocols/NSE-CASH-MOMENTUM-PROTOCOL-v1-AMENDMENT-1.md`.
+The CSV interface requires strictly increasing `timestamp_ns` and positive `close` columns. The
+former quickstart example consumed a deterministic synthetic bar series. It has been withdrawn
+under the owner directive of 2026-11-22; no runnable command consuming that asset is provided
+here. No experiment parameter may be chosen from synthetic data; see
+`research/protocols/NSE-CASH-MOMENTUM-PROTOCOL-v1-AMENDMENT-1.md`.
 
 The search family is finite and predeclared. It selects on validation only, applies Holm correction across the candidate family, then reports one untouched chronological holdout. Each segment starts flat and pays exit/liquidation turnover cost; one return interval at each fold boundary is embargoed. The report additionally includes development-only CSCV/PBO and validation-only Deflated Sharpe diagnostics. Sharpe annualisation is controlled by the explicit `--periods-per-year`; it is not inferred. The screen uses bar closes and simplified basis-point costs, not full event-level fills or all exchange charges. A positive holdout is a research screen, not validated alpha. Use licensed point-in-time data and the event simulator before any strategy promotion.
 
