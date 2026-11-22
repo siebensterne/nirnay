@@ -388,6 +388,8 @@ once published; a new run adds a new dated file instead of rewriting history.
 | Protocol | `research/protocols/NSE-CASH-MOMENTUM-PROTOCOL-v1-AMENDMENT-1.md` | amendment 1 supersedes the v1 synthetic-fixture sentence and the nearest-price rule; v1 unchanged; SHA-256 sidecar beside it |
 | Research | `engineering/research/procurement/m43-source-qualification-dossier.md` | M4.3 NSE source qualification: coverage, rights, tariffs and inquiry pack |
 | Research | `engineering/research/procurement/zero-cost-source-availability-2026-11-22.md` | source-availability report at INR 0 from the existing dossier and cited official documentation; SOURCE_DOCUMENTATION_ONLY |
+| Research | `engineering/research/procurement/source-qualification-upstox-nse-2026-11-22.md` | Phase 1 source qualification for Upstox V3 candles and NSE public reports; rights UNKNOWN, collection BLOCKED |
+| Architecture | `engineering/architecture/decisions/ADR-0001-data-ownership.md` | Phase 2 ADR: complementary platform owns acquisition, raw storage, normalization and point-in-time reference data; Nirnay owns research; no second collector |
 | Dated evidence | `evidence/OWNER-DIRECTIVE-2026-11-22.md` | owner data-freeze directive: no synthetic market data, INR 0 data budget, STOP on missing evidence or authorization |
 | Dated evidence | `evidence/M4-2-1-CLAIM-SCOPE-2026-11-22.md` | M4.2.1 narrowed to implemented, not real-market verified; calendar provenance, coverage-bound and bar-anchor findings |
 | Dated evidence | `evidence/POLICY-BOUNDARY-REGRESSION-WITHDRAWAL-2026-11-22.md` | runtime-audit inventory of the 90 deselected market-shaped-fixture tests and the regression coverage withdrawn from active CI |
