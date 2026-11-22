@@ -5,7 +5,7 @@
 **Release status:** research/paper engineering candidate. This repository is not a certified broker-connected trading system, not a SEBI/exchange-approved algo product, and not evidence of profitable alpha. Live order routing is hard-disabled. Every capability statement below distinguishes code present from external verification still required.
 
 <!-- CURRENT-STATE
-code_commit: 02a0b890e960326f401d4df50a69be6129c4bed0
+code_commit: 4f5d4d43a86354763b6bd3d88b4815de7da56f98
 verified_on: 2026-11-21
 ci_run: 45018786768
 scope: docs-only change; local docs/prose gates green; hosted CI 45018786768 at 4b38a0f is 11/12 - sole failure cargo-deny advisories on external RUSTSEC-2026-0592 (url crate), unrelated to this change; dependency work not authorized
