@@ -10,8 +10,8 @@ complementary platform under `engineering/architecture/decisions/ADR-0001-data-o
 <!-- CURRENT-STATE
 code_commit: ed88773a60a24b1f544b3e62dc1111b34055f731
 verified_on: 2026-11-21
-ci_run: 45037307254
-scope: make check + hosted CI 45037307254 on 6d4e19d (12/12); active suite 300 passed, 90 market-shaped-fixture tests deselected under owner directive
+ci_run: 45056818108
+scope: make check + hosted CI 45056818108 on bd5f4f7 (12/12); active suite 352 passed, 90 market-shaped-fixture tests deselected under owner directive
 -->
 
 **Active regression scope:** under the owner directive of 2026-11-22, tests that consume
