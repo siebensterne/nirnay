@@ -15,6 +15,7 @@ from quantlab.dataset_admission import (
     load_admission,
     validate_dataset_admission,
 )
+from quantlab.research_jobs import run_job
 
 DIGEST_A = "a" * 64
 DIGEST_B = "b" * 64
@@ -51,12 +52,14 @@ def _record() -> dict[str, Any]:
             "record_reference": "written:rights-record-2026",
             "permission_source": "WRITTEN_PERMISSION",
             "review_date": "2026-11-22",
+            "valid_until": "2026-12-31",
             "retention_period": "P90D",
             "scope": dict(SCOPE),
             "operations": operations,
         },
         "coverage": {
             "certificate_reference": "coverage:certificate-2026",
+            "valid_until": "2026-12-31",
             "verdict": "PASS",
             "completeness": "COMPLETE",
             "scope": dict(SCOPE),
@@ -106,6 +109,7 @@ def test_valid_abstract_record_is_admitted() -> None:
     assert receipt.contract_version == 1
     assert receipt.dataset_id == "abstract-dataset"
     assert receipt.dataset_version == "abstract-dataset:v1"
+    assert receipt.universe_id == "abstract-universe"
     assert receipt.release_id == "release:abstract-2026"
     assert receipt.manifest_sha256 == DIGEST_A
     assert receipt.data_sha256 == DIGEST_B
@@ -190,7 +194,8 @@ def test_rights_operations_must_cover_the_exact_research_set() -> None:
 
 def test_rights_record_reference_must_be_a_named_document() -> None:
     """Placeholder references are not written permission records."""
-    for reference in ("UNKNOWN", "PENDING", "unspecified:verbally-agreed"):
+    for reference in ("UNKNOWN", "PENDING", "DENIED", "EXPIRED", "REVOKED",
+                      "written:NO-permission", "unspecified:verbally-agreed"):
         payload = _record()
         payload["rights"]["record_reference"] = reference
         _refused(payload, "rights.record_reference")
@@ -205,14 +210,32 @@ def test_rights_scope_must_match_dataset_scope() -> None:
 
 
 def test_rights_review_date_and_retention_are_required() -> None:
-    """A dated review and a retention term must accompany the permission."""
+    """A dated review, live validity and bounded retention accompany permission."""
     payload = _record()
     payload["rights"]["review_date"] = "22-11-2026"
     _refused(payload, "ISO date")
 
+    stale = _record()
+    stale["rights"]["review_date"] = "2019-01-01"
+    _refused(stale, "before the dataset as-of date")
+
+    lapsed = _record()
+    lapsed["rights"]["valid_until"] = "2020-01-01"
+    _refused(lapsed, "rights.valid_until lapsed")
+
     missing = _record()
     del missing["rights"]["retention_period"]
     _refused(missing, "rights.retention_period")
+
+    for retention in ("forever", "P0D", "P", "PT1H", "0", "-5"):
+        unbounded = _record()
+        unbounded["rights"]["retention_period"] = retention
+        _refused(unbounded, "bounded ISO-8601 days")
+
+    for bounded in ("P90D", "90", "P1Y6M"):
+        accepted = _record()
+        accepted["rights"]["retention_period"] = bounded
+        assert validate_dataset_admission(accepted).rights_record_reference
 
 
 @pytest.mark.parametrize("verdict", ["UNKNOWN", "PENDING", "FAILED", "FAIL", None])
@@ -232,11 +255,19 @@ def test_coverage_completeness_must_pass() -> None:
 
 
 def test_coverage_certificate_reference_is_required() -> None:
-    """A passing verdict needs a named certificate reference."""
-    for reference in ("", "PENDING", None):
+    """A passing verdict needs a named, unexpired certificate reference."""
+    for reference in ("", "PENDING", "DENIED", "EXPIRED", "REVOKED", "NO", None):
         payload = _record()
         payload["coverage"]["certificate_reference"] = reference
         _refused(payload, "coverage.certificate_reference")
+
+    missing = _record()
+    del missing["coverage"]["valid_until"]
+    _refused(missing, "coverage.valid_until is missing")
+
+    lapsed = _record()
+    lapsed["coverage"]["valid_until"] = "2019-01-01"
+    _refused(lapsed, "coverage.valid_until lapsed")
 
 
 def test_coverage_must_match_scope_universe_and_as_of() -> None:
@@ -422,14 +453,26 @@ def test_cli_verify_dataset_for_research_requires_admission(
     assert "requires --admission" in capsys.readouterr().err
 
 
-def test_cli_run_research_job_requires_admission(
+def test_cli_run_research_job_requires_admission_and_dataset(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """A research job refuses to start without an admission record."""
-    code = main(["run-research-job", "--manifest", str(tmp_path / "jobs.json"),
-                 "--out", str(tmp_path / "out"), "--registry", str(tmp_path / "registry.sqlite3")])
+    """A research job refuses to start without both inputs and writes no artifact."""
+    registry = tmp_path / "registry.sqlite3"
+    base = ["run-research-job", "--manifest", str(tmp_path / "jobs.json"),
+            "--registry", str(registry)]
+    code = main([*base, "--dataset", str(tmp_path / "release")])
     assert code == 2
-    assert "research jobs require --admission" in capsys.readouterr().err
+    assert "require --dataset and --admission" in capsys.readouterr().err
+    assert not registry.exists()
+
+    code = main([*base, "--admission", str(tmp_path / "admission.json")])
+    assert code == 2
+    assert "require --dataset and --admission" in capsys.readouterr().err
+    assert not registry.exists()
+
+    with pytest.raises(DatasetAdmissionError, match="both an admitted dataset directory"):
+        run_job(tmp_path / "jobs.json", registry)
+    assert not registry.exists()
 
 
 def test_cli_admit_dataset_refuses_unreadable_record(

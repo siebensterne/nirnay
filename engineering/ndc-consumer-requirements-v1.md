@@ -32,10 +32,10 @@ versioned with the release and is the input to the dataset-admission gate in
 | Group | Required fields | Consumer meaning |
 |---|---|---|
 | Dataset identity and source scope | `dataset_id`, `dataset_version`, `dataset_origin`, `source_scope` (`provider`, `product`, `venue`, `segment`) | Named release identity; source and venue are declared, not inferred from a symbol |
-| Rights | `rights.record_reference`, `rights.permission_source`, `rights.operations`, `rights.scope`, `rights.review_date`, `rights.retention_period` | Written permission reference and the exact operations covered; a registry `UNKNOWN` is not permission |
-| Coverage and completeness | `coverage.certificate_reference`, `coverage.verdict`, `coverage.completeness`, `coverage.scope`, `coverage.universe_id`, `coverage.as_of_ns` | Passing certification over the declared scope and as-of instant; gaps and rejects are declared, not invented |
+| Rights | `rights.record_reference`, `rights.permission_source`, `rights.operations`, `rights.scope`, `rights.review_date`, `rights.valid_until`, `rights.retention_period` | Written permission reference and exact operations; review date and optional validity bound must not precede the as-of UTC date; registry `UNKNOWN` is not permission |
+| Coverage and completeness | `coverage.certificate_reference`, `coverage.valid_until`, `coverage.verdict`, `coverage.completeness`, `coverage.scope`, `coverage.universe_id`, `coverage.as_of_ns` | Passing, unexpired certification over the declared scope and as-of instant; gaps and rejects are declared, not invented |
 | Schema versions | contract schema version, normalizer version, payload schema version per event type | Version identity for each transformation applied before publication |
-| Retention | `rights.retention_period`, archive closure and deletion basis | Declared retention term; a missing term is a denial |
+| Retention | `rights.retention_period`, archive closure and deletion basis | Bounded ISO-8601 duration or positive integer days; a missing or open-ended term is a denial |
 | Digest | `release.manifest_sha256`, `release.data_sha256`, `release.digest_algorithm` | Immutable digests of the release manifest and canonical dataset content |
 | Publication identity | `release.release_id`, `release.publication_identity`, `release.publication_method`, `release.archive_reference` | Immutable release identity and the named publisher of that identity |
 | Point-in-time lineage | `lineage.basis`, `lineage.universe_version`, `lineage.universe_source_reference`, `lineage.instrument_identity_source_reference`, `lineage.corporate_action_source_reference`, matching `*_sha256` fields, `lineage.as_of_ns`, `lineage.knowledge_time_ns` | Named universe, instrument-identity and corporate-action provenance with digests and one as-of basis |
@@ -73,27 +73,33 @@ run to soften an earlier failure.
    redirected or placeholder references.
 3. **Verdicts.** Require `PERMITTED` for each listed operation, `PASS` and
    `COMPLETE` for coverage, and an immutable release flag. `UNKNOWN`,
-   `PENDING`, `FAILED`, `BLOCKED` and `PROHIBITED` are denials.
-4. **Exact operations.** Require the rights record to cover the research
+   `PENDING`, `FAILED`, `BLOCKED`, `PROHIBITED`, `DENIED`, `EXPIRED`, `REVOKED`
+   and `NO` are denials in verdicts and references.
+4. **Validity.** Convert `dataset.as_of_ns` to a UTC calendar date. Refuse a
+   rights review date, a rights validity bound or a certificate expiry that
+   precedes that date. Refuse an unbounded retention term; accept a positive
+   integer day count or a bounded ISO-8601 date duration.
+5. **Exact operations.** Require the rights record to cover the research
    operations `store`, `replay`, `internal_analytics` and `retention`, each
    citing the same written record. An extra operation is a mismatch.
-5. **Scope consistency.** Require rights, coverage, lineage and dataset source
+6. **Scope consistency.** Require rights, coverage, lineage and dataset source
    scope to name the same provider, product, venue and segment. Require one
    declared universe id across those sections.
-6. **Release digest.** Recompute the manifest and data digests and compare them
+7. **Release digest.** Recompute the manifest and data digests and compare them
    with the release declaration and the dataset manifest. Refuse a mismatch.
-7. **As-of semantics.** Require one as-of basis and instant. Refuse lineage
+8. **As-of semantics.** Require one as-of basis and instant. Refuse lineage
    knowledge time after the as-of instant. Do not select a revision by
    arrival order.
-8. **Typed payload.** Refuse an unregistered event type, an untyped payload, a
+9. **Typed payload.** Refuse an unregistered event type, an untyped payload, a
    null presented as zero, or a timestamp whose unit is undeclared.
-9. **Continuity.** Report gaps against the declared provider and partition
-   scope. A declared gap is a bounded coverage claim, not a filled observation.
-10. **Archive link.** Require a raw digest and an archive reference on every
+10. **Continuity.** Report gaps against the declared provider and partition
+    scope. A declared gap is a bounded coverage claim, not a filled observation.
+11. **Archive link.** Require a raw digest and an archive reference on every
     event. Do not create a substitute observation when either is absent.
-11. **Admission.** Refuse research use, experiment registration or a research
+12. **Admission.** Refuse research use, experiment registration or a research
     job until the release passes the dataset-admission gate against the exact
-    published identity and digests.
+    published identity and digests. The job runner takes an explicit published
+    dataset directory and builds no dataset of its own.
 
 Validation reads declarations and digests. It does not acquire provider data,
 replay provider traffic or produce a market observation.
@@ -105,6 +111,8 @@ replay provider traffic or produce a market observation.
 | `REJECT_CONTRACT_VERSION` | Unsupported major version | Stop; request a published migration record |
 | `REJECT_INCOMPLETE` | Missing, empty or mistyped required field | Stop; list the field path |
 | `REJECT_VERDICT` | A rights or coverage verdict is not passing | Stop; name the field and observed value |
+| `REJECT_VALIDITY` | Review, validity or expiry bound precedes the as-of UTC date | Stop; treat denied, expired and revoked references as refusals |
+| `REJECT_RETENTION` | Retention is missing, open-ended or unbounded | Stop; require bounded days or an ISO-8601 duration |
 | `REJECT_RIGHTS` | Exact operation set, scope or written reference differs | Stop; no operation is inferred from another operation |
 | `REJECT_DIGEST` | Manifest or data digest mismatch | Stop; do not use any event from the release |
 | `REJECT_SCOPE` | Source scope or universe id differs between sections | Stop; do not merge scopes |
@@ -131,9 +139,12 @@ Rules for change over time:
 ## 4. Relation to the repository gate
 
 `dataset_admission.py` enforces the four evidence sections on scalar
-declarations. The `admit-dataset`, `verify-dataset --for-research` and
-`run-research-job --admission` CLI paths fail closed with a named reason. No
-data is ingested by these checks. The dataset acceptance contract in
+declarations, including validity bounds and bounded retention. The
+`admit-dataset`, `verify-dataset --for-research` and
+`run-research-job --dataset --admission` CLI paths fail closed with a named
+reason before any artifact write; the job runner binds its command and registry
+record to the admitted release and builds no dataset. No data is ingested by
+these checks. The dataset acceptance contract in
 `engineering/research/dataset-acceptance-contract.md` remains BLOCKED while all
 21 source-product rights remain `UNKNOWN`.
 

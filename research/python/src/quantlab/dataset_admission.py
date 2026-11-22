@@ -37,10 +37,13 @@ PUBLICATION_METHOD = "atomic_directory_rename"
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 PLACEHOLDER_RE = re.compile(
     r"\b(?:UNKNOWN|PENDING|FAILED|FAIL|BLOCKED|PROHIBITED|UNVERIFIED|"
-    r"TBD|PLACEHOLDER|UNSPECIFIED)\b",
+    r"DENIED|EXPIRED|REVOKED|NO|NONE|TBD|PLACEHOLDER|UNSPECIFIED)\b",
     re.IGNORECASE,
 )
 SCOPE_FIELDS: tuple[str, ...] = ("provider", "product", "venue", "segment")
+ISO_DURATION_RE = re.compile(r"P(?:(\d+)Y)?(?:(\d+)M)?(?:(\d+)W)?(?:(\d+)D)?")
+INTEGER_DAYS_RE = re.compile(r"[1-9]\d*")
+EPOCH = dt.datetime(1970, 1, 1, tzinfo=dt.UTC)
 
 
 class DatasetAdmissionError(ValueError):
@@ -54,6 +57,7 @@ class AdmissionReceipt:
     contract_version: int
     dataset_id: str
     dataset_version: str
+    universe_id: str
     release_id: str
     manifest_sha256: str
     data_sha256: str
@@ -68,6 +72,7 @@ class AdmissionReceipt:
             "contract_version": self.contract_version,
             "dataset_id": self.dataset_id,
             "dataset_version": self.dataset_version,
+            "universe_id": self.universe_id,
             "release_id": self.release_id,
             "manifest_sha256": self.manifest_sha256,
             "data_sha256": self.data_sha256,
@@ -128,6 +133,48 @@ def _digest(container: Mapping[str, Any], key: str, field: str) -> str:
     return value
 
 
+def _utc_date_from_ns(ns: int) -> dt.date:
+    """Convert a nanosecond epoch instant to its UTC calendar date."""
+    try:
+        moment = EPOCH + dt.timedelta(microseconds=ns // 1_000)
+    except (OverflowError, ValueError) as exc:
+        raise DatasetAdmissionError("as-of instant is outside the UTC date range") from exc
+    return moment.date()
+
+
+def _bounded_retention(container: Mapping[str, Any], key: str, field: str) -> str:
+    """Require bounded positive days or a bounded ISO-8601 date duration."""
+    text = _text(container, key, field)
+    if INTEGER_DAYS_RE.fullmatch(text) is not None:
+        return text
+    match = ISO_DURATION_RE.fullmatch(text)
+    if match is not None and any(item is not None and int(item) > 0
+                                 for item in match.groups()):
+        return text
+    raise DatasetAdmissionError(
+        f"{field} must be bounded ISO-8601 days or positive integer days"
+    )
+
+
+def _validity_date(container: Mapping[str, Any], key: str, field: str,
+                   as_of_date: dt.date, *, required: bool = False) -> dt.date | None:
+    """Require a validity bound that has not lapsed at the as-of date."""
+    value = container.get(key)
+    if value is None:
+        if required:
+            raise DatasetAdmissionError(f"{field} is missing")
+        return None
+    if not isinstance(value, str):
+        raise DatasetAdmissionError(f"{field} must be an ISO date")
+    try:
+        bound = dt.date.fromisoformat(value)
+    except ValueError as exc:
+        raise DatasetAdmissionError(f"{field} is not an ISO date") from exc
+    if bound < as_of_date:
+        raise DatasetAdmissionError(f"{field} lapsed before the dataset as-of date")
+    return bound
+
+
 def _scope(value: object, field: str) -> dict[str, str]:
     """Require the four exact source-scope dimensions with named values."""
     scope = _object(value, field)
@@ -144,17 +191,21 @@ def _match(left: object, right: object, label: str) -> None:
         raise DatasetAdmissionError(f"{label} differs between admission sections")
 
 
-def _validate_rights(record: Mapping[str, Any], scope: dict[str, str]) -> str:
+def _validate_rights(record: Mapping[str, Any], scope: dict[str, str],
+                     as_of_date: dt.date) -> str:
     """Require a written rights record covering the exact research operations."""
     rights = _object(record.get("rights"), "rights")
     reference = _text(rights, "record_reference", "rights.record_reference")
     _enum(rights, "permission_source", "rights.permission_source", WRITTEN_PERMISSION)
     review_date = _text(rights, "review_date", "rights.review_date")
     try:
-        dt.date.fromisoformat(review_date)
+        reviewed = dt.date.fromisoformat(review_date)
     except ValueError as exc:
         raise DatasetAdmissionError("rights.review_date is not an ISO date") from exc
-    _text(rights, "retention_period", "rights.retention_period")
+    if reviewed < as_of_date:
+        raise DatasetAdmissionError("rights.review_date is before the dataset as-of date")
+    _validity_date(rights, "valid_until", "rights.valid_until", as_of_date)
+    _bounded_retention(rights, "retention_period", "rights.retention_period")
     operations = _object(rights.get("operations"), "rights.operations")
     expected = set(REQUIRED_OPERATIONS)
     if set(operations) != expected:
@@ -177,12 +228,14 @@ def _validate_rights(record: Mapping[str, Any], scope: dict[str, str]) -> str:
 
 
 def _validate_coverage(record: Mapping[str, Any], scope: dict[str, str],
-                       universe_id: str, as_of_ns: int) -> str:
+                       universe_id: str, as_of_ns: int, as_of_date: dt.date) -> str:
     """Require a passing coverage certificate bound to the same declared scope."""
     coverage = _object(record.get("coverage"), "coverage")
     _enum(coverage, "verdict", "coverage.verdict", COVERAGE_PASS)
     _enum(coverage, "completeness", "coverage.completeness", COVERAGE_COMPLETE)
     certificate = _text(coverage, "certificate_reference", "coverage.certificate_reference")
+    _validity_date(coverage, "valid_until", "coverage.valid_until", as_of_date,
+                   required=True)
     _match(_scope(coverage.get("scope"), "coverage.scope"), scope, "coverage scope")
     _match(coverage.get("universe_id"), universe_id, "coverage universe_id")
     _match(coverage.get("as_of_ns"), as_of_ns, "coverage as_of_ns")
@@ -254,8 +307,9 @@ def validate_dataset_admission(payload: object) -> AdmissionReceipt:
     _enum(dataset, "as_of_basis", "dataset.as_of_basis", AS_OF_BASIS)
     manifest_sha256 = _digest(dataset, "manifest_sha256", "dataset.manifest_sha256")
     data_sha256 = _digest(dataset, "data_sha256", "dataset.data_sha256")
-    rights_reference = _validate_rights(record, scope)
-    certificate = _validate_coverage(record, scope, universe_id, as_of_ns)
+    as_of_date = _utc_date_from_ns(as_of_ns)
+    rights_reference = _validate_rights(record, scope, as_of_date)
+    certificate = _validate_coverage(record, scope, universe_id, as_of_ns, as_of_date)
     release_id = _validate_release(record, dataset_id, dataset_version,
                                    manifest_sha256, data_sha256)
     basis = _validate_lineage(record, scope, universe_id, as_of_ns)
@@ -263,6 +317,7 @@ def validate_dataset_admission(payload: object) -> AdmissionReceipt:
         contract_version=version,
         dataset_id=dataset_id,
         dataset_version=dataset_version,
+        universe_id=universe_id,
         release_id=release_id,
         manifest_sha256=manifest_sha256,
         data_sha256=data_sha256,

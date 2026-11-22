@@ -738,12 +738,12 @@ def _cmd_validation_report(args: argparse.Namespace) -> int:
 def _cmd_run_research_job(args: argparse.Namespace) -> int:
     from .research_jobs import run_job
 
-    if args.admission is None:
+    if args.dataset is None or args.admission is None:
         raise DatasetAdmissionError(
-            "research jobs require --admission with a valid dataset-admission record"
+            "research jobs require --dataset and --admission before any side effect"
         )
-    result = run_job(args.manifest, args.out, args.registry, job_id=args.job_id,
-                     admission=args.admission)
+    result = run_job(args.manifest, args.registry, dataset_dir=args.dataset,
+                     admission=args.admission, job_id=args.job_id)
     payload = json.dumps(result.as_dict(), sort_keys=True, separators=(",", ":"),
                          allow_nan=False).encode("utf-8")
     sys.stdout.buffer.write(payload + b"\n")
@@ -914,8 +914,8 @@ def build_parser() -> argparse.ArgumentParser:
     job = sub.add_parser("run-research-job",
                          help="validate and dry-run one local opt-in research job")
     job.add_argument("--manifest", type=Path, required=True)
-    job.add_argument("--out", type=Path, required=True,
-                     help="fresh output directory for the synthetic dataset")
+    job.add_argument("--dataset", type=Path,
+                     help="published admitted dataset directory; no dataset is built here")
     job.add_argument("--registry", type=Path, required=True,
                      help="append-only experiment registry that receives the run record")
     job.add_argument("--job-id", help="job id from the manifest; defaults to the first job")
