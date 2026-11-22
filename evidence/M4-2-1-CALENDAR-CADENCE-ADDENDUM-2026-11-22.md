@@ -55,7 +55,7 @@ not edited, re-signed or re-run.
   `reference-data.example.json`: used only to exercise the manifest-origin
   binding on a locally built synthetic publication.
 - Eight checked-in calendar artifacts; their digests are recomputed at runtime
-  from the artifact bytes by `calendar_binding`.
+  from the canonical JSON form of the artifact by `calendar_binding`.
 
 ## Mandatory falsifiers and pass cases
 
