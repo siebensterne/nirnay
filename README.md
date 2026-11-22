@@ -1,6 +1,9 @@
 # Nirnay Quant — research-to-paper trading workspace
 
-**Scope:** India-first systematic research, market-data capture, point-in-time data construction, event-driven paper simulation and controlled execution contracts.
+**Scope:** India-first systematic quantitative research, event-driven simulation, portfolio
+construction and risk engineering with controlled execution contracts. Market-data
+acquisition, raw storage, normalization and point-in-time reference data are owned by the
+complementary platform under `engineering/architecture/decisions/ADR-0001-data-ownership.md`.
 
 **Release status:** research/paper engineering candidate. This repository is not a certified broker-connected trading system, not a SEBI/exchange-approved algo product, and not evidence of profitable alpha. Live order routing is hard-disabled. Every capability statement below distinguishes code present from external verification still required.
 
@@ -28,6 +31,10 @@ portfolio state, risk decisions, the OMS and the account journal. KDB-X is an
 owner-local analytics tool, not an execution or account authority. No Python or
 q process runs across the real-time execution boundary. Claims below are
  Implemented unless a dated record explicitly states Verified.
+
+The provider capture, normalization and reconciliation rows below describe legacy tooling
+preserved for review. They are blocked pending rights and owner approval; acquisition
+ownership moves to the complementary platform under ADR-0001.
 
 | Capability | Active implementation | Boundary / non-claim |
 |---|---|---|
@@ -154,7 +161,67 @@ contracts and verification.
 
 ## Research pipeline
 
-### 1. Capture and preserve provider data
+### 1. Build a point-in-time dataset
+
+Reference data must provide bitemporal provider listings, immutable corporate-action source
+records and (for historical universe analysis) dated universe-membership records. The former
+quickstart example built a dataset from checked-in synthetic canonical events and reference
+data. It has been withdrawn under the owner directive of 2026-11-22; no runnable command
+consuming those assets is provided here.
+
+`build-dataset` emits immutable outputs and requires a destination that does not already exist.
+Optional Parquet output requires PyArrow. Optional detached manifest signing requires an AWS KMS
+Ed25519 key and narrowly scoped `kms:DescribeKey`, `kms:GetPublicKey` and `kms:Sign` permissions.
+These capabilities remain available for an accepted dataset; their previous synthetic
+demonstration is archived and non-executable.
+
+`verify-dataset` establishes internal manifest/artifact/hash consistency; with a trusted key,
+it additionally verifies the publisher's detached Ed25519 signature over a domain-separated
+manifest digest. It does not establish source authenticity, entitlements, or source
+completeness. It cannot certify the source was official, complete, licensed, correct, or
+independently captured. The builder preserves raw prices and emits exact split/bonus adjustment
+factors as a separate point-in-time view. Dividends remain cash-flow events; rights, mergers,
+demergers, delistings and other complex actions fail closed until a reviewed transform exists.
+If the selected universe membership source is incomplete, survivorship bias remains possible
+and the manifest does not claim otherwise.
+
+### 2. Run a bounded alpha-search screen
+
+The CSV interface requires strictly increasing `timestamp_ns` and positive `close` columns. The
+former quickstart example consumed a deterministic synthetic bar series. It has been withdrawn
+under the owner directive of 2026-11-22; no runnable command consuming that asset is provided
+here. No experiment parameter may be chosen from synthetic data; see
+`research/protocols/NSE-CASH-MOMENTUM-PROTOCOL-v1-AMENDMENT-1.md`.
+
+The search family is finite and predeclared. It selects on validation only, applies Holm
+correction across the candidate family, then reports one untouched chronological holdout.
+Each segment starts flat and pays exit/liquidation turnover cost; one return interval at each
+fold boundary is embargoed. The report additionally includes development-only CSCV/PBO and
+validation-only Deflated Sharpe diagnostics. Sharpe annualisation is controlled by the explicit
+`--periods-per-year`; it is not inferred. The screen uses bar closes and simplified basis-point
+costs, not full event-level fills or all exchange charges. A positive holdout is a research
+screen, not validated alpha. Use licensed point-in-time data and the event simulator before any
+strategy promotion.
+
+## Archived synthetic research assets
+
+All checked-in synthetic market-shaped assets — price bars, canonical events, reference data
+and market calendars — are archived and non-executable under the owner directive of
+2026-11-22. They are preserved unchanged as historical repository material; they must not be
+executed, regenerated, extended, transformed, reused as research evidence, or cited as proof of
+source completeness, rights or real-market verification. See
+`research/python/fixtures/ARCHIVED.md` and
+`evidence/POLICY-BOUNDARY-REGRESSION-WITHDRAWAL-2026-11-22.md` for the marker and the exact
+withdrawn regression coverage.
+
+## Legacy provider tooling — blocked pending rights and owner approval
+
+The Upstox and FYERS capture, normalization and reconciliation tooling below is preserved as
+implemented code and historical evidence. It is **not** an active quickstart. All provider
+rights remain `UNKNOWN`; collection, local storage, replay, backup and analytics are not
+authorized. Do not execute any command in this section. Ownership of source acquisition and
+raw data belongs to the complementary platform under ADR-0001; this section is retained only
+until its architecture has been reviewed.
 
 Upstox V3 captures original binary Protobuf payloads in `raw-frames.jsonl`. The
 companion diagnostic projection is useful for inspection but is not treated as
@@ -239,43 +306,6 @@ quantlab reconcile --events /tmp/provider-events.jsonl \
 ```
 
 Reconciliation is diagnostic. A quote-state comparison does not establish that both providers delivered every event, nor does it justify summing their displayed size. Use a single selected provider for any backtest replay unless an independently designed feed arbitration layer selects one authoritative path.
-
-### 2. Build a point-in-time dataset
-
-Reference data must provide bitemporal provider listings, immutable corporate-action source
-records and (for historical universe analysis) dated universe-membership records. The former
-quickstart example built a dataset from checked-in synthetic canonical events and reference
-data. It has been withdrawn under the owner directive of 2026-11-22; no runnable command
-consuming those assets is provided here.
-
-`build-dataset` emits immutable outputs and requires a destination that does not already exist.
-Optional Parquet output requires PyArrow. Optional detached manifest signing requires an AWS KMS
-Ed25519 key and narrowly scoped `kms:DescribeKey`, `kms:GetPublicKey` and `kms:Sign` permissions.
-These capabilities remain available for an accepted dataset; their previous synthetic
-demonstration is archived and non-executable.
-
-`verify-dataset` establishes internal manifest/artifact/hash consistency; with a trusted key, it additionally verifies the publisher's detached Ed25519 signature over a domain-separated manifest digest. It does not establish source authenticity, entitlements, or source completeness. It cannot certify the source was official, complete, licensed, correct, or independently captured. The builder preserves raw prices and emits exact split/bonus adjustment factors as a separate point-in-time view. Dividends remain cash-flow events; rights, mergers, demergers, delistings and other complex actions fail closed until a reviewed transform exists. If the selected universe membership source is incomplete, survivorship bias remains possible and the manifest does not claim otherwise.
-
-### 3. Run a bounded alpha-search screen
-
-The CSV interface requires strictly increasing `timestamp_ns` and positive `close` columns. The
-former quickstart example consumed a deterministic synthetic bar series. It has been withdrawn
-under the owner directive of 2026-11-22; no runnable command consuming that asset is provided
-here. No experiment parameter may be chosen from synthetic data; see
-`research/protocols/NSE-CASH-MOMENTUM-PROTOCOL-v1-AMENDMENT-1.md`.
-
-The search family is finite and predeclared. It selects on validation only, applies Holm correction across the candidate family, then reports one untouched chronological holdout. Each segment starts flat and pays exit/liquidation turnover cost; one return interval at each fold boundary is embargoed. The report additionally includes development-only CSCV/PBO and validation-only Deflated Sharpe diagnostics. Sharpe annualisation is controlled by the explicit `--periods-per-year`; it is not inferred. The screen uses bar closes and simplified basis-point costs, not full event-level fills or all exchange charges. A positive holdout is a research screen, not validated alpha. Use licensed point-in-time data and the event simulator before any strategy promotion.
-
-## Archived synthetic research assets
-
-All checked-in synthetic market-shaped assets — price bars, canonical events, reference data
-and market calendars — are archived and non-executable under the owner directive of
-2026-11-22. They are preserved unchanged as historical repository material; they must not be
-executed, regenerated, extended, transformed, reused as research evidence, or cited as proof of
-source completeness, rights or real-market verification. See
-`research/python/fixtures/ARCHIVED.md` and
-`evidence/POLICY-BOUNDARY-REGRESSION-WITHDRAWAL-2026-11-22.md` for the marker and the exact
-withdrawn regression coverage.
 
 ## Market and execution model caveats
 
