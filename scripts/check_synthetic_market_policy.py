@@ -118,7 +118,7 @@ def scan_text(text: str, *, path: str = "<text>") -> list[Finding]:
     """Return prohibited-pattern findings in one source text."""
     findings: list[Finding] = []
     for line_number, line in enumerate(text.splitlines(), 1):
-        for rule_id, _category, pattern in RULES:
+        for rule_id, _category, pattern in RULES:  # noqa: B007
             for match in pattern.finditer(line):
                 findings.append(Finding(path, line_number, rule_id, match.group(0)))
     return findings
