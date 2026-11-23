@@ -1,3 +1,34 @@
+# Migration map archive — Nirnay — 2026-11-23
+
+**Status:** dated archival record issued under RRP-005. This record changes no
+data right, provider operation, dataset acceptance, experiment state or Git
+history. No commit was created in this worktree.
+
+**Authority:** `engineering/retirement/RRP-001.md` §4 priority P1 row 5
+(redundant specifications and documentation, CONSOLIDATE) and §6 binding rule 7;
+`engineering/retirement/RETIREMENT-ACCEPTANCE.md` Gate RRP-005.
+
+## 1. Archived artifact
+
+| Field | Value |
+|---|---|
+| Original path | `engineering/migration-map.csv` |
+| Disposition | ARCHIVE, then remove from the active tree |
+| Bytes at removal | 4206 |
+| SHA-256 of original bytes | `6192b639fbbcb79635b066459cb0d3e8a389da4454890c2975d2a44b51d50f85` |
+| Removal worktree | `chore/rrp-005` (no commit created) |
+| Replacement | this record; topic authority map in `evidence/RRP-005-CONSOLIDATION-2026-11-23.md` |
+
+The CSV was a legacy promotion and removal ledger for the predecessor monolith
+and the `.local/extras/` reference workspace. Its rows are historical. Paths
+under `.local/extras/` were owner-local references held outside the active tree;
+this working tree has no `.local/` directory. This record preserves the rows
+verbatim and does not reclassify them as current capability or compliance
+evidence.
+
+## 2. Verbatim archived bytes
+
+```csv
 source,destination,state,notes
 crates/types,crates/market-types,migrated,package name now matches directory
 crates/book,crates/market-book,migrated,internal dependency path updated
@@ -34,3 +65,11 @@ legacy/deploy,not-promoted,archived,old runtime deployment
 .local/extras/cpp/src/sbe.cpp,crates/sbe-codec/src/decode.rs,promoted,self-contained challenge SBE decoder with typed fail-closed errors
 .local/extras/tests/golden/sample_replay.sbe,crates/sbe-codec/tests/golden/sample_replay.sbe,promoted-then-retired,verbatim golden with provenance digest af291b4050e14; D11 removed the active golden from the tree
 .local/extras/LICENSE,crates/sbe-codec/LICENSE,promoted,MIT licence retained with the promoted decoder
+```
+
+## 3. Reference resolution
+
+Mutable documents that named the original path (`README.md` and
+`engineering/extras-audit.md`) now point at this record. Dated evidence files
+that name the original path are immutable historical statements; they resolve
+to this record through the path map in the RRP-005 consolidation record.

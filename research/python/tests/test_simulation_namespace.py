@@ -1,25 +1,20 @@
-"""Simulation namespace shims re-export canonical sim behavior without duplication."""
+"""Canonical simulation namespace re-exports identical objects across submodules."""
 from __future__ import annotations
 
 from dataclasses import replace
 from decimal import Decimal
+from pathlib import Path
 
-from quantlab.sim import (BaselineParams as SimBaselineParams,
-                          ConservativeMbpModel as SimConservativeMbpModel,
-                          EngineConfig, ReplaySeeds, SimulationEngine, default_cost_model)
-from quantlab.sim import compare_records as sim_compare_records
-from quantlab.sim import read_record as sim_read_record
+from quantlab.sim import (BaselineParams, ConservativeMbpModel, CostModel,
+                          EngineConfig, ReplaySeeds, SimulationEngine,
+                          compare_records as sim_compare_records,
+                          default_cost_model,
+                          read_record as sim_read_record)
 from quantlab.sim.execution import BaselineParams as ExecBaselineParams
 from quantlab.sim.execution import CostModel as ExecCostModel
-from quantlab.sim.replay import build_record, record_to_dict, write_record
-from quantlab.simulation.event_replay import (
-    RunRecord,
-    build_record as shim_build_record,
-    compare_records as shim_compare_records,
-    read_record as shim_read_record,
-    write_record as shim_write_record,
-)
-from quantlab.simulation.execution import BaselineParams, CostModel, default_cost_model as shim_cost
+from quantlab.sim.execution import default_cost_model as exec_cost
+from quantlab.sim.replay import (RunRecord, build_record, compare_records,
+                                 read_record, record_to_dict, write_record)
 
 
 def _record() -> RunRecord:
@@ -30,36 +25,35 @@ def _record() -> RunRecord:
                             max_book_age_ns=1_000_000_000,
                             cost_model=default_cost_model())
     seeds = ReplaySeeds(1, 2, 3, 4)
-    model = SimConservativeMbpModel(params)
+    model = ConservativeMbpModel(params)
     result = SimulationEngine(config).run(tuple(), models=model, seeds=seeds)
     return build_record(result, engine_config=config, model_config=params.to_dict(),
                         seeds=seeds)
 
 
 def test_namespace_symbols_are_identical_objects():
-    assert shim_build_record is build_record
-    assert shim_compare_records is sim_compare_records
-    assert shim_read_record is sim_read_record
-    assert shim_write_record is write_record
-    assert BaselineParams is SimBaselineParams is ExecBaselineParams
+    assert compare_records is sim_compare_records
+    assert read_record is sim_read_record
+    assert BaselineParams is ExecBaselineParams
     assert CostModel is ExecCostModel
-    assert shim_cost is default_cost_model
+    assert exec_cost is default_cost_model
 
 
-def test_shim_write_and_read_record_round_trip(tmp_path):
+def test_canonical_write_and_read_record_round_trip(tmp_path: Path) -> None:
+    """Written canonical records round-trip through the replay reader."""
     record = _record()
-    path = shim_write_record(record, tmp_path)
-    assert shim_read_record(path) == record
+    path = write_record(record, tmp_path)
+    assert read_record(path) == record
 
 
-def test_shim_record_round_trip_and_tampered_fill_digest():
+def test_canonical_record_round_trip_and_tampered_fill_digest() -> None:
+    """A tampered fill digest fails canonical replay comparison."""
     record = _record()
-    assert shim_build_record is build_record
     assert record_to_dict(record)["schema_version"] == 1
-    comparison = shim_compare_records(record, record)
+    comparison = compare_records(record, record)
     assert comparison.verified is True
     assert comparison.pnl_basis == "recomputed"
     tampered = replace(record, fills_digest="1" * 64)
-    failed = shim_compare_records(record, tampered)
+    failed = compare_records(record, tampered)
     assert failed.verified is False
     assert failed.verified_equal["fills_digest"] is False

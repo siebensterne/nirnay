@@ -1,5 +1,12 @@
 {
   "schema_version": 1,
+  "authority": {
+    "status": "superseded_inventory",
+    "canonical_claims": "claims/ledger.json",
+    "consolidated_on": "2026-11-23",
+    "note": "claims/ledger.json is the canonical claim record. Every CAP-xxx entry below is superseded as an authority by that ledger and is retained as a historical capability assertion; no assertion was deleted. The RRP-005 consolidation record maps the authority change and the namespace removal.",
+    "consolidation_record": "evidence/RRP-005-CONSOLIDATION-2026-11-23.md"
+  },
   "north_star_metric": {
     "name": "validated_strategy_net_expectancy",
     "value": null,
@@ -412,9 +419,10 @@
       "id": "CAP-046",
       "name": "Simulation namespace aliases and CLI visibility of terminal experiments",
       "status": "implemented",
-      "evidence_status": "simulation/event_replay.py and simulation/execution.py are direct re-exports of the canonical sim package; tests assert identical function objects and that a tampered fill digest fails compare_records. The list-experiments CLI command prints registered and terminal records with their attempted-config counts, so rejected runs and losers are visible. No new matching engine or behavior is added. Implemented, not independently verified; no alpha or live-readiness claim.",
+      "evidence_status": "RRP-005: the quantlab.simulation re-export shims were removed after a repository-wide import audit; quantlab.sim is the sole simulation namespace and now hosts cost_assumptions_digest. Tests assert canonical object identity across sim submodules and that a tampered fill digest fails compare_records. The list-experiments CLI command prints registered and terminal records with their attempted-config counts. This historical assertion is superseded by CLM-041 in claims/ledger.json. Implemented, not independently verified; no alpha or live-readiness claim.",
       "owner": "research",
-      "scope": "research/python/src/quantlab/simulation/event_replay.py; research/python/src/quantlab/simulation/execution.py; research/python/src/quantlab/simulation/__init__.py; research/python/src/quantlab/cli.py; research/python/tests/test_simulation_namespace.py; research/python/tests/test_cli_pipeline.py"
+      "scope": "research/python/src/quantlab/sim/__init__.py; research/python/src/quantlab/sim/replay.py; research/python/src/quantlab/sim/execution/costs.py; research/python/src/quantlab/cli.py; research/python/tests/test_simulation_namespace.py; research/python/tests/test_cli_pipeline.py",
+      "superseded_by": "claims/ledger.json#CLM-041"
     },
     {
       "id": "CAP-054",

@@ -89,8 +89,9 @@ SHA-256:            a49e864308a7e58d667a86049dd80e8ff2c631cd762e50a74aff60007464
 Removed manifest:   ../legacy-snapshot-2026-11-13/legacy-removed-manifest-2026-11-13.txt
 ```
 
-The cleanup and promotion are recorded in `engineering/migration-map.csv`; the
-detailed evidence is in `engineering/legacy-audit-2026-11-13.md`.
+The cleanup and promotion ledger is archived verbatim in
+`evidence/MIGRATION-MAP-ARCHIVE-2026-11-23.md`; the detailed historical evidence
+remains in the external verified snapshot.
 
 ## Rules for `.local/extras/`
 
@@ -101,7 +102,8 @@ detailed evidence is in `engineering/legacy-audit-2026-11-13.md`.
 3. Promote individual modules, never the predecessor monolith. A promotion that
    adds SQLite or filesystem I/O to a pure domain crate needs a separate crate
    and an architecture dependency edge.
-4. Add every promotion or removal to `engineering/migration-map.csv`.
+4. Record every promotion or removal in a dated record under `evidence/` and
+   name that record from this document.
 5. Keep `.local/extras/LICENSE` and `.local/extras/UPSTREAM-ARCHIVE.txt` with any copy or
    promotion.
 6. `.local/extras/` is not scheduled for deletion. If it is ever retired, retain the

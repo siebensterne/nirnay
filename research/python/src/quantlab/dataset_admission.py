@@ -25,7 +25,8 @@ from pathlib import Path
 from typing import Any
 
 ADMISSION_CONTRACT_VERSION = 1
-# The exact consumer-operation set of engineering/ndc-consumer-requirements-v1.md.
+# The exact consumer-operation set of the historical v1 contract at
+# engineering/contracts/historical/ndc-consumer-requirements-v1.md.
 # These are Nirnay-side activities, not Fieldbook producer operations. The gate
 # requires all five with a PERMITTED state and one written record; an extra
 # operation is a mismatch, not an added entitlement.
