@@ -135,7 +135,8 @@ numeric contracts.
 - `apps/paper-runner/tests/certification.rs`: 6 end-to-end synthetic paper/session scenarios;
 retained 2 manifest-boundary audit tests.
 - `apps/paper-runner/tests/recovery_drill.rs`,
-`crates/paper-engine/tests/{capsule,engine,liquidity,paper_run,provenance,venue_matching,common/mod}.rs`:
+`crates/paper-engine/tests/{capsule,engine,liquidity,paper_run,provenance,
+venue_matching,common/mod}.rs`:
 all cases/builders constructed invented quotes, books, fills or datasets; files retained with
 retirement notices, targets removed from `Cargo.toml`.
 - `crates/risk-authority/tests/authority.rs`: quote-derived feed-health case; 27 rights, permit,
