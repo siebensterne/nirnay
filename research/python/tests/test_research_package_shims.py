@@ -63,14 +63,17 @@ def test_bind_dataset_returns_lineage_and_digest():
 
 
 def test_environment_digest_is_path_order_stable_and_refuses_duplicates(tmp_path):
-    first = tmp_path / "a.py"
-    second = tmp_path / "b.py"
-    first.write_text("x = 1\n", encoding="utf-8")
-    second.write_text("y = 2\n", encoding="utf-8")
-    assert environment_digest([second, first]) == environment_digest([first, second])
-    assert strategy_code_digest([first, second]) == environment_digest([first, second])
+    (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
+    (tmp_path / "b.py").write_text("y = 2\n", encoding="utf-8")
+    first, second = "a.py", "b.py"
+    assert environment_digest([second, first], root=tmp_path) == environment_digest(
+        [first, second], root=tmp_path
+    )
+    assert strategy_code_digest([first, second], root=tmp_path) == environment_digest(
+        [first, second], root=tmp_path
+    )
     with pytest.raises(ValueError, match="unique"):
-        environment_digest([first, first])
+        environment_digest([first, first], root=tmp_path)
 
 
 def test_cost_assumptions_digest_matches_canonical_values():

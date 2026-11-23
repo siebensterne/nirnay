@@ -30,9 +30,21 @@ from typing import Any
 from jsonschema import Draft202012Validator
 
 from .dataset_admission import DatasetAdmissionError, admit_published_dataset
-from .experiments import (ExperimentError, ExperimentRegistry, build_search_space,
-                          calendar_binding, content_hash, holdout_key, make_attempt)
-from .experiments.reproducibility import bind_published_dataset, environment_digest
+from .experiments import (
+    ExperimentError,
+    ExperimentRegistry,
+    build_search_space,
+    calendar_binding,
+    content_hash,
+    holdout_key,
+    make_attempt,
+)
+from .experiments.reproducibility import (
+    CODE_MANIFEST_SCHEMA_VERSION,
+    bind_published_dataset,
+    environment_digest,
+    verify_code_manifest,
+)
 from .experiments.schema import NOT_APPLICABLE_INTERVAL, SYNTHETIC_ANNUALIZATION_BASIS
 
 ROOT = Path(__file__).resolve().parents[4]
@@ -152,6 +164,8 @@ def validate_manifest(payload: Any) -> dict[str, Any]:
     """Validate manifest shape and cross-field invariants; return the payload."""
     if not isinstance(payload, dict):
         raise ExperimentError("research job manifest must be a JSON object")
+    if payload.get("schema_version") != CODE_MANIFEST_SCHEMA_VERSION:
+        raise ExperimentError("unsupported research job manifest schema version")
     errors = sorted(
         Draft202012Validator(load_schema()).iter_errors(payload),
         key=lambda error: str(error.path),
@@ -190,38 +204,13 @@ def load_manifest(path: str | Path) -> dict[str, Any]:
 
 
 def assert_pinned_environment(environment: dict[str, Any], job: dict[str, Any],
-                              *, root: Path = ROOT) -> dict[str, str]:
-    """Refuse an unpinned environment or one that differs from the job pin."""
-    requested = Path(environment["python_constraint_file"])
-    if requested.is_absolute():
-        raise ExperimentError("unpinned environment: constraint file must be repository-relative")
-    resolved = (Path(root) / requested).resolve()
-    if Path(root).resolve() not in resolved.parents:
-        raise ExperimentError("unpinned environment: constraint file escapes the repository")
-    if resolved.is_symlink() or not resolved.is_file():
-        raise ExperimentError("unpinned environment: constraint file is missing or redirected")
-    content = resolved.read_bytes()
-    actual = hashlib.sha256(content).hexdigest()
-    if actual != environment["constraint_sha256"]:
-        raise ExperimentError("unpinned environment: constraint file digest mismatch")
-    text = content.decode("utf-8")
-    if environment["python_version"] not in text:
-        raise ExperimentError("unpinned environment: Python version is not pinned in constraints")
-    for number, line in enumerate(text.splitlines(), 1):
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        if "==" not in stripped:
-            raise ExperimentError(
-                f"unpinned environment: dependency at line {number} is not pinned"
-            )
-    digest = environment_digest(environment["code_paths"], root=root)
-    if digest != environment["code_digest"]:
-        raise ExperimentError("unpinned environment: declared code digest mismatch")
-    if (job["code_digest"] != digest or
-            job["constraint_file"] != environment["python_constraint_file"]):
-        raise ExperimentError("unpinned environment: job does not use the declared environment pin")
-    return {"constraint_sha256": actual, "code_digest": digest}
+                              *, root: Path = ROOT, require_exact_commit: bool = True,
+                              runtime_version: str | None = None) -> dict[str, str]:
+    """Gate admission on a recomputed code manifest and verified commit pins."""
+    pins = verify_code_manifest(environment, job, root=root,
+                                require_exact_commit=require_exact_commit,
+                                runtime_version=runtime_version)
+    return {"constraint_sha256": pins["constraint_sha256"], "code_digest": pins["code_digest"]}
 
 
 def assert_dataset_binding(job: dict[str, Any], binding: dict[str, Any]) -> None:

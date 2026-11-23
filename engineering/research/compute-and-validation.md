@@ -14,8 +14,10 @@ constraint file and code paths) and the job shape through
 `schemas/research/research-job-manifest.v1.schema.json` (Draft 2020-12). The
 synthetic job entry bound to `research-job-synthetic-nse-session` was retired in
 the W2.1 residual closure; the manifest now declares no runnable job. The
-`code_digest` pin is unchanged here and is reconciled in a separate isolated
-change.
+`code_digest` pin was recomputed under the versioned, path-safe code-manifest
+rule in `quantlab.experiments.reproducibility` and is recorded with its commit
+pin limitations in `evidence/CODE-MANIFEST-INTEGRITY-NIRNAY-2026-11-24.md`.
+The runner recomputes the manifest from disk before any dataset is admitted.
 
 `quantlab.research_jobs` validates the manifest, refuses an unpinned environment
 or a stale dataset digest, and executes the allowlisted command (`verify-dataset`)
