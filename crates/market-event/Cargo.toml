@@ -7,6 +7,11 @@ rust-version.workspace = true
 publish.workspace = true
 description = "Versioned kernel event identity and continuity contract"
 
+[features]
+# Opt-in only: market-shaped test source and gated integration targets.
+# Never enabled by default or by any gate command. See the test-policy record.
+market-shaped-tests = []
+
 [dependencies]
 market-types.workspace = true
 serde.workspace = true
@@ -19,3 +24,14 @@ tempfile.workspace = true
 
 [lints]
 workspace = true
+
+# Integration targets are declared explicitly under the test policy.
+[[test]]
+name = "fresh_process_replay"
+path = "tests/fresh_process_replay.rs"
+required-features = ["market-shaped-tests"]
+
+[[test]]
+name = "kernel_contract"
+path = "tests/kernel_contract.rs"
+required-features = ["market-shaped-tests"]

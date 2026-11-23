@@ -7,6 +7,14 @@ rust-version.workspace = true
 publish.workspace = true
 description = "Validated raw-frame journal and stream-continuity accounting."
 
+# A permitted sibling target exists, so targets are declared explicitly.
+autotests = false
+
+[features]
+# Opt-in only: market-shaped test source and gated integration targets.
+# Never enabled by default or by any gate command. See the test-policy record.
+market-shaped-tests = []
+
 [dependencies]
 base64.workspace = true
 fs2.workspace = true
@@ -20,3 +28,18 @@ tempfile.workspace = true
 
 [lints]
 workspace = true
+
+# Integration targets are declared explicitly under the test policy.
+[[test]]
+name = "capability"
+path = "tests/capability.rs"
+
+[[test]]
+name = "ingress"
+path = "tests/ingress.rs"
+required-features = ["market-shaped-tests"]
+
+[[test]]
+name = "performance"
+path = "tests/performance.rs"
+required-features = ["market-shaped-tests"]

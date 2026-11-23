@@ -207,8 +207,45 @@ def check_determinism() -> list[str]:
     return errors
 
 
+GATE_COMMAND_SOURCES = (
+    "xtask/src/main.rs",
+    "Makefile",
+    "scripts/check_compile_budget.py",
+)
+
+# Built at runtime so the detector never matches its own source text.
+FORBIDDEN_GATE_FLAG = "--all-" + "features"
+
+
+def check_no_all_features_gate() -> list[str]:
+    """Fail closed if any checked-in gate command enables every Cargo feature."""
+    errors: list[str] = []
+    sources = list(GATE_COMMAND_SOURCES)
+    workflows = sorted((ROOT / ".github" / "workflows").glob("*.yml"))
+    assurance = sorted((ROOT / "scripts" / "assurance").glob("*.sh"))
+    sources.extend(str(path.relative_to(ROOT)) for path in workflows)
+    sources.extend(str(path.relative_to(ROOT)) for path in assurance)
+    for relative in sorted(sources):
+        path = ROOT / relative
+        if not path.is_file():
+            errors.append(f"{relative}: gate command source is missing")
+            continue
+        for number, line in enumerate(path.read_text(errors="ignore").splitlines(), start=1):
+            stripped = line.strip()
+            if stripped.startswith(("#", "//")):
+                continue
+            if FORBIDDEN_GATE_FLAG in line:
+                errors.append(
+                    f"{relative}:{number}: gate command must not use {FORBIDDEN_GATE_FLAG}; "
+                    "request the opt-in feature explicitly"
+                )
+    return errors
+
+
 def run(command: str) -> int:
     errors: list[str] = []
+    if command == "check":
+        errors.extend(check_no_all_features_gate())
     if command in {"check", "arch"}:
         try:
             rules = tomllib.loads((ROOT / "architecture/layers.toml").read_text())

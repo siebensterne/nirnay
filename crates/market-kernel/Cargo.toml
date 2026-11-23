@@ -7,6 +7,11 @@ rust-version.workspace = true
 publish.workspace = true
 description = "Deterministic projection of verified source observations into kernel events"
 
+[features]
+# Opt-in only: market-shaped test source and gated integration targets.
+# Never enabled by default or by any gate command. See the test-policy record.
+market-shaped-tests = []
+
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
@@ -23,3 +28,14 @@ tempfile.workspace = true
 
 [lints]
 workspace = true
+
+# Integration targets are declared explicitly under the test policy.
+[[test]]
+name = "projection"
+path = "tests/projection.rs"
+required-features = ["market-shaped-tests"]
+
+[[test]]
+name = "replay"
+path = "tests/replay.rs"
+required-features = ["market-shaped-tests"]

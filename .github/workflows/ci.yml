@@ -34,10 +34,10 @@ jobs:
         run: cargo deny check
       - name: Tests
         run: cargo test --workspace --all-targets --locked
-      - name: Validate fundamental-data fixtures end to end
-        run: |
-          cargo run --locked -p fundamental-tools --bin nirnay-fundamental -- validate-facts --input research/fundamentals/fixtures/financial-facts.example.jsonl
-          cargo run --locked -p fundamental-tools --bin nirnay-fundamental -- validate-companies --input research/fundamentals/fixtures/company-identities.example.jsonl
+      # The fundamental-tools validate-facts/validate-companies step ran
+      # against invented example fixtures and was removed under the
+      # 2026-11-23 test-policy record. Do not restore it without an owner
+      # decision; the Python vector gate above still checks fact fixtures.
       - name: Clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
   compile-budget:

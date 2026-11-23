@@ -122,7 +122,7 @@ pub fn parse_observations_csv(text: &str) -> Result<Vec<MbpObservation>> {
     Ok(rows)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "market-shaped-tests"))]
 mod tests {
     use super::{
         OBSERVATION_HEADER, //

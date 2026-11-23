@@ -25,7 +25,7 @@ enum WriterState {
 
 /// Failure point for the private test I/O seam. It is not part of the public
 /// journal API.
-#[cfg(test)]
+#[cfg(all(test, feature = "market-shaped-tests"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FailPoint {
     PartialRecordWrite,
@@ -42,7 +42,7 @@ enum FailPoint {
 /// without a public generic storage abstraction.
 enum JournalIo {
     File(File),
-    #[cfg(test)]
+    #[cfg(all(test, feature = "market-shaped-tests"))]
     Failing {
         file: File,
         point: Option<FailPoint>,
@@ -53,7 +53,7 @@ impl JournalIo {
     fn write_all(&mut self, bytes: &[u8]) -> std::io::Result<()> {
         match self {
             Self::File(file) => file.write_all(bytes),
-            #[cfg(test)]
+            #[cfg(all(test, feature = "market-shaped-tests"))]
             Self::Failing { file, point } => match point {
                 Some(FailPoint::PartialRecordWrite) => {
                     let split = bytes.len().saturating_sub(1);
@@ -80,7 +80,7 @@ impl JournalIo {
     fn sync_data(&mut self) -> std::io::Result<()> {
         match self {
             Self::File(file) => file.sync_data(),
-            #[cfg(test)]
+            #[cfg(all(test, feature = "market-shaped-tests"))]
             Self::Failing { file, point } => {
                 file.sync_data()?;
                 if matches!(point, Some(FailPoint::Sync)) {
@@ -132,7 +132,7 @@ impl JournalWriter {
     /// Test-only constructor using the private I/O seam. It performs real OS
     /// writes where applicable and then returns an `io::Error` at the selected
     /// point; `RecordWrite` fails before any OS write.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "market-shaped-tests"))]
     fn create_new_with_fail_point(
         path: impl AsRef<Path>,
         point: FailPoint,
@@ -351,7 +351,7 @@ pub fn scan_journal(path: impl AsRef<Path>) -> Result<JournalScan, ArchiveError>
     })
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "market-shaped-tests"))]
 mod tests {
     use super::*;
     use crate::frame::{

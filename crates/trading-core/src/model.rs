@@ -1009,7 +1009,7 @@ impl StoredBody {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "market-shaped-tests"))]
 mod tests {
     use super::{
         ChargeComponents, EventEnvelope, EventPayload, EventTimes, Fill, Order, OrderIntent,

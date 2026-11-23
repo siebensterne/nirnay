@@ -7,6 +7,11 @@ rust-version.workspace = true
 publish.workspace = true
 description = "Validated, point-in-time corporate financial fact domain"
 
+[features]
+# Opt-in only: market-shaped test source and gated integration targets.
+# Never enabled by default or by any gate command. See the test-policy record.
+market-shaped-tests = []
+
 [dependencies]
 jiff.workspace = true
 serde.workspace = true
@@ -16,3 +21,9 @@ thiserror.workspace = true
 
 [lints]
 workspace = true
+
+# Integration targets are declared explicitly under the test policy.
+[[test]]
+name = "fact_contract"
+path = "tests/fact_contract.rs"
+required-features = ["market-shaped-tests"]

@@ -7,6 +7,11 @@ rust-version.workspace = true
 publish.workspace = true
 description = "JSON-lines bridge to the authoritative Rust transaction cost model."
 
+[features]
+# Opt-in only: market-shaped test source and gated integration targets.
+# Never enabled by default or by any gate command. See the test-policy record.
+market-shaped-tests = []
+
 [dependencies]
 anyhow.workspace = true
 cost-model.workspace = true

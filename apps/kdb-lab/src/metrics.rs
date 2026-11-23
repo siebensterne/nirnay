@@ -190,7 +190,7 @@ pub fn to_json_value(metrics: &MbpMetrics) -> Value {
     Value::Object(object)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "market-shaped-tests"))]
 mod tests {
     use super::{
         METRIC_NAMES, //

@@ -111,7 +111,7 @@ perf:
 # are not throughput or latency certificates; see evidence/PERFORMANCE-TEMPLATE.md
 # for the fields required of any dated result record.
 bench-ingress:
-	cargo test -p market-archive --test performance -- --ignored --nocapture --skip recovery_child
+	cargo test -p market-archive --test performance --features market-shaped-tests -- --ignored --nocapture --skip recovery_child
 
 bench-research:
 	PYTHONPATH=research/python/src python3 -m quantlab.bench --suite core --repeats 5 --sizes 200,800 --seed 7
@@ -126,8 +126,8 @@ bench-latency:
 	PYTHONPATH=research/python/src python3 -m quantlab.bench --suite latency --repeats 5 --size 800 --seed 7
 
 bench-risk-oms:
-	cargo test -p risk-authority --test performance -- --ignored --nocapture
-	cargo test -p authoritative-oms --test performance -- --ignored --nocapture
+	cargo test -p risk-authority --test performance --features market-shaped-tests -- --ignored --nocapture
+	cargo test -p authoritative-oms --test performance --features market-shaped-tests -- --ignored --nocapture
 
 rust-test:
 	cargo test --workspace --all-targets --locked

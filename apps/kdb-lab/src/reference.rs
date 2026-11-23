@@ -92,7 +92,7 @@ pub fn reference_metrics(rows: &[MbpObservation], source_id: &str) -> Result<Mbp
     })
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "market-shaped-tests"))]
 mod tests {
     use super::reference_metrics;
     use crate::metrics::parse_metrics_csv;

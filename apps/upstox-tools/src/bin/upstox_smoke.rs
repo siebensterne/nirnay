@@ -1175,7 +1175,7 @@ fn emit_report(report: &SmokeReport) -> anyhow::Result<()> {
     output.flush().context("flushing smoke report")
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "market-shaped-tests"))]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;

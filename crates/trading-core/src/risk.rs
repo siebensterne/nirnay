@@ -88,7 +88,7 @@ pub fn permit_digest(
     raw.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "market-shaped-tests"))]
 mod tests {
     use super::permit_digest;
     use crate::{

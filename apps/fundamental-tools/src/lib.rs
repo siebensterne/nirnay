@@ -249,7 +249,7 @@ fn read_bounded_line<R: BufRead>(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "market-shaped-tests"))]
 mod tests {
     use std::io::Cursor;
 
