@@ -43,6 +43,20 @@ The provider capture, normalization and reconciliation rows below describe legac
 preserved for review. They are blocked pending rights and owner approval; acquisition
 ownership moves to the complementary platform under ADR-0001.
 
+The acquisition, raw-archive, decoder, recorder, provider-mapping and provider-config paths
+named below and under `configs/providers/` are **legacy frozen** under RRP-004. They are not
+the canonical source authority. Fieldbook owns acquisition, raw storage, normalization and
+effective-dated reference data under ADR-0001. The frozen paths, Fieldbook target owners,
+replacement conditions and migration order are recorded in
+`evidence/SOURCE-INGESTION-FREEZE-2026-11-23.md` and
+`engineering/source-ingestion-freeze.v1.json`; `make freeze-check` blocks changes to them
+without an approved migration record. No new feature is permitted in a frozen path.
+
+Nirnay retains the OMS, broker adapter and execution-policy work, risk, account, cost model,
+paper engine and `india-domain` as a trading projection that consumes Fieldbook stable IDs.
+`india-reference` is frozen pending the NDC India reference projection. All source rights
+remain `UNKNOWN` and dataset acceptance stays `BLOCKED`.
+
 | Capability | Active implementation | Boundary / non-claim |
 |---|---|---|
 | Durable raw journal | `crates/market-archive` | A single-writer, newline-delimited journal with `sync_data()` per append, poisoned-writer behaviour after an uncertain commit, and a bounded incremental scanner. Serialized records are capped at 1 MiB (512 KiB decoded payload); oversized, torn or corrupt records fail closed. |
@@ -227,6 +241,11 @@ rights remain `UNKNOWN`; collection, local storage, replay, backup and analytics
 authorized. Do not execute any command in this section. Ownership of source acquisition and
 raw data belongs to the complementary platform under ADR-0001; this section is retained only
 until its architecture has been reviewed.
+
+These paths are frozen under RRP-004; see `evidence/SOURCE-INGESTION-FREEZE-2026-11-23.md`
+and the machine-readable `engineering/source-ingestion-freeze.v1.json`. The commands below
+are preserved for review only, and no new feature or provider operation is permitted in the
+frozen paths.
 
 Upstox V3 captures original binary Protobuf payloads in `raw-frames.jsonl`. The
 companion diagnostic projection is useful for inspection but is not treated as
@@ -427,6 +446,7 @@ once published; a new run adds a new dated file instead of rewriting history.
 | Research | `engineering/research/procurement/zero-cost-source-availability-2026-11-22.md` | source-availability report at INR 0 from the existing dossier and cited official documentation; SOURCE_DOCUMENTATION_ONLY |
 | Research | `engineering/research/procurement/source-qualification-upstox-nse-2026-11-22.md` | Phase 1 source qualification for Upstox V3 candles and NSE public reports; rights UNKNOWN, collection BLOCKED |
 | Architecture | `engineering/architecture/decisions/ADR-0001-data-ownership.md` | Phase 2 ADR: complementary platform owns acquisition, raw storage, normalization and point-in-time reference data; Nirnay owns research; no second collector |
+| Governance | `engineering/source-ingestion-freeze.v1.json` | machine-readable RRP-004 frozen path list; consumed by `make freeze-check` |
 | Architecture | `engineering/architecture/decisions/ADR-INDEX.md` | canonical ADR ID namespace |
 | Review | `engineering/architecture/reviews/FIELDBOOK-ARCHITECTURE-REVIEW-2026-11-22.md` | read-only Fieldbook architecture review, ownership map, seven findings and NDC v1 semantic compatibility; no code or provider contact |
 | Review | `engineering/architecture/reviews/FIELDBOOK-REVIEW-REFRESH-2026-11-23.md` | baseline refresh at Fieldbook 28eb877, W1 remediation status, ownership and NDC reconciliation; not a ratification |
@@ -434,6 +454,7 @@ once published; a new run adds a new dated file instead of rewriting history.
 | Test policy | `research/python/tests/conftest.py` | collection-time gate that deselects inventoried market-shaped tests and blocks uninventoried market-domain modules |
 | Test policy | `research/python/tests/market_shaped_test_inventory.json` | checked-in authority listing prohibited test modules, categories and test names; D11 retirement record in `evidence/TEST-RETIREMENT-NIRNAY-2026-11-23.md` |
 | Dated evidence | `evidence/TEST-RETIREMENT-NIRNAY-2026-11-23.md` | RRP-002 removal of synthetic market-data assets and function-level tests; removed paths, hashes, preserved historical counts, withdrawn coverage and residual gates |
+| Dated evidence | `evidence/SOURCE-INGESTION-FREEZE-2026-11-23.md` | RRP-004 freeze of duplicate ingestion, raw-archive, decoder and provider-config paths; ownership targets, migration order, retained Nirnay scope and gate result |
 | Dated evidence | `evidence/SYNTHETIC-TEST-POLICY-NIRNAY-2026-11-23.md` | enforced inventory counts, inspection commands, withdrawn coverage and current test figures |
 | Dated evidence | `evidence/C3-CONSUMER-USE-PERMISSIONS-2026-11-23.md` | C3 consumer-use and permission-evaluation implementation record, gate counts and explicit non-goals |
 | Dated evidence | `evidence/RUST-TEST-POLICY-NIRNAY-2026-11-23.md` | gated Rust targets and src modules, inventory and enforced default counts, withdrawn coverage and historical-count disclaimer |

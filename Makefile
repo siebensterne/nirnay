@@ -3,6 +3,7 @@
 # Command surface (`make help` prints the same list):
 #   check           full gate: static checks, Rust/Python tests, contracts
 #   check-static    static checks only; no python-test or rust-test
+#   freeze-check    RRP-004 frozen ingestion paths guard (with self-test)
 #   ci              full CI parity task
 #   assure          full assurance superset
 #   lint            Clippy with warnings denied (cargo xtask lint)
@@ -14,11 +15,12 @@
 #   tools           install the pinned Python tools
 # See README "Quick start" for dependency setup and gate scope.
 
-.PHONY: help ci assure check check-static lint test perf bench-ingress bench-research bench-experiments bench-latency bench-risk-oms docs-check shellcheck-check generated-paths-check pollution-check style rust-style source-style python-ruff-style q-style prose-style references-check standards-check style-gate python-format-check rust-test python-test python-check cpp-test cpp-format-check schema-check verify-local fmt constraints sbom supply-chain wheels packaging-test bundle bundle-verify git-policy kdb-analyze archive-verify tools
+.PHONY: help ci assure check check-static lint test perf bench-ingress bench-research bench-experiments bench-latency bench-risk-oms docs-check freeze-check shellcheck-check generated-paths-check pollution-check style rust-style source-style python-ruff-style q-style prose-style references-check standards-check style-gate python-format-check rust-test python-test python-check cpp-test cpp-format-check schema-check verify-local fmt constraints sbom supply-chain wheels packaging-test bundle bundle-verify git-policy kdb-analyze archive-verify tools
 
 help:
 	@echo "check           full gate: static checks, Rust/Python tests, contracts"
 	@echo "check-static    static checks only; no python-test or rust-test"
+	@echo "freeze-check    RRP-004 frozen ingestion paths guard (with self-test)"
 	@echo "ci              full CI parity task"
 	@echo "assure          full assurance superset"
 	@echo "lint            Clippy with warnings denied (cargo xtask lint)"
@@ -40,6 +42,7 @@ check: check-static
 	$(MAKE) python-test
 check-static:
 	$(MAKE) docs-check
+	$(MAKE) freeze-check
 	$(MAKE) shellcheck-check
 	$(MAKE) generated-paths-check
 	$(MAKE) pollution-check
@@ -54,6 +57,9 @@ test:
 docs-check:
 	python3 scripts/check_docs.py --self-test
 	python3 scripts/check_docs.py
+freeze-check:
+	python3 scripts/check_source_ingestion_freeze.py --self-test
+	python3 scripts/check_source_ingestion_freeze.py
 shellcheck-check:
 	python3 scripts/check_shellcheck.py
 tools:

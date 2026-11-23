@@ -40,3 +40,12 @@ The app does not infer fill from an `order_id`. It uses order-history and trade 
 ## Shared boundary
 
 Provider identity, exchange instrument identity and internal instrument identity are separate. Do not key internal domain records solely by provider symbol/token. Every captured session carries a non-secret entitlement reference. Account credentials, authorised websocket URLs and market-data rights are excluded from archives and source control.
+
+## Frozen legacy capture paths
+
+The Upstox and FYERS capture, decode and provider-config paths described above are legacy
+frozen under RRP-004. They are not the canonical source authority; Fieldbook owns acquisition,
+raw storage, source decoding and normalization under ADR-0001. No new feature or provider
+operation is permitted in those paths. See `evidence/SOURCE-INGESTION-FREEZE-2026-11-23.md`
+and `engineering/source-ingestion-freeze.v1.json` for the frozen list, target owners and
+migration order.

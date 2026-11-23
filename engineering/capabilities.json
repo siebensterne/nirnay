@@ -44,7 +44,7 @@
       "id": "CAP-005",
       "name": "Validated raw-frame journal and dataset continuity primitives",
       "status": "implemented",
-      "evidence_status": "Python build/replay path implemented with source-frame hash lineage, internal digest verification, immutable atomic publication and optional PyArrow Parquet output. Raw Rust archive frame export built in the owner rerun (release binaries, pinned Rust 1.99.1). Actual archived provider sessions are not present in the delivery, so only synthetic fixture lineage was exercised.",
+      "evidence_status": "Python build/replay path implemented with source-frame hash lineage, internal digest verification, immutable atomic publication and optional PyArrow Parquet output. Raw Rust archive frame export built in the owner rerun (release binaries, pinned Rust 1.99.1). Actual archived provider sessions are not present in the delivery, so only synthetic fixture lineage was exercised. RRP-004 freeze: legacy paths are frozen and are not the canonical source authority; rights UNKNOWN, acceptance BLOCKED; see evidence/SOURCE-INGESTION-FREEZE-2026-11-23.md.",
       "owner": "market-archive",
       "scope": "crates/market-archive; apps/upstox-tools; research/python/src/quantlab/point_in_time.py"
     },
@@ -52,7 +52,7 @@
       "id": "CAP-006",
       "name": "FYERS Data Socket callback recorder",
       "status": "partial",
-      "evidence_status": "FYERS V3 recorder plus canonical callback normalizer, local gap detection and source-semantics-preserving event projection. SDK callback JSON is not wire bytes, there is no verified exchange sequence, and no live entitlement/connection validation.",
+      "evidence_status": "FYERS V3 recorder plus canonical callback normalizer, local gap detection and source-semantics-preserving event projection. SDK callback JSON is not wire bytes, there is no verified exchange sequence, and no live entitlement/connection validation. RRP-004 freeze: legacy paths are frozen and are not the canonical source authority; rights UNKNOWN, acceptance BLOCKED; see evidence/SOURCE-INGESTION-FREEZE-2026-11-23.md.",
       "owner": "market-data",
       "scope": "apps/fyers-recorder; research/python/src/quantlab/providers.py"
     },
@@ -100,7 +100,7 @@
       "id": "CAP-012",
       "name": "Upstox Market Data Feed V3 raw binary recorder and protobuf decoder",
       "status": "partial",
-      "evidence_status": "Upstox V3 schema/decoder and recorder active; new raw-frame SHA-256 verifying decode-export utility; full V3 event normalizer retains provider timestamp semantics and original source-frame hash. Rust compilation and release binaries passed on pinned Rust 1.99.1; actual provider capture and a real archived-session replay remain unverified.",
+      "evidence_status": "Upstox V3 schema/decoder and recorder active; new raw-frame SHA-256 verifying decode-export utility; full V3 event normalizer retains provider timestamp semantics and original source-frame hash. Rust compilation and release binaries passed on pinned Rust 1.99.1; actual provider capture and a real archived-session replay remain unverified. RRP-004 freeze: legacy paths are frozen and are not the canonical source authority; rights UNKNOWN, acceptance BLOCKED; see evidence/SOURCE-INGESTION-FREEZE-2026-11-23.md.",
       "owner": "market-data",
       "scope": "crates/upstox-feed-proto; apps/upstox-tools; research/python/src/quantlab/providers.py"
     },
@@ -108,7 +108,7 @@
       "id": "CAP-013",
       "name": "Canonical Upstox/FYERS event normalization and cross-feed reconciliation",
       "status": "implemented",
-      "evidence_status": "Provider-specific mappings to versioned canonical events, explicit LTP observation versus trade-print semantics, gap flags, source timestamp semantics, freshness/skew/price comparison. Cross-feed output is a diagnostic consistency result, not a permission to merge quantities or synthesize a tape.",
+      "evidence_status": "Provider-specific mappings to versioned canonical events, explicit LTP observation versus trade-print semantics, gap flags, source timestamp semantics, freshness/skew/price comparison. Cross-feed output is a diagnostic consistency result, not a permission to merge quantities or synthesize a tape. RRP-004 freeze: legacy paths are frozen and are not the canonical source authority; rights UNKNOWN, acceptance BLOCKED; see evidence/SOURCE-INGESTION-FREEZE-2026-11-23.md.",
       "owner": "market-data",
       "scope": "research/python/src/quantlab/providers.py; research/python/src/quantlab/reconcile.py"
     },
@@ -164,7 +164,7 @@
       "id": "CAP-020",
       "name": "Versioned exchange reference-master ingestion with dated-source conformance",
       "status": "implemented",
-      "evidence_status": "Local run 2026-11-18: ignored source_conformance::dated_exchange_sources_conform PASS against operator-supplied dated NSE and BSE files (code commit 2ebacd7). Full row accounting, deterministic repeat parse and fail-closed undeclared versions; see evidence/SOURCE-CONFORMANCE-2026-11-18.md. Compatibility is limited to the two tested source versions and categories; no exchange entitlement, all-product coverage or every-date claim.",
+      "evidence_status": "Local run 2026-11-18: ignored source_conformance::dated_exchange_sources_conform PASS against operator-supplied dated NSE and BSE files (code commit 2ebacd7). Full row accounting, deterministic repeat parse and fail-closed undeclared versions; see evidence/SOURCE-CONFORMANCE-2026-11-18.md. Compatibility is limited to the two tested source versions and categories; no exchange entitlement, all-product coverage or every-date claim. RRP-004 freeze: legacy paths are frozen and are not the canonical source authority; rights UNKNOWN, acceptance BLOCKED; see evidence/SOURCE-INGESTION-FREEZE-2026-11-23.md.",
       "owner": "reference-data",
       "scope": "crates/india-reference/src/source; crates/india-reference/tests/source_conformance.rs"
     },
@@ -172,7 +172,7 @@
       "id": "CAP-021",
       "name": "Shared raw ingress port with Upstox and FYERS adapters",
       "status": "implemented",
-      "evidence_status": "Market-archive ingress module routes original Upstox V3 protobuf bytes and FYERS SDK-decoded callback JSON bytes, each with source-specific metadata, through the durable raw-frame journal. Source binding, duplicate/sequence/malformed accounting, disconnect stops and journal-rebuilt checkpoints are shared by both adapters. A journal replay source replays captured bytes through the same port with exact metadata fidelity and idempotent replay into a resumed journal. Seventeen dedicated tests cover replay-after-restart dedup, ordinal-fenced replay beyond the bounded hash window, post-commit continuity advancement, bounded continuity state and cross-source isolation; no provider decoding or canonical instrument resolution is performed here, and no live entitlement or network path is certified.",
+      "evidence_status": "Market-archive ingress module routes original Upstox V3 protobuf bytes and FYERS SDK-decoded callback JSON bytes, each with source-specific metadata, through the durable raw-frame journal. Source binding, duplicate/sequence/malformed accounting, disconnect stops and journal-rebuilt checkpoints are shared by both adapters. A journal replay source replays captured bytes through the same port with exact metadata fidelity and idempotent replay into a resumed journal. Seventeen dedicated tests cover replay-after-restart dedup, ordinal-fenced replay beyond the bounded hash window, post-commit continuity advancement, bounded continuity state and cross-source isolation; no provider decoding or canonical instrument resolution is performed here, and no live entitlement or network path is certified. RRP-004 freeze: legacy paths are frozen and are not the canonical source authority; rights UNKNOWN, acceptance BLOCKED; see evidence/SOURCE-INGESTION-FREEZE-2026-11-23.md.",
       "owner": "market-data",
       "scope": "crates/market-archive/src/ingress.rs; crates/market-archive/tests/ingress.rs"
     },
@@ -188,7 +188,7 @@
       "id": "CAP-023",
       "name": "Verified offline FYERS session importer",
       "status": "implemented",
-      "evidence_status": "The fyers-importer binary verifies the Python SDK session manifest and full hash chain, validates every record, preserves event and gap metadata through canonical re-encoding, and imports idempotently into the shared raw journal through DurableIngestor. Three tests use a fixture generated by the real Python hash-chain journal. No live IPC, entitlement verification or canonical event projection is performed.",
+      "evidence_status": "The fyers-importer binary verifies the Python SDK session manifest and full hash chain, validates every record, preserves event and gap metadata through canonical re-encoding, and imports idempotently into the shared raw journal through DurableIngestor. Three tests use a fixture generated by the real Python hash-chain journal. No live IPC, entitlement verification or canonical event projection is performed. RRP-004 freeze: legacy paths are frozen and are not the canonical source authority; rights UNKNOWN, acceptance BLOCKED; see evidence/SOURCE-INGESTION-FREEZE-2026-11-23.md.",
       "owner": "market-data",
       "scope": "apps/fyers-importer; apps/fyers-importer/tests"
     },
@@ -228,7 +228,7 @@
       "id": "CAP-028",
       "name": "Tri-state source data-rights contract with evidence provenance",
       "status": "implemented",
-      "evidence_status": "IMPLEMENTED, NOT VERIFIED; no commit SHA or independent verification is claimed here. The registry now declares all seven operations (capture, store, replay, backup, internal_analytics, external_redistribution, retention) with tri-state evidence provenance; the former redistribute field is renamed to external_redistribution and a concrete retention_period object has duration_days=null and basis=none. All rights on all three products remain UNKNOWN with owner_reported provenance and entitlement.verified=false: no written evidence exists and no right is granted. DataOperation::ALL and SourceProductRegistry::authorize(product_key, op) deny UNKNOWN, PROHIBITED and undeclared products; persistence operations (store, replay, backup, retention) also require a verified entitlement. MarketDataRequirement has seven requires_* flags checked by evaluate(), which also mirrors the schema coherence rules. The Upstox recorder requires an explicit --registry argument and authorizes Capture and Store before creating any directory or journal; the FYERS recorder requires --registry and does the same in RecorderConfig.validate() before its writer thread and journal exist. JournalReplaySource::open requires a registry and a Replay authorization; quantlab paper-replay requires --registry and checks Replay before reading events. scripts/validate_contracts.py validates the registry instance against its own schema with FormatChecker and rejects five negative self-test vectors. Local evidence: `make check` exit 0; 178 Python tests plus 2 subtests; market-archive 54/19/17 tests; registry self-test 5/5 negative vectors rejected; 1 registry instance validated. These gates do not change any right.",
+      "evidence_status": "IMPLEMENTED, NOT VERIFIED; no commit SHA or independent verification is claimed here. The registry now declares all seven operations (capture, store, replay, backup, internal_analytics, external_redistribution, retention) with tri-state evidence provenance; the former redistribute field is renamed to external_redistribution and a concrete retention_period object has duration_days=null and basis=none. All rights on all three products remain UNKNOWN with owner_reported provenance and entitlement.verified=false: no written evidence exists and no right is granted. DataOperation::ALL and SourceProductRegistry::authorize(product_key, op) deny UNKNOWN, PROHIBITED and undeclared products; persistence operations (store, replay, backup, retention) also require a verified entitlement. MarketDataRequirement has seven requires_* flags checked by evaluate(), which also mirrors the schema coherence rules. The Upstox recorder requires an explicit --registry argument and authorizes Capture and Store before creating any directory or journal; the FYERS recorder requires --registry and does the same in RecorderConfig.validate() before its writer thread and journal exist. JournalReplaySource::open requires a registry and a Replay authorization; quantlab paper-replay requires --registry and checks Replay before reading events. scripts/validate_contracts.py validates the registry instance against its own schema with FormatChecker and rejects five negative self-test vectors. Local evidence: `make check` exit 0; 178 Python tests plus 2 subtests; market-archive 54/19/17 tests; registry self-test 5/5 negative vectors rejected; 1 registry instance validated. These gates do not change any right. RRP-004 freeze: legacy paths are frozen and are not the canonical source authority; rights UNKNOWN, acceptance BLOCKED; see evidence/SOURCE-INGESTION-FREEZE-2026-11-23.md.",
       "owner": "market-data",
       "scope": "configs/providers/source-products.v1.json; schemas/providers/source-product-registry.v1.schema.json; crates/market-archive/src/capability.rs; crates/market-archive/src/ingress.rs; crates/market-archive/src/lib.rs; crates/market-archive/tests/capability.rs; crates/market-archive/tests/ingress.rs; crates/market-archive/tests/performance.rs; apps/upstox-tools/src/bin/upstox_recorder.rs; apps/fyers-recorder/src/fyers_recorder; apps/fyers-recorder/tests; research/python/src/quantlab/cli.py; research/python/src/quantlab/data_rights.py; research/python/tests; scripts/validate_contracts.py"
     },
