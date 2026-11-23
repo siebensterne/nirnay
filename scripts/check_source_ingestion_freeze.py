@@ -202,9 +202,14 @@ def check(root: Path, base: str) -> list[str]:
     records = manifest.get("approved_migration_records")
     if not isinstance(records, list):
         records = []
+    try:
+        paths_changed = changed_paths(root, base)
+    except ValueError as error:
+        errors.append(str(error))
+        return sorted(errors)
     errors.extend(
         check_changes(
-            changed_paths(root, base),
+            paths_changed,
             prefixes,
             records,
             lambda evidence: (root / evidence).is_file(),
