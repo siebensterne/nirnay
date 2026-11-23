@@ -171,7 +171,7 @@ struct RunReport {
 
 #[derive(Debug, Parser)]
 #[command(
-    name = "paper-run",
+    name = "paper-engine-run",
     about = "Run a deterministic paper session from an immutable PIT dataset"
 )]
 struct Args {

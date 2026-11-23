@@ -4,7 +4,7 @@
 //! Derived from the internal Nirnay `crates/nirnay-engine/src/{engine,state,market}.rs` at
 //! source snapshot `cc3a34c317a86a9984401efe90fa3f43d67a1787`.
 //!
-//! Responsibilities stay separated: [`trading-core`] owns contracts,
+//! Responsibilities stay separated: `trading-core` owns contracts,
 //! [`risk_engine`] owns pre-trade risk, [`cost_model`] owns charge schedules
 //! and [`account_journal`] owns durable event storage. This crate owns order
 //! lifecycle, paper matching and the account projection.
