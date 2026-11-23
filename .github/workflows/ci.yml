@@ -104,6 +104,9 @@ jobs:
           python3 scripts/check_shellcheck.py
           python3 scripts/check_generated_paths.py
           python3 scripts/check_no_cross_pollution.py
+      - name: Frozen source-ingestion boundary
+        run: make freeze-check
+
       - name: Documentation lifecycle
         run: |
           python3 scripts/check_docs.py --self-test
