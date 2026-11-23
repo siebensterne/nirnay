@@ -12,8 +12,8 @@ import pytest
 
 from quantlab.consumer_use import (
     INTRADAY_CAPABILITY,
-    READ_RELEASE,
     PURPOSE,
+    READ_RELEASE,
     RECIPIENT_CLASS,
     TIME_AXIS_NAMES,
     USE_PROFILES,
