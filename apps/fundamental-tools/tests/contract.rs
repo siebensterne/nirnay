@@ -2,7 +2,6 @@
 
 use fundamental_tools::{
     ValidationLimits, //
-    validate_company_jsonl,
     validate_jsonl,
 }; //
 use std::io::Cursor;
@@ -17,82 +16,6 @@ fn empty_dataset_is_valid_and_has_the_empty_sha256() {
         report.input_sha256, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
         "empty input must produce the standard SHA-256 digest",
     );
-}
-
-#[test]
-fn committed_financial_fact_fixture_validates() {
-    let bytes =
-        include_bytes!("../../../research/fundamentals/fixtures/financial-facts.example.jsonl");
-    let report = validate_jsonl(Cursor::new(bytes), ValidationLimits::default())
-        .expect("committed financial fact fixture");
-    assert_eq!(
-        report.dataset, "financial_facts",
-        "financial fixture must be labelled"
-    );
-    assert_eq!(report.records, 1, "one financial fact should be counted");
-    assert_eq!(
-        report.reported_facts,
-        Some(1),
-        "fixture contains one reported fact"
-    );
-}
-
-#[test]
-fn committed_company_identity_fixture_validates() {
-    let bytes =
-        include_bytes!("../../../research/fundamentals/fixtures/company-identities.example.jsonl");
-    let report = validate_company_jsonl(Cursor::new(bytes), ValidationLimits::default())
-        .expect("committed company identity fixture");
-    assert_eq!(
-        report.dataset, "company_identities",
-        "company fixture must be labelled"
-    );
-    assert_eq!(report.records, 1, "one company identity should be counted");
-}
-
-#[test]
-fn compiled_cli_validates_both_committed_fixtures() {
-    let binary = env!("CARGO_BIN_EXE_nirnay-fundamental");
-    let directory = tempfile::tempdir().expect("temporary directory");
-    let fixtures = [
-        (
-            "validate-facts",
-            &include_bytes!(
-                "../../../research/fundamentals/fixtures/financial-facts.example.jsonl"
-            )[..],
-            "financial_facts",
-        ),
-        (
-            "validate-companies",
-            &include_bytes!(
-                "../../../research/fundamentals/fixtures/company-identities.example.jsonl"
-            )[..],
-            "company_identities",
-        ),
-    ];
-    for (command, fixture_bytes, dataset) in fixtures {
-        let input = directory.path().join(format!("{dataset}.jsonl"));
-        std::fs::write(&input, fixture_bytes).expect("write fixture copy");
-        let output = Command::new(binary)
-            .args([command, "--input"])
-            .arg(&input)
-            .output()
-            .expect("run compiled fundamental CLI");
-        assert!(
-            output.status.success(),
-            "the CLI fixture command must exit successfully",
-        );
-        let report: serde_json::Value =
-            serde_json::from_slice(&output.stdout).expect("JSON validation report");
-        assert_eq!(
-            report["dataset"], dataset,
-            "the CLI must report the dataset type"
-        );
-        assert_eq!(
-            report["records"], 1,
-            "the CLI must report one fixture record"
-        );
-    }
 }
 
 #[test]

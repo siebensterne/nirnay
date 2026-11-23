@@ -69,36 +69,3 @@ pub fn build_report(analysis: &Analysis, input_path: &str) -> AnalysisReport {
         metrics: to_json_value(&analysis.metrics),
     }
 }
-
-#[cfg(all(test, feature = "market-shaped-tests"))]
-mod tests {
-    use serde_json::Value;
-
-    use super::build_report;
-    use crate::metrics::parse_metrics_csv;
-    use crate::runner::Analysis;
-
-    const GOLDEN_METRICS: &str = include_str!("../tests/golden/mbp-metrics-v1.csv");
-    const GOLDEN_REPORT: &str = include_str!("../tests/golden/mbp-report-v1.json");
-
-    #[test]
-    fn report_builder_matches_golden() {
-        let stdout = GOLDEN_METRICS.to_owned();
-        let metrics = parse_metrics_csv(GOLDEN_METRICS).expect("golden metrics must parse");
-        let analysis = Analysis {
-            metrics,
-            stdout,
-            input_sha256: "40811f73f7d3e9a4b1a73920b0a794db332585d040be891dba297f185f6178a5"
-                .to_owned(),
-            output_sha256: "b3b6566e24097a14432e3dadd19ca7e8f81ac43a9b31bec5106c92c690d36a61"
-                .to_owned(),
-            input_rows: 6,
-            output_bytes: 296,
-            binary: "q".to_owned(),
-        };
-        let report = build_report(&analysis, "mbp-observation-v1.csv");
-        let actual = serde_json::to_value(report).expect("report must serialise");
-        let expected: Value = serde_json::from_str(GOLDEN_REPORT).expect("golden must parse");
-        assert_eq!(actual, expected, "report builder must match the golden");
-    }
-}

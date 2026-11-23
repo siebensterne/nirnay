@@ -1,14 +1,9 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
-//! Independent differential tests for the active SBE decoder.
+//! Arbitrary-byte codec tests for the active SBE decoder.
 //!
-//! The oracle is the canonical dump produced by the C++ SBE decoder retained
-//! under `.local/extras/cpp`. It is a protocol oracle only; the numeric/book oracle is
-//! a separate obligation and is not used here.
-
-use sha2::{
-    Digest, //
-    Sha256,
-};
+//! D11 retired the market-shaped golden capture and its C++ dump. These tests
+//! construct protocol bytes in-process from an empty-book message; no market
+//! observation or invented order book is used.
 
 use sbe_codec::{
     MIN_CHUNK_BYTES, //
@@ -21,28 +16,35 @@ use sbe_codec::{
     format_dump_line,
 };
 
-const GOLDEN: &[u8] = include_bytes!("golden/sample_replay.sbe");
-const GOLDEN_SHA256: &str = "022cb71b7f2c7d9e5200a60096b3ffcd39dbe8c03bd69cd1c92a196d6aac6590";
-const CPP_DUMP: &str = include_str!("golden/cpp_canonical_dump.txt");
-const CPP_DUMP_SHA256: &str = "aa555aae39f9cd30f911e533d1a2227f2d6a14425c906b472be7473c3b2a2a5c";
-
-fn rust_dump() -> String {
-    let messages = decode_capture(GOLDEN, 4096).expect("golden decodes");
-    let mut dump = String::new();
-    for message in messages {
-        dump.push_str(&format_dump_line(&message).expect("canonical dump line"));
-        dump.push('\n');
-    }
-    dump
+fn protocol_bytes() -> Vec<u8> {
+    let message = SbeMessage {
+        template_id: SNAPSHOT_TEMPLATE,
+        received_at_us: 1,
+        exchange_timestamp_us: 1,
+        symbol: "protocol-probe".to_owned(),
+        bids: Vec::new(),
+        asks: Vec::new(),
+        price_level: None,
+        quantity: None,
+        side: None,
+    };
+    encode_message(&message).expect("encode arbitrary-byte probe")
 }
 
 #[test]
-fn golden_capture_matches_frozen_provenance() {
-    assert_eq!(GOLDEN.len(), 4096, "the golden capture is 4096 bytes");
+fn encode_decode_round_trip_is_exact() {
+    let bytes = protocol_bytes();
+    let decoded = decode_message(&bytes, 0).expect("decode probe");
     assert_eq!(
-        format!("{:x}", Sha256::digest(GOLDEN)),
-        GOLDEN_SHA256,
-        "the golden bytes match the frozen provenance digest"
+        decoded.message.symbol, "protocol-probe",
+        "symbol round-trips"
+    );
+    let again = encode_message(&decoded.message).expect("canonical encode");
+    assert_eq!(again, bytes, "canonical re-encoding is byte-identical");
+    assert_eq!(
+        decoded.bytes_consumed,
+        bytes.len(),
+        "whole message consumed"
     );
     assert_eq!(
         MIN_CHUNK_BYTES, 1024,
@@ -51,94 +53,48 @@ fn golden_capture_matches_frozen_provenance() {
 }
 
 #[test]
-fn rust_dump_matches_the_independent_cpp_sbe_dump() {
-    let dump = rust_dump();
-    assert_eq!(
-        format!("{:x}", Sha256::digest(CPP_DUMP.as_bytes())),
-        CPP_DUMP_SHA256,
-        "the captured C++ oracle dump is intact"
-    );
-    assert_eq!(
-        dump.lines().count(),
-        10,
-        "all ten golden messages are dumped"
-    );
-    assert_eq!(
-        dump, CPP_DUMP,
-        "Rust and independent C++ SBE dumps are identical"
-    );
+fn dump_line_is_deterministic() {
+    let bytes = protocol_bytes();
+    let message = decode_message(&bytes, 0).expect("decode probe").message;
+    let first = format_dump_line(&message).expect("dump line");
+    let second = format_dump_line(&message).expect("dump line");
+    assert_eq!(first, second, "dump formatting is deterministic");
+    assert!(!first.is_empty(), "dump line is non-empty");
 }
 
 #[test]
-fn canonical_reencoding_is_byte_identical_to_the_golden() {
-    let mut offset = 0;
-    let mut messages = 0;
-    while offset < GOLDEN.len() {
-        if GOLDEN[offset..].iter().all(|byte| *byte == 0) {
-            break;
-        }
-        let decoded = decode_message(GOLDEN, offset).expect("decode at offset");
-        let encoded = encode_message(&decoded.message).expect("canonical encode");
-        let again = decode_message(&encoded, 0).expect("decode re-encoded bytes");
-        assert_eq!(
-            again.message, decoded.message,
-            "message survives an encode/decode round-trip"
-        );
-        assert_eq!(
-            again.bytes_consumed,
-            encoded.len(),
-            "re-encoded message consumes exactly its own length"
-        );
-        assert_eq!(
-            encoded.as_slice(),
-            &GOLDEN[offset..offset + decoded.bytes_consumed],
-            "canonical re-encoding is byte-identical to the original message"
-        );
-        offset += decoded.bytes_consumed;
-        messages += 1;
-    }
-    assert_eq!(messages, 10, "the golden contains ten contiguous messages");
-    assert_eq!(offset, 732, "messages end before zero padding");
-}
+fn malformed_cases_fail_closed() {
+    let bytes = protocol_bytes();
 
-#[test]
-fn seven_malformed_cases_fail_closed() {
-    let mut truncated = GOLDEN.to_vec();
+    let mut truncated = bytes.clone();
     truncated.resize(10, 0);
     assert!(
         decode_capture(&truncated, 4096).is_err(),
         "a truncated header is refused"
     );
 
-    let mut bad_template = GOLDEN.to_vec();
+    let mut bad_template = bytes.clone();
     bad_template[2] = 99;
     assert!(
         decode_capture(&bad_template, 4096).is_err(),
         "an unknown template is refused"
     );
 
-    let mut bad_side = GOLDEN.to_vec();
-    bad_side[162 + 8 + 32] = 7;
-    assert!(
-        decode_capture(&bad_side, 4096).is_err(),
-        "an invalid SideEncoding is refused"
-    );
-
-    let mut bad_schema = GOLDEN.to_vec();
+    let mut bad_schema = bytes.clone();
     bad_schema[4] = 99;
     assert!(
         decode_capture(&bad_schema, 4096).is_err(),
         "an unknown schema id is refused"
     );
 
-    let mut bad_version = GOLDEN.to_vec();
+    let mut bad_version = bytes.clone();
     bad_version[6] = 99;
     assert!(
         decode_capture(&bad_version, 4096).is_err(),
         "an unknown schema version is refused"
     );
 
-    let mut bad_group = GOLDEN.to_vec();
+    let mut bad_group = bytes.clone();
     bad_group[24 + 1] = 0x7f;
     assert!(
         decode_capture(&bad_group, 4096).is_err(),
@@ -146,13 +102,14 @@ fn seven_malformed_cases_fail_closed() {
     );
 
     assert!(
-        decode_capture(GOLDEN, 512).is_err(),
+        decode_capture(&bytes, 512).is_err(),
         "a chunk below the minimum is refused"
     );
+}
 
-    // A genuine tear: a first message consumes exactly 4086 bytes, so a
-    // following message starts at 4086 and crosses the 4096 chunk boundary.
-    // Zero padding cannot mask it because the loop reaches 4086 directly.
+#[test]
+fn torn_message_fails_closed() {
+    // A filler message crosses the chunk boundary when followed by another.
     let filler = SbeMessage {
         template_id: SNAPSHOT_TEMPLATE,
         received_at_us: 1,
@@ -166,22 +123,20 @@ fn seven_malformed_cases_fail_closed() {
     };
     let mut torn = encode_message(&filler).expect("4086-byte filler message");
     assert_eq!(torn.len(), 4086, "the filler ends just before the boundary");
-    let first = encode_message(&decode_message(GOLDEN, 0).expect("first message").message)
-        .expect("encoded first message");
-    torn.extend_from_slice(&first);
+    torn.extend_from_slice(&protocol_bytes());
     assert_eq!(
         decode_capture(&torn, 4096),
         Err(SbeError::MessageTear),
-        "the tear guard itself rejects a message crossing the chunk boundary"
+        "the tear guard rejects a message crossing the chunk boundary"
     );
 }
 
 #[test]
 fn invalid_utf8_symbol_fails_closed() {
-    let mut bad_symbol = GOLDEN.to_vec();
-    bad_symbol[68] = 0xff;
+    let mut bytes = protocol_bytes();
+    bytes[68] = 0xff;
     assert_eq!(
-        decode_capture(&bad_symbol, 4096),
+        decode_capture(&bytes, 4096),
         Err(SbeError::InvalidSymbol),
         "a non-UTF-8 symbol is refused rather than decoded lossily"
     );

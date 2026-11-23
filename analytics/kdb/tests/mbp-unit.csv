@@ -1,8 +1,0 @@
-schema_version,1=1,true
-load_row_count,6=count .nirnay.mbp.observations[GOLD],true
-gap_one_golden,1=.nirnay.mbp.metric[.nirnay.mbp.observations[GOLD];"synthetic-source";`gap_count],true
-duration_seconds,3f=.nirnay.mbp.metric[.nirnay.mbp.observations[GOLD];"synthetic-source";`duration_s],true
-spread_mean,0.05=.nirnay.mbp.metric[.nirnay.mbp.observations[GOLD];"synthetic-source";`spread_mean],true
-first_seq_not_gap,1=.nirnay.mbp.metric[.nirnay.mbp.observations[GOLD];"synthetic-source";`gap_count],true
-unknown_metric_fails,110h=type .nirnay.mbp.metric[.nirnay.mbp.observations[GOLD];"synthetic-source";`bogus],false
-empty_set_fails,0=count .nirnay.mbp.observations[EMPTY],false

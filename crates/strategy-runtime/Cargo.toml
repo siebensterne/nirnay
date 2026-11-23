@@ -7,11 +7,6 @@ rust-version.workspace = true
 publish.workspace = true
 description = "Deterministic Rust runtime for frozen, validated strategy artifacts"
 
-[features]
-# Opt-in only: market-shaped test source and gated integration targets.
-# Never enabled by default or by any gate command. See the test-policy record.
-market-shaped-tests = []
-
 [dependencies]
 market-event.workspace = true
 serde.workspace = true
@@ -26,8 +21,7 @@ tempfile.workspace = true
 [lints]
 workspace = true
 
-# Integration targets are declared explicitly under the test policy.
+# Integration target retained after D11: contract-only runtime checks.
 [[test]]
 name = "parity"
 path = "tests/parity.rs"
-required-features = ["market-shaped-tests"]

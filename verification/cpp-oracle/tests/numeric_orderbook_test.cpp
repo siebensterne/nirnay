@@ -1,4 +1,3 @@
-#include "market_state.h"
 #include "numeric.h"
 
 #include <cassert>
@@ -78,58 +77,6 @@ int main() {
   expect_eq(Ratio(1, 1).apply_exact(INT64_MIN), INT64_MIN, "identity at INT64_MIN");
   expect_eq(min_ratio.apply_exact(2), INT64_MIN, "exact at lower bound");
 
-  // Order book: signed prices, deltas, overflow.
-  OrderBook book;
-  book.apply(Side::Buy, Price(-2'500'000), QuantityChange::Abs(Quantity(10)));
-  book.apply(Side::Buy, Price(INT64_MIN), QuantityChange::Abs(Quantity(1)));
-  book.apply(Side::Buy, Price(INT64_MAX), QuantityChange::Abs(Quantity(1)));
-  auto bids = book.bids();
-  expect_true(bids.front().price.raw == INT64_MAX, "best bid is max price");
-  book.apply(Side::Buy, Price(500'000), QuantityChange::Abs(Quantity(100)));
-  book.apply(Side::Buy, Price(500'000), QuantityChange::Delta(QuantityDelta(-10)));
-  expect_throws(
-      [&] { book.apply(Side::Buy, Price(500'000), QuantityChange::Delta(QuantityDelta(-91))); },
-      "negative result rejected");
-  OrderBook overflow_book;
-  overflow_book.apply(Side::Sell, Price(1), QuantityChange::Abs(Quantity(INT64_MAX)));
-  expect_throws(
-      [&] { overflow_book.apply(Side::Sell, Price(1), QuantityChange::Delta(QuantityDelta(1))); },
-      "delta overflow rejected");
-  // Zero quantity removes the level.
-  OrderBook removal;
-  removal.apply(Side::Buy, Price(1), QuantityChange::Abs(Quantity(5)));
-  removal.apply(Side::Buy, Price(1), QuantityChange::Delta(QuantityDelta(-5)));
-  expect_true(removal.is_empty(), "zero removes level");
-
-  // Tick schedules across bands, with origins.
-  NumericSpec spec;
-  spec.tick_schedule = {
-      PriceBand{Price(0), Price(100'000), Price(1'000), Price(0)},
-      PriceBand{Price(100'000), Price(1'000'000), Price(10'000), Price(0)},
-  };
-  spec.validate();
-  expect_true(spec.accepts_price(Price(99'000)), "accept lower band");
-  expect_true(spec.accepts_price(Price(100'000)), "accept boundary");
-  expect_true(!spec.accepts_price(Price(99'500)), "reject off grid");
-  expect_true(!spec.accepts_price(Price(1'000'500)), "reject above range");
-  // Non-zero origin: ticks at 1000, 3000, 5000, ...
-  NumericSpec shifted;
-  shifted.tick_schedule = {PriceBand{Price(1'000), Price(9'000), Price(2'000), Price(1'000)}};
-  shifted.validate();
-  expect_true(shifted.accepts_price(Price(3'000)), "shifted origin accept");
-  expect_true(!shifted.accepts_price(Price(2'000)), "shifted origin reject");
-
-  // Quantity steps and lot sizes.
-  NumericSpec lot;
-  lot.has_quantity_step = true;
-  lot.quantity_step = Quantity(10);
-  lot.has_lot_size = true;
-  lot.lot_size = Quantity(100);
-  lot.validate();
-  expect_true(lot.accepts_quantity(Quantity(110)), "accept step multiple");
-  expect_true(!lot.accepts_quantity(Quantity(105)), "reject non-multiple");
-  expect_true(!lot.accepts_quantity(Quantity(50)), "reject below lot");
-
-  std::cout << "all C++ numeric/orderbook checks passed\n";
+  std::cout << "all C++ pure numeric checks passed\n";
   return 0;
 }

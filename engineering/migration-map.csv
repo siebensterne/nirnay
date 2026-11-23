@@ -32,5 +32,5 @@ legacy/deploy,not-promoted,archived,old runtime deployment
 .local/extras/cpp,.local/extras/cpp,retained-reference,SBE/conformance probes; C++ test passes 1/1
 .local/extras/schemas/challenge,.local/extras/schemas/challenge,retained-reference,synthetic SBE schema
 .local/extras/cpp/src/sbe.cpp,crates/sbe-codec/src/decode.rs,promoted,self-contained challenge SBE decoder with typed fail-closed errors
-.local/extras/tests/golden/sample_replay.sbe,crates/sbe-codec/tests/golden/sample_replay.sbe,promoted,verbatim golden with provenance digest af291b4050e14
+.local/extras/tests/golden/sample_replay.sbe,crates/sbe-codec/tests/golden/sample_replay.sbe,promoted-then-retired,verbatim golden with provenance digest af291b4050e14; D11 removed the active golden from the tree
 .local/extras/LICENSE,crates/sbe-codec/LICENSE,promoted,MIT licence retained with the promoted decoder

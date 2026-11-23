@@ -40,7 +40,6 @@ use trading_core::{
     AccountId, //
     AlgoId,
     Continuity,
-    FeedHealth,
     Instrument,
     InstrumentId,
     InstrumentType,
@@ -808,43 +807,6 @@ fn no_oms_broker_or_live_coupling() -> TestResult {
             "manifest must not depend on {forbidden}"
         );
     }
-    Ok(())
-}
-
-#[test]
-fn feed_health_derivation_is_from_observations() -> TestResult {
-    let base = feed()?;
-    assert_eq!(
-        base.health(LogicalNanos::ZERO, 1_000),
-        FeedHealth::Healthy { age_ns: 0 },
-        "a fresh two-sided quote is healthy"
-    );
-
-    let mut aged = base.clone();
-    aged.received_at = LogicalNanos::new(10);
-    assert_eq!(
-        aged.health(LogicalNanos::new(2_000), 1_000),
-        FeedHealth::Stale { age_ns: 1_990 },
-        "age is derived from the authority clock"
-    );
-
-    let mut crossed = base.clone();
-    let mut quote = quote()?;
-    quote.bid_price = Some(PricePaise::new(Paise(1_010))?);
-    crossed.quote = Some(quote);
-    assert_eq!(
-        crossed.health(LogicalNanos::ZERO, 1_000),
-        FeedHealth::Crossed,
-        "a crossed book is detected"
-    );
-
-    let mut no_quote = base.clone();
-    no_quote.quote = None;
-    assert_eq!(
-        no_quote.health(LogicalNanos::ZERO, 1_000),
-        FeedHealth::NoQuote,
-        "no quote is not healthy"
-    );
     Ok(())
 }
 

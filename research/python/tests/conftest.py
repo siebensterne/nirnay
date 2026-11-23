@@ -10,8 +10,9 @@ restore a prohibited test.
 
 A module-level AST scan complements the inventory. Any collected test module
 that contains a market-domain construct and is absent from the inventory stops
-collection with a message that requires an inventory update. All source is
-preserved; withdrawal removes evidence, not behaviour.
+collection with a message that requires an inventory update. Under D11 the
+synthetic artifacts themselves were deleted from the active tree; this detector
+is retained so that any reintroduced synthetic market test is rejected.
 """
 from __future__ import annotations
 

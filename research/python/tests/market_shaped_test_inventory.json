@@ -5,7 +5,9 @@
   "scope": "All tests that construct or consume invented market observations, plus tests registered market_shaped_fixture.",
   "enforcement": "research/python/tests/conftest.py deselects these tests in pytest_collection_modifyitems and blocks uninventoried modules with market-domain constructs.",
   "deselection_is_independent_of_marker_expression": true,
-  "source_preserved": true,
+  "source_preserved": false,
+  "d11_retirement_record": "evidence/TEST-RETIREMENT-NIRNAY-2026-11-23.md",
+  "retirement_note": "D11 retired the checked-in synthetic artifacts. Test source that only consumed those artifacts is withdrawn; pure math/rights/byte tests in this inventory remain deselected historical policies and are not re-enabled.",
   "note": "Dated record: evidence/SYNTHETIC-TEST-POLICY-NIRNAY-2026-11-23.md",
   "modules": {
     "research/python/tests/test_backtest_and_alpha.py": {

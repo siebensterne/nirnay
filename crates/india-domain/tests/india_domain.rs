@@ -280,50 +280,6 @@ fn round_trips_through_json_matching_the_v2_contract() {
     assert!(listing.get("terms").is_some());
 }
 
-fn india_fixture(name: &str) -> InstrumentWire {
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/india/");
-    let text = std::fs::read_to_string(format!("{path}{name}")).unwrap();
-    serde_json::from_str(&text).unwrap()
-}
-
-#[test]
-fn v2_positive_fixtures_deserialize_and_validate() {
-    for name in [
-        "nse_cash_equity.json",
-        "bse_listing.json",
-        "two_venue_listings.json",
-        "etf.json",
-    ] {
-        let wire = india_fixture(name);
-        let instrument = Instrument::try_from(wire).unwrap();
-        instrument.validate().unwrap();
-    }
-}
-
-#[test]
-fn v2_negative_fixtures_reject() {
-    for name in [
-        "invalid_isin_format.json",
-        "invalid_isin_check_digit.json",
-        "invalid_instrument_id.json",
-        "missing_listing_symbol.json",
-        "unknown_property.json",
-        "invalid_date.json",
-        "zero_tick_size.json",
-        "negative_market_lot.json",
-        "overlapping_listing_terms.json",
-    ] {
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/india/");
-        let text = std::fs::read_to_string(format!("{path}{name}")).unwrap();
-        let wire: Result<InstrumentWire, _> = serde_json::from_str(&text);
-        let rejected = match wire {
-            Err(_) => true,
-            Ok(wire) => Instrument::try_from(wire).is_err(),
-        };
-        assert!(rejected, "fixture {name} must be rejected");
-    }
-}
-
 #[test]
 fn v2_wire_rejects_unsupported_types_and_unknown_fields() {
     // Fixtures for futures would not validate as wire types; assert the wire

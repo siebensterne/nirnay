@@ -55,7 +55,7 @@ ownership moves to the complementary platform under ADR-0001.
 | Event-driven backtest | `quantlab/backtest.py`, `quantlab/portfolio_backtest.py` | `EventDrivenBacktester` is single-instrument; `MultiInstrumentPortfolioBacktester` is a separate multi-instrument, single-provider, long-only NSE cash portfolio model with independent per-symbol orders, cash/exposure reservations, latency, partial fills, participation caps, fees, spread/impact and conservative L2 market-by-price queue approximation. Neither is an exchange matching engine; queue/impact parameters need calibration. |
 | Strategy and alpha research | `quantlab/strategies/`, `alpha_search.py`, `quantlab/validation/` | Streaming deterministic EMA-cross fixture and bounded predeclared candidate screen with train/validation/untouched holdout, embargo, flat segment portfolios, explicit net costs, Holm/HAC screening, CSCV/PBO and Deflated Sharpe diagnostics. This is a research screen, not arbitrary code generation, full execution-cost proof or validated alpha. |
 | Order management and live authorization contracts (Python research path) | `quantlab/oms.py`, `quantlab/durable_oms.py`, `risk_evidence.py`, `risk_service.py`, `risk_gateway.py`, `risk_daemon.py`, `kms_signing.py`, `live_auth.py` | Local SQLite WAL/FULL transactional intent/outbox store, hash-chained journal, leases, idempotent broker-event ingestion, partial fills, cancel/unknown-outcome handling and paper-only dispatcher. This is a research/service path; the Rust OMS and account journal are the execution-state authority. A separately runnable HTTPS/mTLS risk-evidence daemon obtains eight independently signed control observations and signs scoped runtime evidence via AWS KMS Ed25519. The daemon and KMS adapter have tests but no deployed KMS key, collectors or cloud service; no broker OMS adapter is certified and live mode always rejects. |
-| C++ numeric/book oracle | `verification/cpp-oracle/` | Isolated C++20 verification target, not linked to production. A shared Rust/C++ golden corpus is still required before claiming full differential equivalence. |
+| C++ numeric oracle | `verification/cpp-oracle/` | Isolated C++20 pure-numeric verification target, not linked to production. D11 retired the order-book oracle and market-shaped corpus; no differential equivalence is claimed. |
 | Typed research simulation | `quantlab/sim/` | Frozen lineage-bearing events, a pure state reducer, first-class execution reports, seeded research mechanics and content-addressed replay. The conservative MBP baseline declares queue truth unavailable and refuses FIFO claims; cost terms are assumption-labelled. No calibrated, venue-truth or profitability claim. |
 | Experiment registry and research jobs | `quantlab/experiments/`, `quantlab/research_jobs.py`, `quantlab/validation_report.py` | Append-only, hash-chained experiment records with atomic holdout claims, disjoint validation/holdout periods, local opt-in job manifests and integrity-only validation reports. No holdout reuse, no alpha certification, no scheduler service. |
 | Rust account ledger and reconciliation | `crates/authoritative-oms/src/account_projection.rs`, `crates/authoritative-oms/src/reconciliation.rs`, `crates/account-journal` | Content-addressed OMS fill events project idempotently into the append-only account journal with an evidenced opening balance, exact-paise folds, reversal chains and a replay cursor. OMS-vs-ledger mismatch is a typed, sticky block on new risk. Implemented and locally tested, not broker-reconciled. |
@@ -128,14 +128,13 @@ under `$RUNNER_TEMP/release`, outside the checkout, and the bundler rejects an
 artifacts directory inside the source tree so wheels and binaries cannot be
 packed twice.
 
-### Archived synthetic demonstrations (non-executable)
+### Synthetic demonstrations retired
 
-The former synthetic `quantlab demo` smoke test has been withdrawn from the normal
-quickstart under the owner directive of 2026-11-22. It reported
-`not_real_market_data=true` and `not_alpha_evidence=true`; those flags did not make
-it an authorised research input. No synthetic market-data demonstration is runnable
-from the normal workflow. See `research/python/fixtures/ARCHIVED.md` and
-`evidence/POLICY-BOUNDARY-REGRESSION-WITHDRAWAL-2026-11-22.md`.
+The former synthetic `quantlab demo` smoke test and its archived fixture directory
+`research/python/fixtures/` were retired from the active tree under owner directive
+D11. No synthetic market-data demonstration is runnable from the normal workflow.
+The dated path/ha256 record is in the Nirnay retirement manifest and the RRP-002
+retirement record under `evidence/`; historical withdrawal notes remain unchanged.
 
 ## Corporate financial fact validation
 
@@ -180,7 +179,7 @@ consuming those assets is provided here.
 Optional Parquet output requires PyArrow. Optional detached manifest signing requires an AWS KMS
 Ed25519 key and narrowly scoped `kms:DescribeKey`, `kms:GetPublicKey` and `kms:Sign` permissions.
 These capabilities remain available for an accepted dataset; their previous synthetic
-demonstration is archived and non-executable.
+demonstration was retired from the active tree under D11.
 
 `verify-dataset` establishes internal manifest/artifact/hash consistency; with a trusted key,
 it additionally verifies the publisher's detached Ed25519 signature over a domain-separated
@@ -210,16 +209,15 @@ costs, not full event-level fills or all exchange charges. A positive holdout is
 screen, not validated alpha. Use licensed point-in-time data and the event simulator before any
 strategy promotion.
 
-## Archived synthetic research assets
+## Synthetic research assets retired
 
-All checked-in synthetic market-shaped assets — price bars, canonical events, reference data
-and market calendars — are archived and non-executable under the owner directive of
-2026-11-22. They are preserved unchanged as historical repository material; they must not be
-executed, regenerated, extended, transformed, reused as research evidence, or cited as proof of
-source completeness, rights or real-market verification. See
-`research/python/fixtures/ARCHIVED.md` and
-`evidence/POLICY-BOUNDARY-REGRESSION-WITHDRAWAL-2026-11-22.md` for the marker and the exact
-withdrawn regression coverage.
+All checked-in synthetic market-shaped assets — price bars, canonical events,
+reference data, market calendars, fabricated India listings, KDB MBP goldens and
+order-book corpora — were removed from the active tree under owner directive D11.
+They must not be regenerated, extended, transformed, reused as research evidence,
+or cited as proof of source completeness, rights or real-market verification. The
+dated path/SHA-256 record is in the retirement manifest and the RRP-002 retirement
+record under `evidence/`; historical withdrawal notes remain unchanged.
 
 ## Legacy provider tooling — blocked pending rights and owner approval
 
@@ -434,7 +432,8 @@ once published; a new run adds a new dated file instead of rewriting history.
 | Review | `engineering/architecture/reviews/FIELDBOOK-REVIEW-REFRESH-2026-11-23.md` | baseline refresh at Fieldbook 28eb877, W1 remediation status, ownership and NDC reconciliation; not a ratification |
 | Review evidence | `engineering/architecture/reviews/fieldbook-audits/` | five full read-only audits: architecture, durability, semantics, governance and distribution at Fieldbook `aee91de` |
 | Test policy | `research/python/tests/conftest.py` | collection-time gate that deselects inventoried market-shaped tests and blocks uninventoried market-domain modules |
-| Test policy | `research/python/tests/market_shaped_test_inventory.json` | checked-in authority listing prohibited test modules, categories and test names |
+| Test policy | `research/python/tests/market_shaped_test_inventory.json` | checked-in authority listing prohibited test modules, categories and test names; D11 retirement record in `evidence/TEST-RETIREMENT-NIRNAY-2026-11-23.md` |
+| Dated evidence | `evidence/TEST-RETIREMENT-NIRNAY-2026-11-23.md` | RRP-002 removal of synthetic market-data assets and function-level tests; removed paths, hashes, preserved historical counts, withdrawn coverage and residual gates |
 | Dated evidence | `evidence/SYNTHETIC-TEST-POLICY-NIRNAY-2026-11-23.md` | enforced inventory counts, inspection commands, withdrawn coverage and current test figures |
 | Dated evidence | `evidence/C3-CONSUMER-USE-PERMISSIONS-2026-11-23.md` | C3 consumer-use and permission-evaluation implementation record, gate counts and explicit non-goals |
 | Dated evidence | `evidence/RUST-TEST-POLICY-NIRNAY-2026-11-23.md` | gated Rust targets and src modules, inventory and enforced default counts, withdrawn coverage and historical-count disclaimer |

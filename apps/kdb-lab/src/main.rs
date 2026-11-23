@@ -17,8 +17,9 @@ use clap::{
 };
 
 use kdb_lab::{
-    MbpMetrics, analyze, build_report, find_q, golden_dir, parse_metrics_csv,
-    parse_observations_csv, reference_metrics,
+    analyze, //
+    build_report,
+    find_q,
 };
 
 #[derive(Debug, Args)]
@@ -38,8 +39,6 @@ struct AnalyzeArgs {
 enum Command {
     /// Run the checked-in KDB-X analytics contract on one source.
     Analyze(AnalyzeArgs),
-    /// Validate the golden contract without requiring a q installation.
-    CheckGolden,
 }
 
 #[derive(Debug, Parser)]
@@ -74,70 +73,9 @@ fn analyze_command(args: AnalyzeArgs) -> Result<()> {
     Ok(())
 }
 
-fn metrics_close(actual: &MbpMetrics, expected: &MbpMetrics) -> bool {
-    let integers_match = actual.schema_version == expected.schema_version
-        && actual.source_id == expected.source_id
-        && actual.rows == expected.rows
-        && actual.gap_count == expected.gap_count
-        && actual.levels_min == expected.levels_min
-        && actual.bid1_max_qty == expected.bid1_max_qty
-        && actual.ask1_max_qty == expected.ask1_max_qty;
-    let floats = [
-        (actual.duration_s, expected.duration_s),
-        (actual.spread_mean, expected.spread_mean),
-        (actual.spread_median, expected.spread_median),
-        (actual.spread_max, expected.spread_max),
-        (actual.imbalance_mean, expected.imbalance_mean),
-        (actual.imbalance_min, expected.imbalance_min),
-        (actual.imbalance_max, expected.imbalance_max),
-        (actual.bid1_mean, expected.bid1_mean),
-        (actual.ask1_mean, expected.ask1_mean),
-    ];
-    integers_match
-        && floats
-            .into_iter()
-            .all(|(left, right)| (left - right).abs() <= 1e-6)
-}
-
-fn check_golden() -> Result<()> {
-    let dir = golden_dir();
-    let input_path = dir.join("mbp-observation-v1.csv");
-    let metrics_path = dir.join("mbp-metrics-v1.csv");
-    let input_text = std::fs::read_to_string(&input_path)
-        .with_context(|| format!("cannot read {}", input_path.display()))?;
-    let golden_text = std::fs::read_to_string(&metrics_path)
-        .with_context(|| format!("cannot read {}", metrics_path.display()))?;
-    let rows = parse_observations_csv(&input_text).context("golden input is invalid")?;
-    let expected = parse_metrics_csv(&golden_text).context("golden metrics are invalid")?;
-    let reference = reference_metrics(&rows, &expected.source_id)
-        .context("reference analytics failed on golden input")?;
-    if !metrics_close(&reference, &expected) {
-        anyhow::bail!("reference metrics differ from the recorded q golden");
-    }
-    eprintln!(
-        "kdb-lab: golden contract valid (rows={}, source={})",
-        expected.rows, expected.source_id
-    );
-    match find_q() {
-        Ok(q_bin) => {
-            let result = analyze(&input_path, &expected.source_id, &q_bin)
-                .context("fresh q replay of the golden contract failed")?;
-            if result.stdout != golden_text {
-                anyhow::bail!("fresh q output is not byte-identical to the golden file");
-            }
-            eprintln!("kdb-lab: fresh q replay is byte-identical");
-        }
-        Err(error) => {
-            eprintln!("kdb-lab: q replay skipped ({error})");
-        }
-    }
-    Ok(())
-}
-
 fn run() -> Result<()> {
     match Cli::parse().command {
         Command::Analyze(args) => analyze_command(args),
-        Command::CheckGolden => check_golden(),
     }
 }
 

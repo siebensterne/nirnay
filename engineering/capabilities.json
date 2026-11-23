@@ -114,19 +114,19 @@
     },
     {
       "id": "CAP-014",
-      "name": "Verification-only C++ fixed-point and order-book oracle",
+      "name": "Verification-only C++ fixed-point oracle",
       "status": "implemented",
-      "evidence_status": "Promoted as isolated C++20 verification target; CMake/CTest passed 1/1 in both the preparation run and the owner rerun (CMake 4.4.3 / AppleClang 21). Not a production Rust dependency; GCC/Clang __int128 portability caveat applies; broader shared golden corpus is pending.",
+      "evidence_status": "Isolated C++20 verification target. D11 retired the market-state/order-book oracle sources and the market-shaped corpus; pure numeric boundary checks remain. Not a production Rust dependency; GCC/Clang __int128 portability caveat applies. No differential equivalence claim.",
       "owner": "verification",
       "scope": "verification/cpp-oracle"
     },
     {
       "id": "CAP-015",
-      "name": "Reproducible research CLI and synthetic fixtures",
+      "name": "Reproducible research CLI",
       "status": "implemented",
-      "evidence_status": "quantlab demo, normalize, reconcile, build-dataset, verify-dataset and alpha-search entrypoints; all fixture datasets explicitly synthetic and labeled. End-to-end PIT and alpha CLI fixture runs verified.",
+      "evidence_status": "quantlab normalize, reconcile, build-dataset, verify-dataset and alpha-search entrypoints. D11 retired the synthetic fixture datasets and demo; no synthetic-market evidence remains in the active tree.",
       "owner": "research-tooling",
-      "scope": "research/python/src/quantlab/cli.py; research/python/fixtures"
+      "scope": "research/python/src/quantlab/cli.py"
     },
     {
       "id": "CAP-016",
@@ -182,7 +182,7 @@
       "status": "implemented",
       "evidence_status": "Initial pure Rust domain and bounded JSONL validation CLI added. Exact decimal facts, company identity observations, source document hashes and locators, append-only fact revisions, derived-input lineage, and point-in-time selection are implemented with unit/integration fixtures. Targeted Rust compilation, tests, Clippy, and hosted CI are pending; no MCA/SEBI/NSE/BSE network adapter, PDF/XBRL parser, production store, source entitlement, or complete-company coverage is claimed.",
       "owner": "fundamental-data",
-      "scope": "crates/fundamental-domain; apps/fundamental-tools; schemas/fundamentals; research/fundamentals/fixtures"
+      "scope": "crates/fundamental-domain; apps/fundamental-tools; schemas/fundamentals; research/fundamentals/contract-vectors"
     },
     {
       "id": "CAP-023",
@@ -428,9 +428,9 @@
       "id": "CAP-055",
       "name": "Generalized calendar-based bar-cadence validation",
       "status": "implemented",
-      "evidence_status": "IMPLEMENTED, NOT REAL-MARKET VERIFIED; no commit SHA, CI run or independent verification is claimed here. All calendar artifacts are checked-in TEST_FIXTURE files; no real-market calendar validator is claimed, and a fixture cannot certify MARKET origin or exchange-calendar validity. Registrations now require explicit dataset_origin (SYNTHETIC or MARKET) bound to the dataset manifest, bar_timezone, bar_anchor aligned with timestamp_semantics, and a versioned calendar reference with a digest recomputed from a checked-in artifact. quantlab.experiments.calendar resolves fixtures under research/python/fixtures/calendars with no database, service or network; unknown identifiers, wrong digests and conflicting declarations fail closed. Session artifacts model regular sessions, auction exclusion, scheduled breaks, early closes, holidays and an overnight session; the validator compares observations with the expected scheduled UTC timestamps instead of one fixed elapsed interval, accepts fixture calendar gaps, rejects missing sessions or bars, and does not invent or forward-fill a bar inside a fixture-bounded check. Explicit coverage statuses (no_trade, not_listed, suspended, halted, market_closed, missing) keep an absent price as None; those statuses are not authority-checked and the search adapter does not pass them as an integrated workflow. Named annualisation bases fix bar family, bar_interval_ns and periods_per_year (daily 252, NSE cash one-minute 94500, five-minute 18900, fifteen-minute 6300); the CLI cannot override them. Nineteen new cadence tests plus the existing registry suite pass locally. No provider observation or licensed data was used; all rights remain UNKNOWN. Claim scope: evidence/M4-2-1-CLAIM-SCOPE-2026-11-22.md narrows M4.2.1 to implemented, not real-market verified. Falsifiers: a fixture calendar marked synthetic:false certifies MARKET origin; an expected schedule generated from observed first and last timestamps passes a missing first or last bar without independent manifest coverage bounds; a close-anchored inclusive 09:15-15:30 session yields 376 bars while the registered one-minute basis fixes 375 bars per session and 94500 periods per year, leaving bar-open/close schedule math undefined or the period count unbound. No real-market calendar validator, source completeness, alpha, profitability, venue-realism or live-readiness claim.",
+      "evidence_status": "IMPLEMENTED, NOT REAL-MARKET VERIFIED; no commit SHA, CI run or independent verification is claimed here. All calendar artifacts are checked-in TEST_FIXTURE files; no real-market calendar validator is claimed, and a fixture cannot certify MARKET origin or exchange-calendar validity. Registrations now require explicit dataset_origin (SYNTHETIC or MARKET) bound to the dataset manifest, bar_timezone, bar_anchor aligned with timestamp_semantics, and a versioned calendar reference with a digest recomputed from a checked-in artifact. quantlab.experiments.calendar resolves caller-supplied calendar artifacts with no database, service or network; D11 retired the checked-in synthetic calendar fixtures; unknown identifiers, wrong digests and conflicting declarations fail closed. Session artifacts model regular sessions, auction exclusion, scheduled breaks, early closes, holidays and an overnight session; the validator compares observations with the expected scheduled UTC timestamps instead of one fixed elapsed interval, accepts fixture calendar gaps, rejects missing sessions or bars, and does not invent or forward-fill a bar inside a fixture-bounded check. Explicit coverage statuses (no_trade, not_listed, suspended, halted, market_closed, missing) keep an absent price as None; those statuses are not authority-checked and the search adapter does not pass them as an integrated workflow. Named annualisation bases fix bar family, bar_interval_ns and periods_per_year (daily 252, NSE cash one-minute 94500, five-minute 18900, fifteen-minute 6300); the CLI cannot override them. Nineteen new cadence tests plus the existing registry suite pass locally. No provider observation or licensed data was used; all rights remain UNKNOWN. Claim scope: evidence/M4-2-1-CLAIM-SCOPE-2026-11-22.md narrows M4.2.1 to implemented, not real-market verified. Falsifiers: a fixture calendar marked synthetic:false certifies MARKET origin; an expected schedule generated from observed first and last timestamps passes a missing first or last bar without independent manifest coverage bounds; a close-anchored inclusive 09:15-15:30 session yields 376 bars while the registered one-minute basis fixes 375 bars per session and 94500 periods per year, leaving bar-open/close schedule math undefined or the period count unbound. No real-market calendar validator, source completeness, alpha, profitability, venue-realism or live-readiness claim.",
       "owner": "research",
-      "scope": "research/python/src/quantlab/experiments/calendar.py; research/python/src/quantlab/experiments/coverage.py; research/python/src/quantlab/experiments/cadence.py; research/python/src/quantlab/experiments/schema.py; research/python/src/quantlab/experiments/verify.py; research/python/src/quantlab/experiments/reproducibility.py; research/python/src/quantlab/data/__init__.py; research/python/src/quantlab/point_in_time.py; research/python/src/quantlab/research_jobs.py; schemas/research/dataset-manifest.v1.schema.json; research/python/fixtures/calendars/; research/python/tests/test_calendar_cadence.py; evidence/M4-2-1-CALENDAR-CADENCE-ADDENDUM-2026-11-22.md"
+      "scope": "research/python/src/quantlab/experiments/calendar.py; research/python/src/quantlab/experiments/coverage.py; research/python/src/quantlab/experiments/cadence.py; research/python/src/quantlab/experiments/schema.py; research/python/src/quantlab/experiments/verify.py; research/python/src/quantlab/experiments/reproducibility.py; research/python/src/quantlab/data/__init__.py; research/python/src/quantlab/point_in_time.py; research/python/src/quantlab/research_jobs.py; schemas/research/dataset-manifest.v1.schema.json"
     }
   ]
 }

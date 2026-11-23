@@ -252,19 +252,18 @@
           "scripts/validate_contracts.py"
         ]
       },
-      "falsifier": "A q run merges or sums two sources, emits an unknown, missing or duplicated metric, produces different bytes on a fresh process, produces a report that fails its schema, or a golden file that the Rust reference cannot reproduce."
+      "falsifier": "A q run merges or sums two sources, emits an unknown, missing or duplicated metric, or produces a report that fails its schema. D11 retired the golden corpus and its byte-parity assertions."
     },
     {
       "id": "CLM-022",
-      "statement": "q / kdb+ analytics has the same style-gate treatment as other languages: a canonical style guide with authoritative sources, an added-lines q checker with self-tests wired into make check and CI, and in-process q unit tests over a CSV assertion harness that fail closed on a broken case.",
+      "statement": "q / kdb+ analytics has the same style-gate treatment as other languages: a canonical style guide with authoritative sources and an added-lines q checker with self-tests wired into make check and CI.",
       "status": "implemented",
       "scope": {
         "packages": [
           "engineering/q-kdb-style.md",
           "scripts/check_q_style.py",
           "scripts/check_style_gate.py",
-          "analytics/kdb/mbp-test.q",
-          "analytics/kdb/tests/mbp-unit.csv"
+          "analytics/kdb/mbp-test.q"
         ]
       },
       "falsifier": "A bare / line, unparenthesised count comparison or dotted column access inside a lambda passes the q gate; removing the q checker or its wiring does not fail the style-gate integrity check; or a deliberately failing q assertion exits zero."
@@ -675,7 +674,7 @@
           "research/python/src/quantlab/data/__init__.py",
           "research/python/src/quantlab/point_in_time.py",
           "research/python/src/quantlab/research_jobs.py",
-          "research/python/fixtures/calendars/",
+          "caller-supplied calendar artifacts",
           "research/python/tests/test_calendar_cadence.py",
           "evidence/M4-2-1-CALENDAR-CADENCE-ADDENDUM-2026-11-22.md"
         ]

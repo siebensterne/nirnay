@@ -62,11 +62,6 @@ pub fn q_script_path() -> Result<PathBuf> {
         .with_context(|| format!("cannot resolve q script at {}", path.display()))
 }
 
-/// Directory holding the checked-in golden contract files.
-pub fn golden_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden")
-}
-
 fn digest(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
