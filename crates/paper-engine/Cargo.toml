@@ -1,5 +1,5 @@
 [[bin]]
-name = "paper-run"
+name = "paper-engine-run"
 path = "src/bin/paper_run.rs"
 
 [package]

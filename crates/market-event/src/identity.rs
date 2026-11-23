@@ -139,7 +139,7 @@ pub fn observation_id(
 
 /// Compute a business-event identity from an observation and a domain
 /// discriminator. Callers must not invent one for a bare state observation;
-/// use [`KernelEvent::observation_only`].
+/// use `KernelEvent::observation_only` from the event module.
 pub fn business_event_id(
     observation: &ContentId,
     event_kind: &str,

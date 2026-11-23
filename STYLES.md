@@ -16,3 +16,13 @@ retrieve with curl:
 
 Extra: go to link then other links
 - https://github.com/kciter/awesome-style-guide
+
+## Official language documentation
+
+Canonical external language references:
+
+- Rust rustdoc: https://doc.rust-lang.org/rustdoc/how-to-write-documentation.html
+- Rust reference: https://doc.rust-lang.org/reference/
+- C++: https://isocpp.org/ and https://en.cppreference.com/w/
+- Python 3: https://docs.python.org/3/
+- Bash: https://www.gnu.org/software/bash/manual/
