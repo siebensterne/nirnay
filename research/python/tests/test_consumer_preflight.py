@@ -7,20 +7,25 @@ provider endpoint, dataset, release, experiment or live path is involved.
 from __future__ import annotations
 
 from dataclasses import fields, replace
+from pathlib import Path
 
 import pytest
 
 from quantlab.consumer_use import (
+    CONTRACT_VERSION,
     INTRADAY_CAPABILITY,
     PURPOSE,
     READ_RELEASE,
     RECIPIENT_CLASS,
     TIME_AXIS_NAMES,
     USE_PROFILES,
+    Bounded,
     CapabilityFacts,
     ConsumerUseRequest,
+    DeleteOnExpiry,
     GrantDecision,
     IdentityScope,
+    LegalHold,
     PreflightDecision,
     PreflightGrant,
     PreflightRejectionCode,
@@ -35,7 +40,14 @@ from quantlab.consumer_use import (
     TimeAxes,
     preflight_consumer_admission,
 )
-from quantlab.dataset_admission import AdmissionReceipt
+from quantlab.dataset_admission import (
+    COVERAGE_DIMENSIONS,
+    AdmissionReceipt,
+    CoverageCertificate,
+    CoverageDimensionReport,
+    CoverageVerdict,
+    DatasetAdmissionError,
+)
 
 NS_2023 = 1_672_531_200_000_000_000
 NS_2024 = 1_704_067_200_000_000_000
@@ -119,7 +131,7 @@ def _request(profile_id: str = "historical_research",
         recipient_class=RECIPIENT_CLASS,
         recipient_id="nirnay-research-job-001",
         time_axes=_axes(),
-        requested_retention=RetentionPolicy(90, "purge:explicit"),
+        requested_retention=RetentionPolicy(Bounded(90), DeleteOnExpiry()),
         declared_capabilities=frozenset(profile.required_capabilities),
     )
     return replace(base, **overrides)
@@ -140,7 +152,7 @@ def _grant(use: RequestedUse, **overrides: object) -> PreflightGrant:
         recipient_class=RECIPIENT_CLASS,
         recipient_id="nirnay-research-job-001",
         scope=use.scope,
-        retention=RetentionPolicy(90, "purge:explicit"),
+        retention=RetentionPolicy(Bounded(90), DeleteOnExpiry()),
         effective_from_ns=NS_2023,
         effective_until_ns=NS_2027,
         evidence_reference=RIGHTS_RECORD,
@@ -154,6 +166,43 @@ def _grants(request: ConsumerUseRequest,
     return tuple(_grant(use, **overrides) for use in request.requested_uses)
 
 
+def _coverage(as_of_ns: int = NS_2024) -> CoverageCertificate:
+    """Build nine separately declared, passing coverage dimensions."""
+    return CoverageCertificate(
+        certificate_reference="coverage:certificate-2026",
+        valid_until="2026-12-31",
+        scope={
+            "provider": "provider-a",
+            "product": "product-x",
+            "venue": "venue-a",
+            "segment": "segment-cash",
+        },
+        universe_id="release:abstract-2026",
+        as_of_ns=as_of_ns,
+        dimensions=tuple(
+            CoverageDimensionReport(
+                dimension=name,
+                scope={
+                    "provider": "provider-a",
+                    "product": "product-x",
+                    "venue": "venue-a",
+                    "segment": "segment-cash",
+                },
+                denominator_identity=f"denominator:{name}",
+                denominator_value=10,
+                as_of_ns=as_of_ns,
+                numerator=10,
+                missing_count=0,
+                rejected_count=0,
+                gaps=(),
+                verdict=CoverageVerdict.PASS,
+                evidence_reference=f"evidence:{name}:2026",
+            )
+            for name in COVERAGE_DIMENSIONS
+        ),
+    )
+
+
 def _release(**capability_overrides: object) -> ReleaseEvidence:
     """Build release-owned declarations and capability evidence."""
     capabilities = ReleaseCapabilityEvidence(
@@ -164,6 +213,7 @@ def _release(**capability_overrides: object) -> ReleaseEvidence:
     )
     return ReleaseEvidence(
         declarations=ReleaseDeclarations(
+            contract_version=CONTRACT_VERSION,
             schema_version=1,
             envelope_version=1,
             publisher_identity="publisher-key-1",
@@ -171,9 +221,9 @@ def _release(**capability_overrides: object) -> ReleaseEvidence:
             manifest_sha256=DIGEST_A,
             artifact_digests=(DIGEST_C,),
             source_lineage_reference="lineage:abstract-2026",
+            correction_lineage_reference="correction:abstract-2026",
             rights_evidence_reference=RIGHTS_RECORD,
-            coverage_certificate="coverage:certificate-2026",
-            coverage_verdict="PASS",
+            coverage=_coverage(),
             pit_basis="knowledge_time",
             pit_as_of_ns=NS_2024,
         ),
@@ -247,7 +297,11 @@ def test_historical_data_as_of_does_not_change_grant_validity(data_as_of_ns: int
     )
     release = _release()
     release = ReleaseEvidence(
-        declarations=replace(release.declarations, pit_as_of_ns=data_as_of_ns),
+        declarations=replace(
+            release.declarations,
+            pit_as_of_ns=data_as_of_ns,
+            coverage=_coverage(data_as_of_ns),
+        ),
         capabilities=release.capabilities,
     )
     grants = _grants(request, effective_from_ns=NS_2023, effective_until_ns=NS_2025)
@@ -449,7 +503,7 @@ def test_scope_and_retention_must_be_covered() -> None:
     assert _evaluate(request, _grants(request, scope=late_grant_scope)).code is (
         PreflightRejectionCode.DATA_TIME
     )
-    short = RetentionPolicy(30, "purge:explicit")
+    short = RetentionPolicy(Bounded(30), DeleteOnExpiry())
     assert _evaluate(request, _grants(request, retention=short)).code is (
         PreflightRejectionCode.RETENTION
     )
@@ -556,3 +610,89 @@ def test_time_axis_names_and_rejection_codes_are_stable() -> None:
     assert "REJECT_MISSING_PAIR" in values
     assert "REJECT_PRODUCER_CAPABILITY" in values
     assert "REJECT_AMBIGUOUS_GRANTS" in values
+
+
+# --- C4-C6 typed retention, per-dimension coverage and distinct refusals ----
+
+
+@pytest.mark.parametrize(("field", "code"), [
+    ("fields", PreflightRejectionCode.OUT_OF_SCOPE_FIELD),
+    ("modalities", PreflightRejectionCode.OUT_OF_SCOPE_MODALITY),
+])
+def test_out_of_scope_field_and_modality_have_distinct_codes(
+    field: str, code: PreflightRejectionCode
+) -> None:
+    """A field or modality outside the grant is not a general scope failure."""
+    request = _request()
+    narrow = ScopeSet(ScopeState.NAMED, frozenset({"other-" + field}))
+    grant_scope = replace(_scope(), **{field: narrow})
+    assert _evaluate(request, _grants(request, scope=grant_scope)).code is code
+
+
+def test_weaker_purge_has_its_own_rejection_code() -> None:
+    """A shorter duration with a weaker purge duty is refused distinctly."""
+    request = _request(
+        requested_retention=RetentionPolicy(Bounded(30), LegalHold("hold:request"))
+    )
+    stronger_grant = RetentionPolicy(Bounded(90), DeleteOnExpiry())
+    decision = _evaluate(request, _grants(request, retention=stronger_grant))
+    assert decision.code is PreflightRejectionCode.WEAKER_PURGE
+    over_long = RetentionPolicy(Bounded(10), DeleteOnExpiry())
+    assert _evaluate(request, _grants(request, retention=over_long)).code is (
+        PreflightRejectionCode.RETENTION
+    )
+
+
+@pytest.mark.parametrize(("field", "value", "code"), [
+    ("contract_version", 99, PreflightRejectionCode.CONTRACT_VERSION),
+    ("signature_receipt", "UNKNOWN", PreflightRejectionCode.INVALID_SIGNATURE),
+    ("manifest_sha256", "b" * 64, PreflightRejectionCode.DIGEST_MISMATCH),
+    ("correction_lineage_reference", "UNKNOWN",
+     PreflightRejectionCode.CORRECTION_LINEAGE),
+])
+def test_declaration_refusals_have_distinct_codes(
+    field: str, value: object, code: PreflightRejectionCode
+) -> None:
+    """Contract, signature, digest and correction failures never collapse."""
+    release = _release()
+    release = ReleaseEvidence(
+        declarations=replace(release.declarations, **{field: value}),
+        capabilities=release.capabilities,
+    )
+    assert _evaluate(release=release).code is code
+
+
+def test_incomplete_coverage_refuses_a_release() -> None:
+    """Coverage is per dimension; one failing dimension blocks the release."""
+    release = _release()
+    dimensions = tuple(
+        replace(dimension, verdict=CoverageVerdict.UNKNOWN) if index == 0 else dimension
+        for index, dimension in enumerate(release.declarations.coverage.dimensions)
+    )
+    release = ReleaseEvidence(
+        declarations=replace(
+            release.declarations,
+            coverage=replace(release.declarations.coverage, dimensions=dimensions),
+        ),
+        capabilities=release.capabilities,
+    )
+    assert _evaluate(release=release).code is PreflightRejectionCode.INCOMPLETE_COVERAGE
+
+
+def test_coverage_declarations_are_not_an_aggregate_percentage() -> None:
+    """Nine dimension reports are required, not one aggregate verdict."""
+    assert len(COVERAGE_DIMENSIONS) == 9
+    certificate = _coverage()
+    assert len(certificate.dimensions) == 9
+    assert {report.dimension for report in certificate.dimensions} == set(COVERAGE_DIMENSIONS)
+    assert all(report.evidence_reference for report in certificate.dimensions)
+
+
+def test_preflight_decision_cannot_be_used_as_a_release_admission(tmp_path: Path) -> None:
+    """A research job refuses a preflight decision in place of an admission record."""
+    from quantlab.research_jobs import run_job
+
+    decision = _evaluate()
+    with pytest.raises(DatasetAdmissionError, match="not a verified NDC release admission"):
+        run_job(tmp_path / "jobs.json", tmp_path / "registry.sqlite3",
+                dataset_dir=tmp_path / "release", admission=decision)  # type: ignore[arg-type]

@@ -9,6 +9,7 @@ import pytest
 from quantlab.consumer_use import (
     ACTION_OBJECTS,
     CONSUMER_OPERATIONS,
+    CONTRACT_VERSION,
     CREATE_DERIVED,
     INTERNAL_ANALYTICS,
     INTRADAY_CAPABILITY,
@@ -17,25 +18,42 @@ from quantlab.consumer_use import (
     RETAIN_DERIVED_DATA,
     STORE_RESEARCH_COPY,
     USE_PROFILES,
-    AdmissionDecision,
     AdmissionRequest,
     GrantDecision,
     PermissionGrant,
-    RejectionCode,
+    PreflightDecision,
     ReleaseDeclarations,
     ReleaseIdentity,
-    RetentionPolicy,
+    RejectionCode,
     ScopeSet,
     ScopeState,
     UseScope,
     evaluate_consumer_use,
 )
-from quantlab.dataset_admission import AdmissionReceipt
+from quantlab.dataset_admission import (
+    COVERAGE_DIMENSIONS,
+    AdmissionReceipt,
+    Bounded,
+    CoverageCertificate,
+    CoverageDimensionReport,
+    CoverageVerdict,
+    DeleteOnExpiry,
+    Indefinite,
+    LegalHold,
+    RetentionPolicy,
+)
 
 AS_OF_NS = 1_700_000_000_000_000_000
 DIGEST_A = "a" * 64
 DIGEST_B = "b" * 64
 DIGEST_C = "c" * 64
+RELEASE_ID = "release:abstract-2026"
+SCOPE_MAP = {
+    "provider": "provider-a",
+    "product": "product-x",
+    "venue": "venue-a",
+    "segment": "segment-cash",
+}
 ALL_OBJECTS = (
     "release_manifest",
     "event_envelope",
@@ -76,7 +94,7 @@ def _request(profile: str, actions: tuple[str, ...]) -> AdmissionRequest:
     """Build a valid abstract admission request for one declared profile."""
     return AdmissionRequest(
         release_identity=ReleaseIdentity(
-            release_id="release:abstract-2026",
+            release_id=RELEASE_ID,
             manifest_sha256=DIGEST_A,
             data_sha256=DIGEST_B,
             publisher_identity="publisher-key-1",
@@ -89,7 +107,7 @@ def _request(profile: str, actions: tuple[str, ...]) -> AdmissionRequest:
         licensee="nirnay-legal-entity",
         recipient="internal",
         scope=_request_scope(),
-        requested_retention=RetentionPolicy(90, "purge:explicit"),
+        requested_retention=RetentionPolicy(Bounded(90), DeleteOnExpiry()),
         as_of_ns=AS_OF_NS,
         declared_capabilities=frozenset(
             {INTRADAY_CAPABILITY} if profile == "intraday_replay_research" else set()
@@ -109,7 +127,7 @@ def _grant(action: str, **overrides: object) -> PermissionGrant:
         licensee="nirnay-legal-entity",
         recipient="internal",
         scope=_grant_scope(),
-        retention=RetentionPolicy(90, "purge:explicit"),
+        retention=RetentionPolicy(Bounded(90), DeleteOnExpiry()),
         effective_from_ns=AS_OF_NS - 100,
         effective_until_ns=AS_OF_NS + 100,
         evidence_reference="written:rights-record-2026",
@@ -122,19 +140,47 @@ def _grants(actions: tuple[str, ...], **overrides: object) -> tuple[PermissionGr
     return tuple(_grant(action, **overrides) for action in actions)
 
 
+def _coverage() -> CoverageCertificate:
+    """Build nine separately declared, passing coverage dimensions."""
+    return CoverageCertificate(
+        certificate_reference="coverage:certificate-2026",
+        valid_until="2026-12-31",
+        scope=dict(SCOPE_MAP),
+        universe_id=RELEASE_ID,
+        as_of_ns=AS_OF_NS,
+        dimensions=tuple(
+            CoverageDimensionReport(
+                dimension=name,
+                scope=dict(SCOPE_MAP),
+                denominator_identity=f"denominator:{name}",
+                denominator_value=10,
+                as_of_ns=AS_OF_NS,
+                numerator=10,
+                missing_count=0,
+                rejected_count=0,
+                gaps=(),
+                verdict=CoverageVerdict.PASS,
+                evidence_reference=f"evidence:{name}:2026",
+            )
+            for name in COVERAGE_DIMENSIONS
+        ),
+    )
+
+
 def _declarations() -> ReleaseDeclarations:
     """Build named scalar declarations from earlier verification stages."""
     return ReleaseDeclarations(
+        contract_version=CONTRACT_VERSION,
         schema_version=1,
         envelope_version=1,
         publisher_identity="publisher-key-1",
-        signature_receipt="signature:release:abstract-2026",
+        signature_receipt=f"signature:{RELEASE_ID}",
         manifest_sha256=DIGEST_A,
         artifact_digests=(DIGEST_C,),
         source_lineage_reference="lineage:abstract-2026",
+        correction_lineage_reference="correction:abstract-2026",
         rights_evidence_reference="written:rights-record-2026",
-        coverage_certificate="coverage:certificate-2026",
-        coverage_verdict="PASS",
+        coverage=_coverage(),
         pit_basis="knowledge_time",
         pit_as_of_ns=AS_OF_NS,
     )
@@ -142,7 +188,7 @@ def _declarations() -> ReleaseDeclarations:
 
 def _evaluate(request: AdmissionRequest,
               grants: tuple[PermissionGrant, ...],
-              declarations: ReleaseDeclarations | None = None) -> AdmissionDecision:
+              declarations: ReleaseDeclarations | None = None) -> PreflightDecision:
     """Evaluate the supplied abstract declarations and return the decision."""
     return evaluate_consumer_use(request, grants, declarations or _declarations())
 
@@ -233,7 +279,7 @@ def test_derived_creation_requires_its_own_permitted_grant() -> None:
     ("purpose", "internal_analysis", RejectionCode.USE_SCOPE),
     ("purpose", "proprietary own-account trading research", RejectionCode.USE_SCOPE),
     ("recipient", "public", RejectionCode.USE_SCOPE),
-    ("licensee", "fieldbook-operator", RejectionCode.RIGHTS_EVIDENCE),
+    ("licensee", "fieldbook-operator", RejectionCode.LICENSEE_IDENTITY),
 ])
 def test_wrong_purpose_recipient_or_licensee_is_refused(
     field: str, value: str, code: RejectionCode
@@ -248,9 +294,12 @@ def test_grant_licensee_and_recipient_must_match_the_request() -> None:
     """A grant for another licensee or recipient does not cover this request."""
     request = _profile_request("historical_research")
     actions = request.requested_actions
-    for field, value in (("licensee", "other-entity"), ("recipient", "participant")):
+    for field, value, code in (
+        ("licensee", "other-entity", RejectionCode.LICENSEE_IDENTITY),
+        ("recipient", "participant", RejectionCode.RECIPIENT_IDENTITY),
+    ):
         grants = _grants(actions, **{field: value})
-        assert _evaluate(request, grants).code is RejectionCode.RIGHTS_EVIDENCE
+        assert _evaluate(request, grants).code is code
 
 
 @pytest.mark.parametrize("action", [READ_RELEASE, STORE_RESEARCH_COPY,
@@ -288,7 +337,7 @@ def test_scope_dimension_mismatch_is_refused(field: str) -> None:
     request = _profile_request("historical_research")
     scope = replace(_grant_scope(), **{field: "other-" + field})
     grants = _grants(request.requested_actions, scope=scope)
-    assert _evaluate(request, grants).code is RejectionCode.USE_SCOPE
+    assert _evaluate(request, grants).code is RejectionCode.SOURCE_BINDING
 
 
 def test_subject_sets_and_time_bounds_must_be_contained() -> None:
@@ -299,18 +348,21 @@ def test_subject_sets_and_time_bounds_must_be_contained() -> None:
     assert _evaluate(request, _grants(actions, scope=narrow)).code is RejectionCode.USE_SCOPE
     unbounded = replace(request, scope=replace(_request_scope(),
                                                data_time_from_ns=None, data_time_to_ns=None))
-    assert _evaluate(unbounded, _grants(actions)).code is RejectionCode.USE_SCOPE
+    assert _evaluate(unbounded, _grants(actions)).code is RejectionCode.DATA_TIME
 
 
 def test_retention_request_cannot_exceed_grant() -> None:
     """A bounded grant cannot cover a longer requested retention."""
     request = replace(
         _profile_request("historical_research"),
-        requested_retention=RetentionPolicy(400, "purge:explicit"),
+        requested_retention=RetentionPolicy(Bounded(400), DeleteOnExpiry()),
     )
     decision = _evaluate(request, _profile_grants("historical_research"))
     assert decision.code is RejectionCode.RETENTION
-    indefinite = replace(request, requested_retention=RetentionPolicy(None, "purge:explicit"))
+    indefinite = replace(
+        request,
+        requested_retention=RetentionPolicy(Indefinite(), DeleteOnExpiry()),
+    )
     assert _evaluate(indefinite, _profile_grants("historical_research")).code is (
         RejectionCode.RETENTION
     )
@@ -320,7 +372,7 @@ def test_effective_interval_must_contain_the_as_of_instant() -> None:
     """A lapsed grant is not a permission at the requested as-of instant."""
     request = _profile_request("historical_research")
     grants = _grants(request.requested_actions, effective_until_ns=AS_OF_NS - 1)
-    assert _evaluate(request, grants).code is RejectionCode.RIGHTS_EVIDENCE
+    assert _evaluate(request, grants).code is RejectionCode.GRANT_EXPIRED_AT_DECISION
 
 
 def test_ambiguous_grants_are_refused() -> None:
@@ -334,20 +386,24 @@ def test_ambiguous_grants_are_refused() -> None:
 def test_rejection_codes_are_distinct_and_typed() -> None:
     """Every named failure mode carries its own stable rejection code."""
     values = [item.value for item in RejectionCode]
-    assert len(values) == len(set(values)) == 11
-    assert set(values) == {
-        "REJECT_PUBLISHER_IDENTITY",
-        "REJECT_SIGNATURE_INTEGRITY",
-        "REJECT_SOURCE_LINEAGE",
-        "REJECT_RIGHTS_EVIDENCE",
-        "REJECT_USE_SCOPE",
-        "REJECT_COVERAGE",
-        "REJECT_PIT_CONSISTENCY",
-        "REJECT_RETENTION",
-        "REJECT_ARTIFACT_DIGESTS",
-        "REJECT_SCHEMA_ENVELOPE",
-        "REJECT_AMBIGUOUS_GRANTS",
-    }
+    assert len(values) == len(set(values))
+    assert {
+        "REJECT_OBJECT_IDENTITY",
+        "REJECT_ACTOR_IDENTITY",
+        "REJECT_RECIPIENT_IDENTITY",
+        "REJECT_PURPOSE",
+        "REJECT_OUT_OF_SCOPE_FIELD",
+        "REJECT_OUT_OF_SCOPE_MODALITY",
+        "REJECT_DATA_TIME",
+        "REJECT_GRANT_EXPIRED_AT_DECISION",
+        "REJECT_WEAKER_PURGE",
+        "REJECT_PRODUCER_CAPABILITY",
+        "REJECT_INCOMPLETE_COVERAGE",
+        "REJECT_CORRECTION_LINEAGE",
+        "REJECT_CONTRACT_VERSION",
+        "REJECT_INVALID_SIGNATURE",
+        "REJECT_DIGEST_MISMATCH",
+    } <= set(values)
 
 
 def _mutate(case: str, request: AdmissionRequest, grants: tuple[PermissionGrant, ...],
@@ -366,7 +422,14 @@ def _mutate(case: str, request: AdmissionRequest, grants: tuple[PermissionGrant,
     if case == "rights":
         return request, grants, replace(declarations, rights_evidence_reference="UNKNOWN")
     if case == "coverage":
-        return request, grants, replace(declarations, coverage_verdict="PARTIAL")
+        dimensions = tuple(
+            replace(dimension, verdict=CoverageVerdict.UNKNOWN)
+            if index == 0 else dimension
+            for index, dimension in enumerate(declarations.coverage.dimensions)
+        )
+        return request, grants, replace(
+            declarations, coverage=replace(declarations.coverage, dimensions=dimensions)
+        )
     if case == "pit":
         return request, grants, replace(declarations, pit_as_of_ns=AS_OF_NS + 1)
     if case == "artifacts":
@@ -374,7 +437,10 @@ def _mutate(case: str, request: AdmissionRequest, grants: tuple[PermissionGrant,
     if case == "use":
         return replace(request, requested_actions=(READ_RELEASE,)), grants, declarations
     if case == "retention":
-        changed = replace(request, requested_retention=RetentionPolicy(400, "purge:explicit"))
+        changed = replace(
+            request,
+            requested_retention=RetentionPolicy(Bounded(400), DeleteOnExpiry()),
+        )
         return changed, grants, declarations
     if case == "grants":
         return request, (*grants, replace(grants[0], grant_id="grant:second")), declarations
@@ -384,10 +450,10 @@ def _mutate(case: str, request: AdmissionRequest, grants: tuple[PermissionGrant,
 @pytest.mark.parametrize(("case", "code"), [
     ("schema", RejectionCode.SCHEMA_ENVELOPE),
     ("publisher", RejectionCode.PUBLISHER_IDENTITY),
-    ("signature", RejectionCode.SIGNATURE_INTEGRITY),
+    ("signature", RejectionCode.INVALID_SIGNATURE),
     ("lineage", RejectionCode.SOURCE_LINEAGE),
     ("rights", RejectionCode.RIGHTS_EVIDENCE),
-    ("coverage", RejectionCode.COVERAGE),
+    ("coverage", RejectionCode.INCOMPLETE_COVERAGE),
     ("pit", RejectionCode.PIT_CONSISTENCY),
     ("artifacts", RejectionCode.ARTIFACT_DIGESTS),
     ("use", RejectionCode.USE_SCOPE),
@@ -406,10 +472,60 @@ def test_each_failure_mode_returns_its_typed_code(case: str, code: RejectionCode
     assert decision.code is code
 
 
-def test_admission_decision_is_distinct_from_the_existing_receipt() -> None:
-    """The new decision is a scalar verdict, not an admission receipt for data."""
+def test_evaluate_consumer_use_returns_a_preflight_decision() -> None:
+    """The evaluator returns a named preflight verdict, never a data receipt."""
     decision = _evaluate(_profile_request("reference_lookup"),
                          _profile_grants("reference_lookup"))
+    assert isinstance(decision, PreflightDecision)
     assert not isinstance(decision, AdmissionReceipt)
+    assert decision.kind == "PREFLIGHT_DECISION"
+    assert decision.is_admission_receipt is False
+    assert decision.release_verified is False
     assert decision.code is None
     assert decision.reason == ""
+
+
+@pytest.mark.parametrize(("field", "value", "code"), [
+    ("contract_version", 99, RejectionCode.CONTRACT_VERSION),
+    ("signature_receipt", "UNKNOWN", RejectionCode.INVALID_SIGNATURE),
+    ("manifest_sha256", DIGEST_C, RejectionCode.DIGEST_MISMATCH),
+    ("correction_lineage_reference", "UNKNOWN", RejectionCode.CORRECTION_LINEAGE),
+])
+def test_declaration_codes_are_distinct(field: str, value: object,
+                                        code: RejectionCode) -> None:
+    """Contract, signature, digest and lineage failures name separate codes."""
+    declarations = replace(_declarations(), **{field: value})
+    decision = _evaluate(_profile_request("reference_lookup"),
+                         _profile_grants("reference_lookup"), declarations)
+    assert decision.code is code
+
+
+def test_weaker_purge_and_out_of_scope_codes_are_distinct() -> None:
+    """A weaker purge and an out-of-scope field never collapse into one code."""
+    request = replace(
+        _profile_request("historical_research"),
+        requested_retention=RetentionPolicy(Bounded(30), LegalHold("hold:request")),
+    )
+    stronger = RetentionPolicy(Bounded(90), DeleteOnExpiry())
+    assert _evaluate(request, _grants(request.requested_actions, retention=stronger)).code is (
+        RejectionCode.WEAKER_PURGE
+    )
+    narrow_fields = replace(_request_scope(),
+                            fields=ScopeSet(ScopeState.NAMED, frozenset({"other-field"})))
+    assert _evaluate(
+        _profile_request("historical_research"),
+        _grants(_profile_request("historical_research").requested_actions, scope=narrow_fields),
+    ).code is RejectionCode.OUT_OF_SCOPE_FIELD
+    narrow_modalities = replace(_request_scope(),
+                                modalities=ScopeSet(ScopeState.NAMED, frozenset({"depth"})))
+    assert _evaluate(
+        _profile_request("historical_research"),
+        _grants(_profile_request("historical_research").requested_actions,
+                scope=narrow_modalities),
+    ).code is RejectionCode.OUT_OF_SCOPE_MODALITY
+    late_grant = replace(_grant_scope(), data_time_from_ns=AS_OF_NS + 1,
+                         data_time_to_ns=AS_OF_NS + 2)
+    assert _evaluate(
+        _profile_request("historical_research"),
+        _grants(_profile_request("historical_research").requested_actions, scope=late_grant),
+    ).code is RejectionCode.DATA_TIME

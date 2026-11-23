@@ -10,9 +10,12 @@ so every caller can fail closed with a named reason.
 
 This module is not a complete release verifier. It does not verify detached
 signatures, recompute canonical manifest bytes, check publisher-key validity
-or revocation, or inspect actual data and artifact digests. Full detached
-signature verification is a later implementation stage; passing this gate is
-not a claim that a release signature or source lineage was verified.
+or revocation, compare artifact digests with file bytes, or inspect event
+envelopes. Full detached-signature verification is a later milestone; passing
+this gate is not a claim that a release signature or source lineage was
+verified. It also owns the shared typed retention and per-dimension coverage
+declarations used by the consumer-use evaluator; it performs no consumer use
+evaluation itself.
 """
 from __future__ import annotations
 
@@ -21,6 +24,7 @@ import json
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
@@ -39,8 +43,6 @@ CONSUMER_OPERATIONS: tuple[str, ...] = (
 )
 PERMITTED = "PERMITTED"
 WRITTEN_PERMISSION = "WRITTEN_PERMISSION"
-COVERAGE_PASS = "PASS"
-COVERAGE_COMPLETE = "COMPLETE"
 POINT_IN_TIME_BASIS = "universe_and_corporate_actions"
 AS_OF_BASIS = "knowledge_time"
 DIGEST_ALGORITHM = "sha256"
@@ -57,9 +59,111 @@ ISO_DURATION_RE = re.compile(r"P(?:(\d+)Y)?(?:(\d+)M)?(?:(\d+)W)?(?:(\d+)D)?")
 INTEGER_DAYS_RE = re.compile(r"[1-9]\d*")
 EPOCH = dt.datetime(1970, 1, 1, tzinfo=dt.UTC)
 
+# The nine W2 coverage dimensions. Each is declared and evaluated separately;
+# passing one dimension implies no other, and no aggregate percentage is used.
+COVERAGE_DIMENSIONS: tuple[str, ...] = (
+    "instrument",
+    "listing_identity",
+    "contract",
+    "corporate_action",
+    "calendar",
+    "trades",
+    "quotes_depth",
+    "mbo",
+    "sequence_continuity",
+)
+COVERAGE_APPLICABLE = "APPLICABLE"
+COVERAGE_NOT_APPLICABLE = "NOT_APPLICABLE"
+COVERAGE_DIMENSION_PASS = "PASS"
+COVERAGE_DIMENSION_REJECT = "REJECT"
+COVERAGE_DIMENSION_UNKNOWN = "UNKNOWN"
+
 
 class DatasetAdmissionError(ValueError):
     """The admission record did not satisfy the versioned contract."""
+
+
+class CoverageVerdict(StrEnum):
+    """Per-dimension coverage verdict; no aggregate percentage exists."""
+
+    PASS = COVERAGE_DIMENSION_PASS
+    REJECT = COVERAGE_DIMENSION_REJECT
+    UNKNOWN = COVERAGE_DIMENSION_UNKNOWN
+    NOT_APPLICABLE = COVERAGE_NOT_APPLICABLE
+
+
+@dataclass(frozen=True, slots=True)
+class NoRetention:
+    """Nothing may be retained: a zero-duration policy."""
+
+
+@dataclass(frozen=True, slots=True)
+class Bounded:
+    """A bounded maximum retention duration in whole days."""
+
+    days: int
+
+
+@dataclass(frozen=True, slots=True)
+class Indefinite:
+    """An explicit, unbounded retention duration; never an absent value."""
+
+
+@dataclass(frozen=True, slots=True)
+class DeleteOnExpiry:
+    """Unconditional purge at the retention expiry: the strongest duty."""
+
+
+@dataclass(frozen=True, slots=True)
+class PurgeAfter:
+    """Purge after a named event rather than at an unconditional deadline."""
+
+    event: str
+
+
+@dataclass(frozen=True, slots=True)
+class LegalHold:
+    """Deletion is suspended under a named hold: the weakest purge duty."""
+
+    reference: str
+
+
+@dataclass(frozen=True, slots=True)
+class RetentionPolicy:
+    """An explicit duration bound and purge duty; neither side is optional."""
+
+    duration: NoRetention | Bounded | Indefinite
+    purge: DeleteOnExpiry | PurgeAfter | LegalHold
+
+
+@dataclass(frozen=True, slots=True)
+class CoverageDimensionReport:
+    """One dimension's declared scope, denominator and verdict."""
+
+    dimension: str
+    scope: dict[str, str]
+    denominator_identity: str
+    denominator_value: int
+    as_of_ns: int
+    numerator: int
+    missing_count: int
+    rejected_count: int
+    gaps: tuple[str, ...]
+    verdict: CoverageVerdict
+    evidence_reference: str
+    not_applicable_reason: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class CoverageCertificate:
+    """Nine separately declared dimensions for one scope and as-of instant."""
+
+    certificate_reference: str
+    valid_until: str
+    scope: dict[str, str]
+    universe_id: str
+    as_of_ns: int
+    dimensions: tuple[CoverageDimensionReport, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,6 +239,22 @@ def _positive_int(container: Mapping[str, Any], key: str, field: str) -> int:
     if type(value) is not int or value <= 0:
         raise DatasetAdmissionError(f"{field} must be a positive integer")
     return value
+
+
+def _nonnegative_int(container: Mapping[str, Any], key: str, field: str) -> int:
+    """Require a non-negative integer count."""
+    value = container.get(key)
+    if type(value) is not int or value < 0:
+        raise DatasetAdmissionError(f"{field} must be a non-negative integer")
+    return value
+
+
+def _gap_tuple(container: Mapping[str, Any], dimension: str) -> tuple[str, ...]:
+    """Require named gap references; no silent interpolation of missing records."""
+    value = container.get("gaps")
+    if not isinstance(value, (list, tuple)) or not all(_named_policy_event(item) for item in value):
+        raise DatasetAdmissionError(f"coverage dimension {dimension}.gaps is not a named list")
+    return tuple(value)
 
 
 def _digest(container: Mapping[str, Any], key: str, field: str) -> str:
@@ -239,19 +359,226 @@ def _validate_rights(record: Mapping[str, Any], scope: dict[str, str],
     return reference
 
 
+def retention_covered(requested: RetentionPolicy, granted: RetentionPolicy) -> bool:
+    """Require the requested retention to be contained by the grant.
+
+    A request is covered only when its duration is no longer than the grant's
+    duration and its purge duty is no weaker than the grant's purge duty. A
+    shorter duration with a weaker purge is rejected. Absence is never treated
+    as either NoRetention or Indefinite: both sides must be explicit, typed
+    policies. LegalHold is the weakest duty, PurgeAfter is stronger and
+    DeleteOnExpiry is the strongest.
+    """
+    if not isinstance(requested, RetentionPolicy) or not isinstance(granted, RetentionPolicy):
+        return False
+    if not _duration_contained(requested.duration, granted.duration):
+        return False
+    return _purge_no_weaker(requested.purge, granted.purge)
+
+
+def _duration_contained(requested: object, granted: object) -> bool:
+    """Require a duration no longer than the grant; None is not a wildcard."""
+    if isinstance(granted, Indefinite):
+        return isinstance(requested, (NoRetention, Bounded, Indefinite))
+    if isinstance(granted, Bounded):
+        if isinstance(requested, NoRetention):
+            return True
+        return isinstance(requested, Bounded) and 0 < requested.days <= granted.days
+    if isinstance(granted, NoRetention):
+        return isinstance(requested, NoRetention)
+    return False
+
+
+def _purge_rank(purge: object) -> int | None:
+    """Return purge-duty strength: DeleteOnExpiry > PurgeAfter > LegalHold."""
+    if isinstance(purge, DeleteOnExpiry):
+        return 2
+    if isinstance(purge, PurgeAfter):
+        return 1 if _named_policy_event(purge.event) else None
+    if isinstance(purge, LegalHold):
+        return 0 if _named_policy_event(purge.reference) else None
+    return None
+
+
+def _named_policy_event(value: object) -> bool:
+    """Require a named event or hold reference with no placeholder token."""
+    return isinstance(value, str) and bool(value.strip()) and PLACEHOLDER_RE.search(value) is None
+
+
+def _purge_no_weaker(requested: object, granted: object) -> bool:
+    """Require the requested purge duty to be as strong as or stronger than the grant."""
+    requested_rank = _purge_rank(requested)
+    granted_rank = _purge_rank(granted)
+    return requested_rank is not None and granted_rank is not None and (
+        requested_rank >= granted_rank
+    )
+
+
 def _validate_coverage(record: Mapping[str, Any], scope: dict[str, str],
                        universe_id: str, as_of_ns: int, as_of_date: dt.date) -> str:
-    """Require a passing coverage certificate bound to the same declared scope."""
+    """Require nine per-dimension reports bound to the same declared scope."""
     coverage = _object(record.get("coverage"), "coverage")
-    _enum(coverage, "verdict", "coverage.verdict", COVERAGE_PASS)
-    _enum(coverage, "completeness", "coverage.completeness", COVERAGE_COMPLETE)
     certificate = _text(coverage, "certificate_reference", "coverage.certificate_reference")
     _validity_date(coverage, "valid_until", "coverage.valid_until", as_of_date,
                    required=True)
     _match(_scope(coverage.get("scope"), "coverage.scope"), scope, "coverage scope")
     _match(coverage.get("universe_id"), universe_id, "coverage universe_id")
     _match(coverage.get("as_of_ns"), as_of_ns, "coverage as_of_ns")
+    check_dimension_coverage(coverage, scope, universe_id, as_of_ns)
     return certificate
+
+
+def check_dimension_coverage(
+    coverage: Mapping[str, Any], scope: dict[str, str], universe_id: str, as_of_ns: int
+) -> tuple[CoverageDimensionReport, ...]:
+    """Validate the nine W2 coverage dimensions without an aggregate verdict.
+
+    Each applicable dimension must declare scope, denominator identity and
+    value, as-of, numerator, missing count, rejected count, gaps, verdict and
+    evidence reference. N/A must state a reason. An absent or inconsistent
+    denominator yields REJECT/UNKNOWN, never PASS. A single verdict or
+    percentage for several dimensions is refused; a dimension missing from the
+    declaration is refused.
+    """
+    legacy = tuple(key for key in ("verdict", "completeness", "percentage")
+                   if key in coverage)
+    if legacy:
+        raise DatasetAdmissionError(
+            "coverage must declare nine dimensions, not an aggregate " + legacy[0]
+        )
+    reports_value = coverage.get("dimensions")
+    if not isinstance(reports_value, (list, tuple)) or not reports_value:
+        raise DatasetAdmissionError("coverage.dimensions is missing")
+    reports: list[CoverageDimensionReport] = []
+    for item in reports_value:
+        reports.append(_coverage_dimension(item, scope, universe_id, as_of_ns))
+    _validate_reports(tuple(reports), scope, universe_id, as_of_ns)
+    return tuple(reports)
+
+
+def validate_coverage_certificate(certificate: CoverageCertificate,
+                                  scope: dict[str, str], universe_id: str,
+                                  as_of_ns: int) -> None:
+    """Validate a typed coverage certificate bound to one scope and as-of."""
+    if not isinstance(certificate, CoverageCertificate):
+        raise DatasetAdmissionError("coverage certificate is not a typed certificate")
+    if not _named_policy_event(certificate.certificate_reference):
+        raise DatasetAdmissionError("coverage.certificate_reference is not named")
+    _match(_scope(certificate.scope, "coverage.scope"), scope, "coverage scope")
+    _match(certificate.universe_id, universe_id, "coverage universe_id")
+    _match(certificate.as_of_ns, as_of_ns, "coverage as_of_ns")
+    _validate_reports(certificate.dimensions, scope, universe_id, as_of_ns)
+
+
+def _validate_reports(reports: tuple[CoverageDimensionReport, ...],
+                      scope: dict[str, str], universe_id: str, as_of_ns: int) -> None:
+    """Check nine dimension reports without using an aggregate verdict."""
+    names = tuple(report.dimension for report in reports)
+    if len(set(names)) != len(names) or set(names) != set(COVERAGE_DIMENSIONS):
+        raise DatasetAdmissionError(
+            "coverage.dimensions must name each of the nine W2 dimensions exactly once"
+        )
+    for report in reports:
+        if report.verdict is CoverageVerdict.NOT_APPLICABLE:
+            if not _named_policy_event(report.not_applicable_reason):
+                raise DatasetAdmissionError(
+                    f"coverage dimension {report.dimension} has no N/A reason"
+                )
+            continue
+        if report.verdict is not CoverageVerdict.PASS:
+            raise DatasetAdmissionError(
+                f"coverage dimension {report.dimension}.verdict is {report.verdict.value}"
+            )
+        if not _named_policy_event(report.evidence_reference):
+            raise DatasetAdmissionError(
+                f"coverage dimension {report.dimension} has no evidence reference"
+            )
+        if _scope(report.scope, f"coverage dimension {report.dimension}.scope") != scope:
+            raise DatasetAdmissionError(f"coverage dimension {report.dimension} scope differs")
+        if report.as_of_ns != as_of_ns:
+            raise DatasetAdmissionError(f"coverage dimension {report.dimension} as_of_ns differs")
+        if (
+            report.denominator_value <= 0
+            or report.numerator < 0
+            or report.numerator > report.denominator_value
+            or report.missing_count < 0
+            or report.rejected_count < 0
+            or report.numerator + report.missing_count + report.rejected_count
+            != report.denominator_value
+        ):
+            raise DatasetAdmissionError(
+                f"coverage dimension {report.dimension} has an inconsistent denominator"
+            )
+
+
+def _coverage_dimension(value: object, scope: dict[str, str], universe_id: str,
+                        as_of_ns: int) -> CoverageDimensionReport:
+    """Build one validated coverage-dimension report."""
+    item = _object(value, "coverage dimension")
+    dimension = item.get("dimension")
+    if dimension not in COVERAGE_DIMENSIONS:
+        raise DatasetAdmissionError(f"unknown coverage dimension: {dimension!r}")
+    declared = item.get("applicability")
+    if declared not in (COVERAGE_APPLICABLE, COVERAGE_NOT_APPLICABLE):
+        raise DatasetAdmissionError(f"coverage dimension {dimension} has no applicability")
+    if declared == COVERAGE_NOT_APPLICABLE:
+        reason = _text(item, "not_applicable_reason",
+                       f"coverage dimension {dimension}.not_applicable_reason")
+        return CoverageDimensionReport(
+            dimension=dimension,
+            scope={},
+            denominator_identity="",
+            denominator_value=0,
+            as_of_ns=0,
+            numerator=0,
+            missing_count=0,
+            rejected_count=0,
+            gaps=(),
+            verdict=CoverageVerdict.NOT_APPLICABLE,
+            evidence_reference="",
+            not_applicable_reason=reason,
+        )
+    _match(_scope(item.get("scope"), f"coverage dimension {dimension}.scope"), scope,
+           f"coverage dimension {dimension} scope")
+    denominator_value = _positive_int(item, "denominator_value",
+                                      f"coverage dimension {dimension}.denominator_value")
+    numerator = _nonnegative_int(item, "numerator",
+                                 f"coverage dimension {dimension}.numerator")
+    missing = _nonnegative_int(item, "missing_count",
+                               f"coverage dimension {dimension}.missing_count")
+    rejected = _nonnegative_int(item, "rejected_count",
+                                f"coverage dimension {dimension}.rejected_count")
+    verdict_value = item.get("verdict")
+    try:
+        verdict = CoverageVerdict(verdict_value)
+    except ValueError as exc:
+        raise DatasetAdmissionError(
+            f"coverage dimension {dimension}.verdict is invalid"
+        ) from exc
+    if verdict is CoverageVerdict.NOT_APPLICABLE:
+        raise DatasetAdmissionError(
+            f"coverage dimension {dimension} is applicable but declared N/A"
+        )
+    gaps = _gap_tuple(item, dimension)
+    dimension_scope = _scope(item.get("scope"), f"coverage dimension {dimension}.scope")
+    dimension_as_of = _positive_int(item, "as_of_ns", f"coverage dimension {dimension}.as_of_ns")
+    _match(dimension_as_of, as_of_ns, f"coverage dimension {dimension} as_of_ns")
+    return CoverageDimensionReport(
+        dimension=dimension,
+        scope=dimension_scope,
+        denominator_identity=_text(item, "denominator_identity",
+                                   f"coverage dimension {dimension}.denominator_identity"),
+        denominator_value=denominator_value,
+        as_of_ns=dimension_as_of,
+        numerator=numerator,
+        missing_count=missing,
+        rejected_count=rejected,
+        gaps=gaps,
+        verdict=verdict,
+        evidence_reference=_text(item, "evidence_reference",
+                                 f"coverage dimension {dimension}.evidence_reference"),
+        not_applicable_reason=None,
+    )
 
 
 def _validate_release(record: Mapping[str, Any], dataset_id: str, dataset_version: str,
