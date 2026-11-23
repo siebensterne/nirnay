@@ -14,7 +14,7 @@
 #   tools           install the pinned Python tools
 # See README "Quick start" for dependency setup and gate scope.
 
-.PHONY: help ci assure check check-static lint test perf bench-ingress bench-research bench-experiments bench-latency bench-risk-oms docs-check shellcheck-check generated-paths-check pollution-check style rust-style source-style python-ruff-style q-style prose-style references-check standards-check style-gate python-format-check rust-test python-test python-check cpp-test cpp-format-check schema-check fundamental-fixture-check verify-local fmt constraints sbom supply-chain wheels packaging-test bundle bundle-verify git-policy kdb-analyze kdb-golden kdb-q-test archive-verify tools
+.PHONY: help ci assure check check-static lint test perf bench-ingress bench-research bench-experiments bench-latency bench-risk-oms docs-check shellcheck-check generated-paths-check pollution-check style rust-style source-style python-ruff-style q-style prose-style references-check standards-check style-gate python-format-check rust-test python-test python-check cpp-test cpp-format-check schema-check verify-local fmt constraints sbom supply-chain wheels packaging-test bundle bundle-verify git-policy kdb-analyze archive-verify tools
 
 help:
 	@echo "check           full gate: static checks, Rust/Python tests, contracts"
@@ -37,7 +37,6 @@ assure:
 check: check-static
 	$(MAKE) rust-test
 	$(MAKE) schema-check
-	$(MAKE) fundamental-fixture-check
 	$(MAKE) python-test
 check-static:
 	$(MAKE) docs-check
@@ -126,7 +125,8 @@ bench-latency:
 	PYTHONPATH=research/python/src python3 -m quantlab.bench --suite latency --repeats 5 --size 800 --seed 7
 
 bench-risk-oms:
-	cargo test -p risk-authority --test performance --features market-shaped-tests -- --ignored --nocapture
+# D11 retired the synthetic risk-authority throughput workload; only the
+# opt-in authoritative-oms measurement remains.
 	cargo test -p authoritative-oms --test performance --features market-shaped-tests -- --ignored --nocapture
 
 rust-test:
@@ -141,11 +141,6 @@ python-check:
 	python3 scripts/check_repo.py check
 schema-check:
 	python3 scripts/validate_contracts.py
-fundamental-fixture-check:
-	python3 scripts/check_fundamental_contract_vectors.py --self-test
-	python3 scripts/check_fundamental_contract_vectors.py
-	cargo run --locked -p fundamental-tools --bin nirnay-fundamental -- validate-facts --input research/fundamentals/fixtures/financial-facts.example.jsonl
-	cargo run --locked -p fundamental-tools --bin nirnay-fundamental -- validate-companies --input research/fundamentals/fixtures/company-identities.example.jsonl
 constraints:
 	uv pip compile research/python/pyproject.toml --extra dev --extra research --extra security \
 		--python-version 3.12 --no-emit-package nirnay-quantlab -o constraints/python-research.txt
@@ -189,26 +184,16 @@ cpp-format-check:
 	@for f in $(CPP_SOURCES); do $(CLANG_FORMAT) --style=file --dry-run --Werror "$$f" || exit 1; done
 verify-local: python-test python-check schema-check cpp-test
 
-# KDB-X analytics: owner-local, read-only. Requires a locally installed q;
-# the Rust golden tests in `make check` validate the same contract without q.
+
+# KDB-X analytics: owner-local, read-only. Requires a locally installed q.
+# D11 retired the synthetic golden corpus and its regeneration/verification
+# commands; only the analyze command on an explicitly supplied input remains.
 KDB_INPUT ?= .local/perf/kdb/book.csv
 KDB_SOURCE ?= upstox-live
 KDB_OUT ?= .local/perf/kdb-lab-run
 
 kdb-analyze:
 	cargo run --locked -p kdb-lab --bin nirnay-kdb -- analyze --input $(KDB_INPUT) --source $(KDB_SOURCE) --out $(KDB_OUT)
-
-kdb-golden:
-	cargo run --locked -p kdb-lab --bin nirnay-kdb -- check-golden
-
-# In-process q unit tests of the checked-in library (k4unit CSV model).
-Q_BIN ?= /Users/tourist/.kx/bin/q
-KDB_Q_DIR ?= analytics/kdb
-kdb-q-test:
-	$(Q_BIN) $(KDB_Q_DIR)/mbp-test.q \
-	  $(abspath apps/kdb-lab/tests/golden/mbp-observation-v1.csv) \
-	  $(abspath $(KDB_Q_DIR)/tests/empty.csv) \
-	  $(abspath $(KDB_Q_DIR)/tests/mbp-unit.csv)
 
 # Verify a full archive's source commit is recoverable from its Git bundle.
 ARCHIVE ?= /Users/tourist/Documents/nirnay-full-2026-11-20.zip

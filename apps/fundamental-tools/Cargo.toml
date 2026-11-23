@@ -31,8 +31,7 @@ tempfile.workspace = true
 [lints]
 workspace = true
 
-# Integration targets are declared explicitly under the test policy.
+# Retained after D11: pure contract-vector and arbitrary-byte checks.
 [[test]]
 name = "contract"
 path = "tests/contract.rs"
-required-features = ["market-shaped-tests"]

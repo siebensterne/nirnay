@@ -33,7 +33,7 @@ These predecessor assets are already active and must not be re-imported from
 |---|---|---|
 | Upstox V3 Protobuf schema/decoder and provider protocol work | `schemas/upstox/v3/`, `crates/upstox-feed-proto/`, `apps/upstox-tools/` | Active decoder plus `upstox-decode-export`; capture sequence remains local, not exchange sequence. |
 | India instrument listing and corporate-action concepts | `research/python/src/quantlab/point_in_time.py`, `schemas/research/` | Bitemporal listing and universe-membership records, immutable action revisions, exact split/bonus ratios and source-hash lineage. Not a complete official historical-security master. |
-| C++ fixed-point arithmetic and aggregated market-book components | `verification/cpp-oracle/` | Promoted to an independent verification-only C++20 target; not wired into production Rust or a broker path. |
+| C++ fixed-point arithmetic | `verification/cpp-oracle/` | Independent verification-only C++20 target; D11 retired the market-book/oracle sources; not wired into production Rust or a broker path. |
 | Architecture, verification and provenance conventions | `engineering/` docs, `scripts/check_repo.py`, active contracts | Selective concepts rewritten against active module boundaries; predecessor JSON registries were not copied wholesale. |
 
 ## Retained under `.local/extras/`
@@ -45,10 +45,12 @@ These predecessor assets are already active and must not be re-imported from
   (49 tests): parser/reconciliation and crash/restart/backup acceptance suites.
 - `engineering/reference-store-contract.json`: frozen verification groups
   referenced by the durable-store suite.
-- `cpp/`: SBE decoder and Rust/C++ conformance probes. Shared fixed-point and
-  order-book sources come from `verification/cpp-oracle/`; CTest passes 1/1.
-- `tests/fixtures/`, `tests/golden/`, `fixtures/india/`, `schemas/challenge/`,
-  `schemas/internal/`: synthetic differential/SBE fixtures and contracts.
+- `cpp/`: SBE decoder and Rust/C++ conformance probes. Shared pure numeric
+  sources come from `verification/cpp-oracle/`; the market-book sources were
+  retired under D11.
+- `tests/fixtures/`, `tests/golden/`, `schemas/challenge/`, `schemas/internal/`:
+  historical synthetic differential/SBE fixtures and contracts; active root
+  `fixtures/india/` was retired under D11.
 - `scripts/conformance.py`, `rust/`: reference harnesses. The Rust drivers still
   target the archived monolith types and need porting before use.
 - `README.md`, `README.upstream.archive`, `UPSTREAM-ARCHIVE.txt`, `LICENSE`,

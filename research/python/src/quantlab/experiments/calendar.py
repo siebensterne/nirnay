@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Checked-in calendar artifacts and expected bar schedules.
 
-Calendar reference data is resolved from small JSON artifacts under
-``research/python/fixtures/calendars``. No database, provider service, network
+Calendar reference data is supplied by the caller as a JSON artifact.
+No database, provider service, network
 call or clock is used. An artifact declares its own identity, digest inputs,
 bar family, session windows, auction treatment, scheduled breaks, early closes
 and holidays. ``resolve_calendar`` fails closed on an unknown identifier, a

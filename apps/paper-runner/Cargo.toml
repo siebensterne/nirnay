@@ -33,13 +33,7 @@ tempfile.workspace = true
 [lints]
 workspace = true
 
-# Integration targets are declared explicitly under the test policy.
+# D11: retained manifest-boundary audit checks; recovery drill retired.
 [[test]]
 name = "certification"
 path = "tests/certification.rs"
-required-features = ["market-shaped-tests"]
-
-[[test]]
-name = "recovery_drill"
-path = "tests/recovery_drill.rs"
-required-features = ["market-shaped-tests"]

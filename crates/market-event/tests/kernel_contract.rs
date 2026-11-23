@@ -429,31 +429,6 @@ fn recovery_requires_current_epoch_authority() {
     );
 }
 
-/// The repository's schema gate validates a checked-in golden produced from
-/// this crate's derived-event output. This test proves the live output matches
-/// that golden, so the Rust contract and v1 wire schema cannot drift silently
-/// without the schema job failing.
-#[test]
-fn derived_event_matches_schema_validated_golden() {
-    let base = event(b"payload", 1, 1_700_000_000_000_000_000)
-        .resolve_instrument("IN:TEST", Some("NSE".to_owned()), "revision-a")
-        .expect("resolved");
-    let derived = base
-        .derived_business_event("last_trade_observation", "trade_tuple_advanced")
-        .expect("derived");
-    let live: serde_json::Value =
-        serde_json::from_str(&serde_json::to_string(&derived).expect("serialize derived event"))
-            .expect("parse live event");
-    let golden: serde_json::Value =
-        serde_json::from_str(include_str!("golden/derived-event-v1.json"))
-            .expect("parse golden vector");
-    let expected = golden.get("instance").expect("golden instance");
-    assert_eq!(
-        live, *expected,
-        "derived event matches the schema-validated golden"
-    );
-}
-
 /// A recovered-quality event without evidence fails invariant validation.
 #[test]
 fn recovered_quality_requires_evidence() {
@@ -463,19 +438,4 @@ fn recovered_quality_requires_evidence() {
         forged.validate_invariants().is_err(),
         "recovered quality without evidence is rejected"
     );
-}
-
-#[test]
-#[ignore = "golden generator - run once to refresh checked-in vector"]
-fn emit_schema_golden() {
-    let base = event(b"payload", 1, 1_700_000_000_000_000_000)
-        .resolve_instrument("IN:TEST", Some("NSE".to_owned()), "revision-a")
-        .expect("resolved");
-    let derived = base
-        .derived_business_event("last_trade_observation", "trade_tuple_advanced")
-        .expect("derived");
-    let json = serde_json::to_string(&derived).expect("serialize derived event");
-    let path =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden/derived-event-v1.json");
-    std::fs::write(path, format!("{json}\n")).expect("write golden");
 }

@@ -5,12 +5,7 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 publish.workspace = true
-description = "Checked-in KDB-X analytics contract, runner and deterministic golden harness"
-
-[features]
-# Opt-in only: market-shaped test source and gated integration targets.
-# Never enabled by default or by any gate command. See the test-policy record.
-market-shaped-tests = []
+description = "Checked-in KDB-X analytics contract and runner"
 
 [[bin]]
 name = "nirnay-kdb"
@@ -26,8 +21,4 @@ sha2.workspace = true
 [lints]
 workspace = true
 
-# Integration targets are declared explicitly under the test policy.
-[[test]]
-name = "q_replay"
-path = "tests/q_replay.rs"
-required-features = ["market-shaped-tests"]
+# D11 retired the golden-replay integration target; no market-shaped target remains.

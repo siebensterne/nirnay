@@ -35,33 +35,4 @@ tempfile.workspace = true
 [lints]
 workspace = true
 
-# Integration targets are declared explicitly under the test policy.
-[[test]]
-name = "capsule"
-path = "tests/capsule.rs"
-required-features = ["market-shaped-tests"]
-
-[[test]]
-name = "engine"
-path = "tests/engine.rs"
-required-features = ["market-shaped-tests"]
-
-[[test]]
-name = "liquidity"
-path = "tests/liquidity.rs"
-required-features = ["market-shaped-tests"]
-
-[[test]]
-name = "paper_run"
-path = "tests/paper_run.rs"
-required-features = ["market-shaped-tests"]
-
-[[test]]
-name = "provenance"
-path = "tests/provenance.rs"
-required-features = ["market-shaped-tests"]
-
-[[test]]
-name = "venue_matching"
-path = "tests/venue_matching.rs"
-required-features = ["market-shaped-tests"]
+# D11 retired every market-shaped integration target in this crate.

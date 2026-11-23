@@ -6,8 +6,6 @@
 //! reproduce it byte for byte, otherwise a persisted format or wire contract
 //! has silently changed.
 
-#[cfg(feature = "market-shaped-tests")]
-use india_domain::InstrumentWire;
 use jiff::{SignedDuration, Timestamp, civil::Date};
 
 fn ts(nanos: i32) -> Timestamp {
@@ -155,15 +153,8 @@ fn timestamp_as_nanosecond_overflow_fails_closed() {
     assert!(i64::try_from(Timestamp::MIN.as_nanosecond()).is_err());
 }
 
-#[cfg(feature = "market-shaped-tests")]
 #[test]
-fn replay_and_persisted_metadata_decode_identically() {
-    // A real repo fixture: its date fields must decode to the same strings.
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/india/");
-    let text = std::fs::read_to_string(format!("{path}nse_cash_equity.json")).unwrap();
-    let wire: InstrumentWire = serde_json::from_str(&text).unwrap();
-    assert_eq!(wire.listings[0].effective_from.to_string(), "2020-01-01");
-
+fn persisted_metadata_decodes_identically() {
     // Persisted metadata encoded by chrono must round-trip byte for byte.
     let baseline = r#"{"trade_date":"2026-11-17","recorded_at":"2025-11-17T08:00:00.123456789Z"}"#;
     let decoded: serde_json::Value = serde_json::from_str(baseline).unwrap();

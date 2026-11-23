@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Byte-level Rust/C++ differential for the shared numeric and book corpus.
+"""Byte-level Rust/C++ differential for the pure numeric corpus.
 
 Both drivers receive the exact same corpus bytes from one in-memory read. For
 each file the check compares stdout byte for byte and the exit-status class
 (success versus failure). A missing driver, missing corpus or any mismatch
 fails closed. No numeric tolerance is applied: the contracts specify exact
-equality.
+equality. D11 retired the order-book corpus; only pure numeric vectors remain.
 
 Run with explicit driver paths so the gate cannot silently select a stale
 binary from a previous build.
@@ -20,19 +20,11 @@ import subprocess
 import sys
 from pathlib import Path
 
-BOOK_FILES = (
-    "basic.txt",
-    "ordering.txt",
-    "boundaries.txt",
-    "replay.txt",
-    "invalid_overflow.txt",
-    "invalid_negative.txt",
-    "invalid_op.txt",
-)
 NUMERIC_FILES = ("parse.txt", "format.txt", "rescale.txt", "invalid.txt")
 
 
 def run_driver(binary: str, payload: bytes) -> tuple[int, bytes]:
+    """Run one driver on the payload and return its exit code and stdout."""
     result = subprocess.run(
         [binary],
         input=payload,
@@ -43,8 +35,12 @@ def run_driver(binary: str, payload: bytes) -> tuple[int, bytes]:
     return result.returncode, result.stdout
 
 
-def compare(corpus: Path, pairs: tuple[tuple[str, str, str, tuple[str, ...]], ...]) -> dict:
-    report: dict = {"schema_version": 1, "cases": {}, "gate_passed": True}
+def compare(
+    corpus: Path,
+    pairs: tuple[tuple[str, str, str, tuple[str, ...]], ...],
+) -> dict:
+    """Compare each corpus file byte for byte between the two drivers."""
+    report: dict = {"schema_version": 2, "cases": {}, "gate_passed": True}
     for label, cpp_binary, rust_binary, names in pairs:
         for binary in (cpp_binary, rust_binary):
             if not Path(binary).is_file():
@@ -79,14 +75,11 @@ def compare(corpus: Path, pairs: tuple[tuple[str, str, str, tuple[str, ...]], ..
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--corpus", required=True, type=Path)
-    parser.add_argument("--cpp-book", required=True)
-    parser.add_argument("--rust-book", required=True)
     parser.add_argument("--cpp-numeric", required=True)
     parser.add_argument("--rust-numeric", required=True)
     parser.add_argument("--report", type=Path)
     args = parser.parse_args()
     pairs = (
-        ("book", args.cpp_book, args.rust_book, BOOK_FILES),
         ("numeric", args.cpp_numeric, args.rust_numeric, NUMERIC_FILES),
     )
     try:

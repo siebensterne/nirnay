@@ -403,68 +403,6 @@ mod tests {
     }
 
     #[test]
-    fn captured_fixtures_decode_and_match_hashes() {
-        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let fixture = manifest_dir.join("tests/fixtures/market-data-feed-v3.jsonl");
-        let content = std::fs::read_to_string(&fixture).expect("read fixture");
-        let lines: Vec<&str> = content.lines().filter(|l| !l.is_empty()).collect();
-        assert_eq!(lines.len(), 2);
-
-        // Frame 1 (seq 1, 177B, 6d57b9…): MarketInfo, no feeds.
-        let v1: serde_json::Value = serde_json::from_str(lines[0]).expect("fixture is json");
-        let seq1 = v1["sequence"].as_u64().expect("seq");
-        let bytes1 = base64_decode(v1["payload_base64"].as_str().expect("b64"));
-        assert_eq!(seq1, 1);
-        assert_eq!(bytes1.len(), v1["byte_len"].as_u64().expect("len") as usize);
-        assert_eq!(
-            sha256_hex(&bytes1),
-            v1["sha256"].as_str().expect("sha").to_owned()
-        );
-        let diag1 = decode_feed_response_diagnostic(&bytes1)
-            .unwrap_or_else(|_| panic!("frame seq={seq1} must decode as diagnostic"));
-        assert_eq!(diag1.response_type_raw, 2);
-        assert_eq!(diag1.response_type, FeedResponseType::MarketInfo);
-        assert!(diag1.has_market_info);
-        assert!(diag1.feeds.is_empty());
-        assert!(diag1.feed_keys.is_empty());
-        let raw1 = decode_feed_response(&bytes1).expect("frame seq=1 raw decode");
-        let info = raw1.market_info.expect("frame seq=1 market info present");
-        assert_eq!(info.segment_status.len(), 13);
-        assert!(info.segment_status.contains_key("NSE_EQ"));
-        assert!(info.segment_status.contains_key("NSE_INDEX"));
-
-        // Frame 2 (seq 2, 61B, 6d9ae6…): InitialFeed with one LTPC.
-        let v2: serde_json::Value = serde_json::from_str(lines[1]).expect("fixture is json");
-        let seq2 = v2["sequence"].as_u64().expect("seq");
-        let bytes2 = base64_decode(v2["payload_base64"].as_str().expect("b64"));
-        assert_eq!(seq2, 2);
-        assert_eq!(bytes2.len(), v2["byte_len"].as_u64().expect("len") as usize);
-        assert_eq!(
-            sha256_hex(&bytes2),
-            v2["sha256"].as_str().expect("sha").to_owned()
-        );
-        let diag2 = decode_feed_response_diagnostic(&bytes2)
-            .unwrap_or_else(|_| panic!("frame seq={seq2} must decode as diagnostic"));
-        assert_eq!(diag2.response_type_raw, 0);
-        assert_eq!(diag2.response_type, FeedResponseType::InitialFeed);
-        assert!(!diag2.has_market_info);
-        assert_eq!(diag2.feed_keys, vec!["NSE_EQ|INE848E01016".to_owned()]);
-        assert_eq!(diag2.feeds.len(), 1);
-        assert_eq!(diag2.feeds[0].kind, FeedKind::Ltpc);
-        assert_eq!(diag2.feeds[0].request_mode_raw, 0);
-        let raw2 = decode_feed_response(&bytes2).expect("frame seq=2 raw decode");
-        match &raw2.feeds["NSE_EQ|INE848E01016"].feed_union {
-            Some(FeedUnion::Ltpc(ltpc)) => {
-                assert_eq!(ltpc.ltp, 80.39);
-                assert_eq!(ltpc.ltq, 10);
-                assert_eq!(ltpc.ltt, 1794219944214);
-                assert!(ltpc.iep.is_none());
-            }
-            _ => std::panic!("frame seq=2 must be Ltpc"),
-        }
-    }
-
-    #[test]
     fn schema_hash_matches_source_record() {
         let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let workspace = manifest_dir
@@ -492,10 +430,5 @@ mod tests {
             hex.push_str(&format!("{byte:02x}"));
         }
         hex
-    }
-
-    fn base64_decode(input: &str) -> Vec<u8> {
-        use base64::{Engine as _, engine::general_purpose::STANDARD};
-        STANDARD.decode(input).expect("base64 decode")
     }
 }

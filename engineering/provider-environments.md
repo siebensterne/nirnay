@@ -143,9 +143,8 @@ is `analytics/kdb/mbp_metrics.q`; the repo-native harness is `apps/kdb-lab`
 It validates the header-prefixed CSV input, runs q with absolute paths, parses
 the typed `metric,value` output, and writes `metrics.csv` plus a digest-bearing
 `report.json` (schema `schemas/analytics/kdb-metrics-report.v1.schema.json`).
-`make kdb-golden` replays the checked-in synthetic golden with a real q and
-requires byte-identical output; the same golden is checked numerically by
-Rust tests in normal `make check`, so CI does not need q installed.
+D11 retired the synthetic golden corpus, its `check-golden` command and the
+golden-dependent tests; only analysis of an explicitly supplied input remains.
 
 The q contract accepts one source at a time and never merges books. Price and
 spread metrics use the input price unit (rupees as exported by

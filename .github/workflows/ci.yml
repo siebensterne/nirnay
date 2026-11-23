@@ -328,7 +328,7 @@ jobs:
           python scripts/check_wheels.py --dist dist
 
   numeric-differential:
-    name: Numeric and book Rust/C++ differential
+    name: Pure numeric Rust/C++ differential
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -343,14 +343,12 @@ jobs:
           cmake -S verification/cpp-oracle -B build/diff-oracle \
             -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=g++
           cmake --build build/diff-oracle --parallel 2
-      - name: Build Rust conformance drivers
-        run: cargo build -p market-book -p market-types --bins --locked
+      - name: Build Rust conformance driver
+        run: cargo build -p market-types --bin numeric_driver --locked
       - name: Compare canonical outputs byte for byte
         run: |
           python3 scripts/check_numeric_differential.py \
             --corpus verification/corpus \
-            --cpp-book build/diff-oracle/nirnay_book_driver \
-            --rust-book target/debug/book_driver \
             --cpp-numeric build/diff-oracle/nirnay_numeric_driver \
             --rust-numeric target/debug/numeric_driver \
             --report build/diff-oracle/differential-report.json

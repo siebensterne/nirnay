@@ -109,10 +109,11 @@ the summary.
 ## 7. Verification plan
 
 The repository's existing Rust format/check/test/Clippy, architecture, schema, source-style and CI
-jobs apply. `make fundamental-fixture-check` validates deterministic committed fixtures through
-the built CLI. CI executes that command after workspace tests. Independent verification must
-record the exact commit, Rust toolchain, target, commands, exit statuses and test counts; a status
-field in JSON is not evidence.
+jobs apply. The synthetic fundamental fixture files and the `make fundamental-fixture-check`
+target were retired under D11; `scripts/check_fundamental_contract_vectors.py` and the Rust
+contract-vector tests continue to validate deterministic schema vectors through the domain
+validator. Independent verification must record the exact commit, Rust toolchain, target,
+commands, exit statuses and test counts; a status field in JSON is not evidence.
 
 ## 8. Future decisions
 
