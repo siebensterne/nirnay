@@ -1,13 +1,23 @@
 # Test retirement record — Nirnay — 2026-11-23
 
-**Status:** executed under owner directive D11 and the RRP-002 gate. This is a new dated record; historical W1.1/W1.2 and 2026-11-23 policy counts and digests are preserved unchanged. No provider was contacted, no right was changed, no experiment was run, no synthetic replacement data was created and no Git history was rewritten. No commit was created in this worktree.
+**Status:** executed under owner directive D11 and the RRP-002 gate. This is a new dated record;
+historical W1.1/W1.2 and 2026-11-23 policy counts and digests are preserved unchanged. No
+provider was contacted, no right was changed, no experiment was run, no synthetic replacement
+data was created and no Git history was rewritten. No commit was created in this worktree.
 
 ## Scope and base
 
-- Repository: `nirnay`; worktree branch `chore/rrp-002`; reviewed base `f6842d2b6438c657c4d4eaec8edb3920193d2181`.
-- Authority: `engineering/retirement/RRP-001.md` (D11), `RETIREMENT-ACCEPTANCE.md` (RRP-002), `NIRNAY-RETIREMENT-MANIFEST.csv`, `DEPENDENCY-CROSSWALK.csv`.
-- All 76 manifest rows were hash- and size-verified against the reviewed base before removal. Every one of the 58 `DELETE` rows was removed individually with `git rm`; blobs and history are preserved. The 4 `KEEP` pure numeric corpus files and the 14 `CONDITIONAL` test files were retained in the tree.
-- Source-ingestion and raw-archive paths (`india-reference`, `market-archive`, `upstox-tools`, `fyers-importer`, `fyers-recorder`, `upstox-feed-proto` decoder source) are untouched. They belong to the RRP-004 freeze/migrate gate, not to RRP-002.
+- Repository: `nirnay`; worktree branch `chore/rrp-002`; reviewed base
+`f6842d2b6438c657c4d4eaec8edb3920193d2181`.
+- Authority: `engineering/retirement/RRP-001.md` (D11), `RETIREMENT-ACCEPTANCE.md` (RRP-002),
+`NIRNAY-RETIREMENT-MANIFEST.csv`, `DEPENDENCY-CROSSWALK.csv`.
+- All 76 manifest rows were hash- and size-verified against the reviewed base before removal.
+Every one of the 58 `DELETE` rows was removed individually with `git rm`; blobs and history are
+preserved. The 4 `KEEP` pure numeric corpus files and the 14 `CONDITIONAL` test files were
+retained in the tree.
+- Source-ingestion and raw-archive paths (`india-reference`, `market-archive`, `upstox-tools`,
+`fyers-importer`, `fyers-recorder`, `upstox-feed-proto` decoder source) are untouched. They
+belong to the RRP-004 freeze/migrate gate, not to RRP-002.
 
 ## Removed paths (per-row path, SHA-256, size at reviewed head)
 
@@ -26,7 +36,8 @@
 | D11-H order-book verification corpus | 7 |
 | **Total** | **58** |
 
-Each row below carries the exact manifest path, SHA-256 of the reviewed bytes and byte size. The CSV itself is the hash record outside the active tree; this record repeats it for review.
+Each row below carries the exact manifest path, SHA-256 of the reviewed bytes and byte size. The
+CSV itself is the hash record outside the active tree; this record repeats it for review.
 
 | Path | SHA-256 | Size (bytes) |
 |---|---|---:|
@@ -91,38 +102,78 @@ Each row below carries the exact manifest path, SHA-256 of the reviewed bytes an
 
 ## Additional retired test source (not a manifest path)
 
-- `crates/market-book/src/bin/book_driver.rs` — market-shaped order-book differential driver, removed when the book corpus and C++ market-state oracle left the tree.
-- `apps/kdb-lab/tests/q_replay.rs` — golden-replay integration target; its only test replayed a synthetic market golden.
-- `research/python/tests/test_fyers_projection.py` — every case consumed the retired fabricated FYERS journal; no pure case remained.
+- `crates/market-book/src/bin/book_driver.rs` — market-shaped order-book differential driver,
+removed when the book corpus and C++ market-state oracle left the tree.
+- `apps/kdb-lab/tests/q_replay.rs` — golden-replay integration target; its only test replayed a
+synthetic market golden.
+- `research/python/tests/test_fyers_projection.py` — every case consumed the retired fabricated
+FYERS journal; no pure case remained.
 
 ## Function-level removals in retained test modules
 
-Per the manifest `CONDITIONAL` rows, production crates and modules were kept. The following market-shaped cases/builders were removed in place:
+Per the manifest `CONDITIONAL` rows, production crates and modules were kept. The following
+market-shaped cases/builders were removed in place:
 
-- `crates/strategy-runtime/tests/parity.rs`: generator-parity, synthetic artifact, golden-vector and generated-price cases; retained artifact-schema, forged-artifact and event-surface checks, now built from pure contract text.
-- `crates/market-event/tests/kernel_contract.rs`: derived-event golden assertion and ignored golden-emission case; retained abstract state-machine/invariant cases.
-- `crates/sbe-codec/tests/differential.rs`: golden capture, C++ dump and golden-reencoding cases; retained arbitrary-byte, malformed-input, tear and invalid-UTF-8 codec cases.
-- `crates/india-domain/tests/{temporal_compat,india_domain}.rs`: cases reading fabricated India listings; retained pure timestamp/civil-date and schema-boundary cases.
-- `crates/upstox-feed-proto/tests/decoder.rs`: captured synthetic feed-frame case and its base64 helper; retained in-process protocol and schema-hash cases.
-- `apps/fyers-importer/src/main.rs`: module of fake-session verification/import cases; importer source retained for RRP-004 migration.
-- `apps/fundamental-tools/tests/contract.rs`: cases that included invented financial-fact and company-identity files; retained empty-input digest, CLI fail-closed and contract-vector cases.
-- `apps/kdb-lab/src/{observation,metrics,reference,report}.rs` and `src/main.rs`: `include_str!` golden modules, `check-golden` command and golden replay helper; retained CLI parsing and pure numeric contracts.
-- `apps/paper-runner/tests/certification.rs`: 6 end-to-end synthetic paper/session scenarios; retained 2 manifest-boundary audit tests.
-- `apps/paper-runner/tests/recovery_drill.rs`, `crates/paper-engine/tests/{capsule,engine,liquidity,paper_run,provenance,venue_matching,common/mod}.rs`: all cases/builders constructed invented quotes, books, fills or datasets; files retained with retirement notices, targets removed from `Cargo.toml`.
-- `crates/risk-authority/tests/authority.rs`: quote-derived feed-health case; 27 rights, permit, owner-token, concurrency and schema checks retained.
-- `crates/risk-authority/tests/performance.rs`: seeded synthetic authorization benchmark and its builders; scalar percentile test retained.
-- `crates/risk-authority/tests/risk_controls.rs`: 4 invented sector/stress/greek/borrow scenarios; permit-digest tamper audit retained.
-- `crates/risk-engine/tests/risk.rs`: 11 market-observation, venue-eligibility, depth, greek, borrow and stress cases plus the cross-venue builder; 16 scalar/bound/invariant cases retained.
-- `verification/cpp-oracle/tests/numeric_orderbook_test.cpp`: order-book update and tick/lot cases from the retired market-state header; pure parse/rescale/rational cases retained.
+- `crates/strategy-runtime/tests/parity.rs`: generator-parity, synthetic artifact, golden-vector
+and generated-price cases; retained artifact-schema, forged-artifact and event-surface checks,
+now built from pure contract text.
+- `crates/market-event/tests/kernel_contract.rs`: derived-event golden assertion and ignored
+golden-emission case; retained abstract state-machine/invariant cases.
+- `crates/sbe-codec/tests/differential.rs`: golden capture, C++ dump and golden-reencoding
+cases; retained arbitrary-byte, malformed-input, tear and invalid-UTF-8 codec cases.
+- `crates/india-domain/tests/{temporal_compat,india_domain}.rs`: cases reading fabricated India
+listings; retained pure timestamp/civil-date and schema-boundary cases.
+- `crates/upstox-feed-proto/tests/decoder.rs`: captured synthetic feed-frame case and its base64
+helper; retained in-process protocol and schema-hash cases.
+- `apps/fyers-importer/src/main.rs`: module of fake-session verification/import cases; importer
+source retained for RRP-004 migration.
+- `apps/fundamental-tools/tests/contract.rs`: cases that included invented financial-fact and
+company-identity files; retained empty-input digest, CLI fail-closed and contract-vector cases.
+- `apps/kdb-lab/src/{observation,metrics,reference,report}.rs` and `src/main.rs`: `include_str!`
+golden modules, `check-golden` command and golden replay helper; retained CLI parsing and pure
+numeric contracts.
+- `apps/paper-runner/tests/certification.rs`: 6 end-to-end synthetic paper/session scenarios;
+retained 2 manifest-boundary audit tests.
+- `apps/paper-runner/tests/recovery_drill.rs`,
+`crates/paper-engine/tests/{capsule,engine,liquidity,paper_run,provenance,venue_matching,common/mod}.rs`:
+all cases/builders constructed invented quotes, books, fills or datasets; files retained with
+retirement notices, targets removed from `Cargo.toml`.
+- `crates/risk-authority/tests/authority.rs`: quote-derived feed-health case; 27 rights, permit,
+owner-token, concurrency and schema checks retained.
+- `crates/risk-authority/tests/performance.rs`: seeded synthetic authorization benchmark and its
+builders; scalar percentile test retained.
+- `crates/risk-authority/tests/risk_controls.rs`: 4 invented sector/stress/greek/borrow
+scenarios; permit-digest tamper audit retained.
+- `crates/risk-engine/tests/risk.rs`: 11 market-observation, venue-eligibility, depth, greek,
+borrow and stress cases plus the cross-venue builder; 16 scalar/bound/invariant cases retained.
+- `verification/cpp-oracle/tests/numeric_orderbook_test.cpp`: order-book update and tick/lot
+cases from the retired market-state header; pure parse/rescale/rational cases retained.
 
 ## Gating, commands and documentation updates
 
-- `Makefile`: removed `fundamental-fixture-check`, `kdb-golden`, `kdb-q-test`, the `check` dependency on the fixture check and the `kdb-golden`/`kdb-q-test` arguments; `bench-risk-oms` no longer invokes the retired risk-authority synthetic workload; `cpp-test` builds only the pure numeric oracle.
-- `.github/workflows/ci.yml`: numeric differential job now builds only the numeric Rust driver, passes no `--cpp-book`/`--rust-book`, and compares only `verification/corpus/numeric/`.
-- `scripts/check_numeric_differential.py`: book corpus pair and arguments removed; schema version 2; pure numeric corpus only.
-- `Cargo.toml` targets for `strategy-runtime`, `fundamental-tools`, `india-domain` (india fixture cases), `kdb-lab`, `market-book`, `paper-engine`, `paper-runner`, `risk-authority` and `risk-engine`: removed `required-features` from retained pure/rights test targets and removed fully retired targets. The `market-shaped-tests` feature is kept only where gated source test modules still exist as the detector for reintroduced synthetic tests; it is not enabled by any gate command.
-- `pytest.ini` and `market_shaped_test_inventory.json`: the marker and the collection-time detector are retained as rejection machinery, annotated as D11 retirement records; `source_preserved` is now false; no previously prohibited test was re-enabled. The `conftest.py` AST detector is unchanged in behaviour.
-- Active `README.md`, `apps/kdb-lab/README.md`, `verification/cpp-oracle/README.md`, `engineering/{capabilities,claims,extras-audit,migration-map,provider-environments,q-kdb-style}.md`, `engineering/decisions/ADR-FND-001-*.md` and `claims/ledger.json` were updated so no active reference points at a removed path. Historical evidence and dated records were left byte-identical.
+- `Makefile`: removed `fundamental-fixture-check`, `kdb-golden`, `kdb-q-test`, the `check`
+dependency on the fixture check and the `kdb-golden`/`kdb-q-test` arguments; `bench-risk-oms` no
+longer invokes the retired risk-authority synthetic workload; `cpp-test` builds only the pure
+numeric oracle.
+- `.github/workflows/ci.yml`: numeric differential job now builds only the numeric Rust driver,
+passes no `--cpp-book`/`--rust-book`, and compares only `verification/corpus/numeric/`.
+- `scripts/check_numeric_differential.py`: book corpus pair and arguments removed; schema
+version 2; pure numeric corpus only.
+- `Cargo.toml` targets for `strategy-runtime`, `fundamental-tools`, `india-domain` (india
+fixture cases), `kdb-lab`, `market-book`, `paper-engine`, `paper-runner`, `risk-authority` and
+`risk-engine`: removed `required-features` from retained pure/rights test targets and removed
+fully retired targets. The `market-shaped-tests` feature is kept only where gated source test
+modules still exist as the detector for reintroduced synthetic tests; it is not enabled by any
+gate command.
+- `pytest.ini` and `market_shaped_test_inventory.json`: the marker and the collection-time
+detector are retained as rejection machinery, annotated as D11 retirement records;
+`source_preserved` is now false; no previously prohibited test was re-enabled. The `conftest.py`
+AST detector is unchanged in behaviour.
+- Active `README.md`, `apps/kdb-lab/README.md`, `verification/cpp-oracle/README.md`,
+`engineering/{capabilities,claims,extras-audit,migration-map,provider-environments,q-kdb-style}.md`,
+`engineering/decisions/ADR-FND-001-*.md` and `claims/ledger.json` were updated so no active
+reference points at a removed path. Historical evidence and dated records were left
+byte-identical.
 
 ## Historical counts preserved (not current coverage)
 
@@ -135,30 +186,48 @@ Per the manifest `CONDITIONAL` rows, production crates and modules were kept. Th
 
 ## Current counts measured after removal
 
-- `python3 -m pytest -q`: **288 passed, 199 deselected, 0 failed, 2 subtests passed**; the 4 FYERS projection cases were removed with their fixture, so no fixture-dependent test is skipped. The 199 deselected count is unchanged: no prohibited test was re-enabled.
-- `python3 -m pytest -q -m market_shaped_fixture --collect-only`: no tests collected (487 deselected).
+- `python3 -m pytest -q`: **288 passed, 199 deselected, 0 failed, 2 subtests passed**; the 4
+FYERS projection cases were removed with their fixture, so no fixture-dependent test is skipped.
+The 199 deselected count is unchanged: no prohibited test was re-enabled.
+- `python3 -m pytest -q -m market_shaped_fixture --collect-only`: no tests collected (487
+deselected).
 - `cargo test --workspace --all-targets --locked`: **129 passed, 0 failed, 0 ignored**.
 - `cargo test --workspace --doc --locked`: **1 passed, 0 failed**.
-- `make cpp-test`: **1/1 CTest passed** (pure numeric oracle); `scripts/check_numeric_differential.py` on `verification/corpus/numeric/` with both numeric drivers: **gate_passed=true**.
-- `make check` and every component static gate (docs, prose style, source style, Ruff added lines, Rust style, generated paths, pollution, schema, Clippy `-D warnings`) passed in this worktree.
+- `make cpp-test`: **1/1 CTest passed** (pure numeric oracle);
+`scripts/check_numeric_differential.py` on `verification/corpus/numeric/` with both numeric
+drivers: **gate_passed=true**.
+- `make check` and every component static gate (docs, prose style, source style, Ruff added
+lines, Rust style, generated paths, pollution, schema, Clippy `-D warnings`) passed in this
+worktree.
 
 ## Withdrawn coverage
 
 - Synthetic strategy golden generation, artifact approval claims and generated EMA vectors.
-- Fabricated FYERS sessions, invented Upstox feed frames and fabricated India listing/ETF calendar records.
+- Fabricated FYERS sessions, invented Upstox feed frames and fabricated India listing/ETF
+calendar records.
 - Archived synthetic price bars, reference data, canonical events and market calendars.
 - Invented issuer identities/financial facts and their fixture validation command.
 - KDB MBP observation/metrics/report goldens, q golden replay and golden-driven unit cases.
 - Market-shaped event/simulation goldens and schema-vector golden assertions.
-- Order-book golden corpus, verification book corpus, C++ market-state oracle, book differential driver and Rust/C++ book comparison.
-- End-to-end paper certification, recovery drill, engine/liquidity/provenance/venue-matching and market-feed health scenarios; seeded authorization and synthetic benchmark cases.
+- Order-book golden corpus, verification book corpus, C++ market-state oracle, book differential
+driver and Rust/C++ book comparison.
+- End-to-end paper certification, recovery drill, engine/liquidity/provenance/venue-matching and
+market-feed health scenarios; seeded authorization and synthetic benchmark cases.
 
 ## Retained coverage and production boundary
 
-Pure scalar and exact-numeric tests, abstract timestamp tests, rights/authorization and owner-token tests, schema and boundary checks, arbitrary-byte codec/storage tests, hashing/digest tests and the pure numeric corpus remain active. No production crate, engine, risk engine, decoder, acquisition module, generic transport module or source-ingestion/raw-archive module was deleted. The only production-adjacent source edits removed golden `include_str!` test modules and the KDB `check-golden` command; runtime logic is unchanged.
+Pure scalar and exact-numeric tests, abstract timestamp tests, rights/authorization and
+owner-token tests, schema and boundary checks, arbitrary-byte codec/storage tests,
+hashing/digest tests and the pure numeric corpus remain active. No production crate, engine,
+risk engine, decoder, acquisition module, generic transport module or
+source-ingestion/raw-archive module was deleted. The only production-adjacent source edits
+removed golden `include_str!` test modules and the KDB `check-golden` command; runtime logic is
+unchanged.
 
 ## Residual gates
 
 - No commit was created; acceptance in `REVIEW-LOG.md` and an exact new commit are still required.
-- RRP-003 (Fieldbook product scope), RRP-004 (Nirnay ingestion freeze/migrate), RRP-005, RRP-006 and RRP-007 remain open.
-- Rights remain `UNKNOWN`; no provider contact, collection, experiment, live execution or data-rights change occurred.
+- RRP-003 (Fieldbook product scope), RRP-004 (Nirnay ingestion freeze/migrate), RRP-005, RRP-006
+and RRP-007 remain open.
+- Rights remain `UNKNOWN`; no provider contact, collection, experiment, live execution or
+data-rights change occurred.
