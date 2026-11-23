@@ -249,7 +249,7 @@ pub fn verify_capture_session(
     })
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "market-shaped-tests"))]
 mod tests {
     use std::path::{
         Path, //

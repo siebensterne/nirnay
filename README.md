@@ -8,7 +8,7 @@ complementary platform under `engineering/architecture/decisions/ADR-0001-data-o
 **Release status:** research/paper engineering candidate. This repository is not a certified broker-connected trading system, not a SEBI/exchange-approved algo product, and not evidence of profitable alpha. Live order routing is hard-disabled. Every capability statement below distinguishes code present from external verification still required.
 
 <!-- CURRENT-STATE
-code_commit: 9e64e6083a4e63fbd284685f01a35345df1007de
+code_commit: 128c0e59d5fd77a5e35ab4ed7c59ddceb5dcd28c
 verified_on: 2026-11-21
 ci_run: 45062286601
 scope: make check + hosted CI 45062286601 on f250fee (12/12); active suite 352 passed, 90 market-shaped-fixture tests deselected under owner directive
@@ -435,6 +435,7 @@ once published; a new run adds a new dated file instead of rewriting history.
 | Test policy | `research/python/tests/conftest.py` | collection-time gate that deselects inventoried market-shaped tests and blocks uninventoried market-domain modules |
 | Test policy | `research/python/tests/market_shaped_test_inventory.json` | checked-in authority listing prohibited test modules, categories and test names |
 | Dated evidence | `evidence/SYNTHETIC-TEST-POLICY-NIRNAY-2026-11-23.md` | enforced inventory counts, inspection commands, withdrawn coverage and current test figures |
+| Dated evidence | `evidence/RUST-TEST-POLICY-NIRNAY-2026-11-23.md` | gated Rust targets and src modules, inventory and enforced default counts, withdrawn coverage and historical-count disclaimer |
 | Dated evidence | `evidence/OWNER-DIRECTIVE-2026-11-22.md` | owner data-freeze directive: no synthetic market data, INR 0 data budget, STOP on missing evidence or authorization |
 | Dated evidence | `evidence/M4-2-1-CLAIM-SCOPE-2026-11-22.md` | M4.2.1 narrowed to implemented, not real-market verified; calendar provenance, coverage-bound and bar-anchor findings |
 | Dated evidence | `evidence/POLICY-BOUNDARY-REGRESSION-WITHDRAWAL-2026-11-22.md` | runtime-audit inventory of the 90 deselected market-shaped-fixture tests and the regression coverage withdrawn from active CI |

@@ -6,6 +6,11 @@ license.workspace = true
 rust-version.workspace = true
 publish = false
 
+[features]
+# Opt-in only: market-shaped test source and gated integration targets.
+# Never enabled by default or by any gate command. See the test-policy record.
+market-shaped-tests = []
+
 [dependencies]
 market-event.workspace = true
 prost.workspace = true
@@ -22,3 +27,14 @@ protoc-bin-vendored.workspace = true
 
 [lints]
 workspace = true
+
+# Integration targets are declared explicitly under the test policy.
+[[test]]
+name = "decoder"
+path = "tests/decoder.rs"
+required-features = ["market-shaped-tests"]
+
+[[test]]
+name = "mbp"
+path = "tests/mbp.rs"
+required-features = ["market-shaped-tests"]

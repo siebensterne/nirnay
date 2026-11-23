@@ -163,7 +163,7 @@ pub fn callback_to_mbp(
     Ok(Some(MarketDataEvent::MarketByPriceSnapshot(snapshot)))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "market-shaped-tests"))]
 mod tests {
     use super::*;
     use serde_json::json;

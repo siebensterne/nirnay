@@ -7,6 +7,11 @@ rust-version.workspace = true
 publish.workspace = true
 description = "Offline verified importer for completed FYERS SDK capture sessions"
 
+[features]
+# Opt-in only: market-shaped test source and gated integration targets.
+# Never enabled by default or by any gate command. See the test-policy record.
+market-shaped-tests = []
+
 [[bin]]
 name = "nirnay-fyers-import"
 path = "src/main.rs"

@@ -964,7 +964,7 @@ fn validate_fill_provenance(
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "market-shaped-tests"))]
 mod tests {
     use account_journal::{Hash32, StoredRecord};
     use cost_model::{ChargeBook, ChargeRate};

@@ -165,7 +165,7 @@ impl CorporateActionLedger {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "market-shaped-tests"))]
 mod tests {
     use super::*;
     use crate::{Segment, Venue, provenance::provenance_for_source};

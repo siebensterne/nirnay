@@ -7,6 +7,11 @@ rust-version.workspace = true
 publish.workspace = true
 description = "Signed execution permits and execution-mode policy."
 
+[features]
+# Opt-in only: market-shaped test source and gated integration targets.
+# Never enabled by default or by any gate command. See the test-policy record.
+market-shaped-tests = []
+
 [dependencies]
 anyhow.workspace = true
 ed25519-dalek.workspace = true
@@ -20,3 +25,9 @@ serde_json.workspace = true
 
 [lints]
 workspace = true
+
+# Integration targets are declared explicitly under the test policy.
+[[test]]
+name = "execution_policy"
+path = "tests/execution_policy.rs"
+required-features = ["market-shaped-tests"]

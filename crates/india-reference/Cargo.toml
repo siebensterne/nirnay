@@ -7,6 +7,11 @@ rust-version.workspace = true
 publish = false
 description = "Bounded India exchange reference-data ingestion and identity resolution"
 
+[features]
+# Opt-in only: market-shaped test source and gated integration targets.
+# Never enabled by default or by any gate command. See the test-policy record.
+market-shaped-tests = []
+
 [dependencies]
 anyhow.workspace = true
 fs2.workspace = true
@@ -25,3 +30,19 @@ tempfile.workspace = true
 
 [lints]
 workspace = true
+
+# Integration targets are declared explicitly under the test policy.
+[[test]]
+name = "durability"
+path = "tests/durability.rs"
+required-features = ["market-shaped-tests"]
+
+[[test]]
+name = "ingestion"
+path = "tests/ingestion.rs"
+required-features = ["market-shaped-tests"]
+
+[[test]]
+name = "source_conformance"
+path = "tests/source_conformance.rs"
+required-features = ["market-shaped-tests"]

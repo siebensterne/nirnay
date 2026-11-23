@@ -432,7 +432,7 @@ impl MarketState {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "market-shaped-tests"))]
 mod tests {
     use account_journal::{Hash32, StoredRecord};
     use trading_core::{

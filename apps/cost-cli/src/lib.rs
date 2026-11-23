@@ -89,7 +89,7 @@ pub fn run(book: &ChargeBook, input: impl BufRead, mut output: impl Write) -> Re
     Ok(count)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "market-shaped-tests"))]
 mod tests {
     use super::*;
 

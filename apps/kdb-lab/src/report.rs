@@ -70,7 +70,7 @@ pub fn build_report(analysis: &Analysis, input_path: &str) -> AnalysisReport {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "market-shaped-tests"))]
 mod tests {
     use serde_json::Value;
 

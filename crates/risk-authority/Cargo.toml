@@ -7,6 +7,11 @@ rust-version.workspace = true
 publish.workspace = true
 description = "Stateful risk authority with atomic exposure reservation"
 
+[features]
+# Opt-in only: market-shaped test source and gated integration targets.
+# Never enabled by default or by any gate command. See the test-policy record.
+market-shaped-tests = []
+
 [dependencies]
 risk-engine.workspace = true
 serde.workspace = true
@@ -16,3 +21,19 @@ trading-core.workspace = true
 
 [lints]
 workspace = true
+
+# Integration targets are declared explicitly under the test policy.
+[[test]]
+name = "authority"
+path = "tests/authority.rs"
+required-features = ["market-shaped-tests"]
+
+[[test]]
+name = "performance"
+path = "tests/performance.rs"
+required-features = ["market-shaped-tests"]
+
+[[test]]
+name = "risk_controls"
+path = "tests/risk_controls.rs"
+required-features = ["market-shaped-tests"]

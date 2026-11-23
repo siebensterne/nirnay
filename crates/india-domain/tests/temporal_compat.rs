@@ -6,6 +6,7 @@
 //! reproduce it byte for byte, otherwise a persisted format or wire contract
 //! has silently changed.
 
+#[cfg(feature = "market-shaped-tests")]
 use india_domain::InstrumentWire;
 use jiff::{SignedDuration, Timestamp, civil::Date};
 
@@ -154,6 +155,7 @@ fn timestamp_as_nanosecond_overflow_fails_closed() {
     assert!(i64::try_from(Timestamp::MIN.as_nanosecond()).is_err());
 }
 
+#[cfg(feature = "market-shaped-tests")]
 #[test]
 fn replay_and_persisted_metadata_decode_identically() {
     // A real repo fixture: its date fields must decode to the same strings.

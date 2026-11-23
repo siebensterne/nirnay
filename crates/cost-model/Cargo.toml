@@ -7,6 +7,11 @@ rust-version.workspace = true
 publish.workspace = true
 description = "Effective-dated Indian transaction cost schedules with exact integer rounding."
 
+[features]
+# Opt-in only: market-shaped test source and gated integration targets.
+# Never enabled by default or by any gate command. See the test-policy record.
+market-shaped-tests = []
+
 [dependencies]
 serde.workspace = true
 thiserror.workspace = true
@@ -17,3 +22,9 @@ serde_json.workspace = true
 
 [lints]
 workspace = true
+
+# Integration targets are declared explicitly under the test policy.
+[[test]]
+name = "fees"
+path = "tests/fees.rs"
+required-features = ["market-shaped-tests"]

@@ -6,6 +6,11 @@ license.workspace = true
 rust-version.workspace = true
 publish = false
 
+[features]
+# Opt-in only: market-shaped test source and gated integration targets.
+# Never enabled by default or by any gate command. See the test-policy record.
+market-shaped-tests = []
+
 [[bin]]
 name = "upstox-smoke"
 path = "src/bin/upstox_smoke.rs"

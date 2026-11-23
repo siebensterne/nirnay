@@ -1247,7 +1247,7 @@ pub fn select_company_identity_as_of(
     Ok(selected)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "market-shaped-tests"))]
 mod tests {
     use super::*;
 
