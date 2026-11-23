@@ -163,9 +163,22 @@ def git_lines(root: Path, args: list[str]) -> list[str]:
     ]
 
 
+def resolve_base(root: Path, base: str) -> str:
+    """Resolve a local or remote-tracking ref; CI checkouts have no local main."""
+    for candidate in (base, f"origin/{base}", f"refs/remotes/origin/{base}"):
+        result = subprocess.run(
+            ["git", "rev-parse", "--verify", "--quiet", f"{candidate}^{{commit}}"],
+            cwd=root, capture_output=True, text=True, check=False,
+        )
+        if result.returncode == 0:
+            return candidate
+    raise ValueError(f"freeze comparison ref not found: {base} (tried origin/{base})")
+
+
 def changed_paths(root: Path, base: str) -> list[str]:
     """Return tracked, staged and untracked paths changed relative to ``base``."""
-    modified = git_lines(root, ["diff", "--name-only", base, "--"])
+    resolved = resolve_base(root, base)
+    modified = git_lines(root, ["diff", "--name-only", resolved, "--"])
     untracked = git_lines(root, ["ls-files", "--others", "--exclude-standard"])
     return sorted(set(modified) | set(untracked))
 
