@@ -14,18 +14,21 @@ ci_run: 45062286601
 scope: make check + hosted CI 45062286601 on f250fee (12/12); active suite 352 passed, 90 market-shaped-fixture tests deselected under owner directive
 -->
 
-**Active regression scope:** under the owner directive of 2026-11-22, tests that consume
-checked-in synthetic market-shaped fixtures are registered `market_shaped_fixture` and
-deselected in `pytest.ini`; they no longer run in `make check` or CI. Historical test counts in
-dated notes below are historical records, not current coverage. See
-`evidence/POLICY-BOUNDARY-REGRESSION-WITHDRAWAL-2026-11-22.md`.
-
-Withdrawal is now enforced at collection time by
-`research/python/tests/conftest.py` and the checked-in
-`research/python/tests/market_shaped_test_inventory.json`; overriding the
-marker expression cannot restore a prohibited test. Counts and withdrawn
-coverage are recorded in
+**Active regression scope:** under owner directive D11, synthetic market-data generators,
+fake sessions, mock feeds, synthetic benchmarks and the demo CLI route were removed from the
+active tree. Legacy market-shaped tests still present as source are deselected at collection
+time by `research/python/tests/conftest.py` using the dated historical inventory
+`evidence/MARKET-SHAPED-TEST-INVENTORY-NIRNAY-2026-11-23.json`; the former `pytest.ini` marker
+exclusion is no longer an active gate. Historical test counts in dated notes below are records,
+not current coverage. See `evidence/POLICY-BOUNDARY-REGRESSION-WITHDRAWAL-2026-11-22.md` and
 `evidence/SYNTHETIC-TEST-POLICY-NIRNAY-2026-11-23.md`.
+
+Reintroduction of prohibited generators, fake market sessions, mock feeds or synthetic market
+benchmarks is rejected by source-pattern scanning in
+`scripts/check_synthetic_market_policy.py`, bound through `make check-static`, `make check`
+and the CI source-style job.
+D11 residuals closed in this step are recorded in
+`evidence/D11-RESIDUAL-CLOSURE-NIRNAY-2026-11-23.md`.
 
 ## Implemented scope
 
@@ -144,11 +147,14 @@ packed twice.
 
 ### Synthetic demonstrations retired
 
-The former synthetic `quantlab demo` smoke test and its archived fixture directory
-`research/python/fixtures/` were retired from the active tree under owner directive
-D11. No synthetic market-data demonstration is runnable from the normal workflow.
-The dated path/ha256 record is in the Nirnay retirement manifest and the RRP-002
-retirement record under `evidence/`; historical withdrawal notes remain unchanged.
+The former synthetic `quantlab demo` smoke test, its archived fixture directory
+`research/python/fixtures/`, the generated dataset builder, the synthetic research-job
+entry and the synthetic Python benchmark suites were retired from the active tree under
+owner directive D11. `quantlab.bench` now exposes only the scalar percentile helper, and
+`quantlab research-job` accepts an already admitted dataset only. No synthetic
+market-data demonstration or benchmark is runnable from the normal workflow. The dated
+path/hash record is in the Nirnay retirement manifest and the RRP-002/RRP-W2.1 records
+under `evidence/`; historical withdrawal notes remain unchanged.
 
 ## Corporate financial fact validation
 
@@ -452,8 +458,10 @@ once published; a new run adds a new dated file instead of rewriting history.
 | Review | `engineering/architecture/reviews/FIELDBOOK-REVIEW-REFRESH-2026-11-23.md` | baseline refresh at Fieldbook 28eb877, W1 remediation status, ownership and NDC reconciliation; not a ratification |
 | Review evidence | `engineering/architecture/reviews/fieldbook-audits/` | five full read-only audits: architecture, durability, semantics, governance and distribution at Fieldbook `aee91de` |
 | Test policy | `research/python/tests/conftest.py` | collection-time gate that deselects inventoried market-shaped tests and blocks uninventoried market-domain modules |
-| Test policy | `research/python/tests/market_shaped_test_inventory.json` | checked-in authority listing prohibited test modules, categories and test names; D11 retirement record in `evidence/TEST-RETIREMENT-NIRNAY-2026-11-23.md` |
+| Test policy | `evidence/MARKET-SHAPED-TEST-INVENTORY-NIRNAY-2026-11-23.json` | dated historical inventory of prohibited modules, categories and test names; W1.1/W1.2 counts preserved and still read by the collection-time gate |
+| Test policy | `scripts/check_synthetic_market_policy.py` | D11 source-pattern gate rejecting reintroduced generators, fake sessions, mock feeds and synthetic benchmarks; bound via `make check-static` |
 | Dated evidence | `evidence/TEST-RETIREMENT-NIRNAY-2026-11-23.md` | RRP-002 removal of synthetic market-data assets and function-level tests; removed paths, hashes, preserved historical counts, withdrawn coverage and residual gates |
+| Dated evidence | `evidence/D11-RESIDUAL-CLOSURE-NIRNAY-2026-11-23.md` | W2.1 residual closure of active synthetic generators, demo CLI, benchmark suites and job entry; historical counts preserved, static gate and measured counts |
 | Dated evidence | `evidence/SOURCE-INGESTION-FREEZE-2026-11-23.md` | RRP-004 freeze of duplicate ingestion, raw-archive, decoder and provider-config paths; ownership targets, migration order, retained Nirnay scope and gate result |
 | Dated evidence | `evidence/SYNTHETIC-TEST-POLICY-NIRNAY-2026-11-23.md` | enforced inventory counts, inspection commands, withdrawn coverage and current test figures |
 | Dated evidence | `evidence/C3-CONSUMER-USE-PERMISSIONS-2026-11-23.md` | C3 consumer-use and permission-evaluation implementation record, gate counts and explicit non-goals |

@@ -1,14 +1,23 @@
 {
   "schema_version": 1,
-  "record": "research/python/tests/market_shaped_test_inventory.json",
+  "record": "evidence/MARKET-SHAPED-TEST-INVENTORY-NIRNAY-2026-11-23.json",
+  "status": "historical_retirement_record",
+  "retired_on": "2026-11-23",
   "policy": "Owner directive 2026-11-22 D1-D3: no synthetic market data as research evidence.",
   "scope": "All tests that construct or consume invented market observations, plus tests registered market_shaped_fixture.",
   "enforcement": "research/python/tests/conftest.py deselects these tests in pytest_collection_modifyitems and blocks uninventoried modules with market-domain constructs.",
   "deselection_is_independent_of_marker_expression": true,
   "source_preserved": false,
   "d11_retirement_record": "evidence/TEST-RETIREMENT-NIRNAY-2026-11-23.md",
+  "w21_residual_closure_record": "evidence/D11-RESIDUAL-CLOSURE-NIRNAY-2026-11-23.md",
   "retirement_note": "D11 retired the checked-in synthetic artifacts. Test source that only consumed those artifacts is withdrawn; pure math/rights/byte tests in this inventory remain deselected historical policies and are not re-enabled.",
-  "note": "Dated record: evidence/SYNTHETIC-TEST-POLICY-NIRNAY-2026-11-23.md",
+  "note": "Dated record: evidence/SYNTHETIC-TEST-POLICY-NIRNAY-2026-11-23.md. The modules block below is immutable W1.1/W1.2 history: 23 modules, 189 static deselected test names and 39 retained pure names are preserved verbatim. Names of tests whose source was retired under D11 remain listed for historical count fidelity and no longer match collected items.",
+  "preserved_historical_counts": {
+    "w1_1b_python": "243 passed / 199 deselected / 2 subtests at ba21945",
+    "w1_1d_python": "251 passed / 199 deselected / 2 subtests at e975be9",
+    "w1_2a_policy": "23 modules / 189 static deselected names / 39 retained pure names / 199 collected deselected / 90 marker-selected",
+    "rrp_002": "288 passed / 199 deselected / 2 subtests after the 58-path retirement"
+  },
   "modules": {
     "research/python/tests/test_backtest_and_alpha.py": {
       "category": "mixed",

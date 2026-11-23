@@ -2,7 +2,6 @@ import unittest
 from decimal import Decimal
 
 from quantlab.backtest import BacktestConfig, EventDrivenBacktester, OrderIntent, StrategyContext
-from quantlab.demo import run_demo
 from quantlab.market import BookLevel, MarketEvent, raw_hash
 from quantlab.alpha_search import AlphaCosts, AlphaConfig, Bar, search_alpha
 
@@ -141,12 +140,6 @@ class BacktestTests(unittest.TestCase):
         self.assertIsNotNone(exit_intent)
         self.assertEqual(exit_intent.side, "sell")
         self.assertEqual(exit_intent.quantity, 2)
-
-    def test_demo_is_deterministic_and_explicitly_synthetic(self):
-        first, second = run_demo(), run_demo()
-        self.assertEqual(first, second)
-        self.assertTrue(first["not_real_market_data"])
-        self.assertTrue(first["not_alpha_evidence"])
 
 
 class AlphaSearchTests(unittest.TestCase):

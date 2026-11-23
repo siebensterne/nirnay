@@ -9,22 +9,28 @@ target-infrastructure items remain owner-gated and are explicitly absent.
 
 ## 1. Implemented local opt-in slice
 
-`configs/research/jobs.v1.json` declares a job id, its synthetic dataset
-identity, dataset SHA-256, code digest, pinned constraint file, read-only
-command and a schedule hint. The JSON schema is
-`schemas/research/research-job-manifest.v1.schema.json` (Draft 2020-12).
+`configs/research/jobs.v1.json` declares the environment pin (code digest,
+constraint file and code paths) and the job shape through
+`schemas/research/research-job-manifest.v1.schema.json` (Draft 2020-12). The
+synthetic job entry bound to `research-job-synthetic-nse-session` was retired in
+the W2.1 residual closure; the manifest now declares no runnable job. The
+`code_digest` pin is unchanged here and is reconciled in a separate isolated
+change.
+
 `quantlab.research_jobs` validates the manifest, refuses an unpinned environment
-or a stale dataset digest, executes the allowlisted command (`verify-dataset`)
-in dry-run mode on a freshly built synthetic fixture, and appends one structured
-run record (commit, command, exit, duration, hashes) through the existing
-append-only `ExperimentRegistry`. `quantlab validation-report` reads a frozen
-record and its published dataset and emits a deterministic, byte-stable JSON
-report whose digest recomputes from the report body. It reuses
-`experiments/verify.py` chain and dataset-binding checks and the
-`reporting/comparison.py` digest/summary surface. Both paths are local,
-opt-in and covered by tests. They are **implemented, not verified**: the
-reports assert internal integrity only and make no latency, throughput,
-readiness, data-rights or alpha claim.
+or a stale dataset digest, and executes the allowlisted command (`verify-dataset`)
+in dry-run mode only against an already admitted, externally published dataset
+directory. It builds no dataset and generates no market observation; a manifest
+with no job refuses to run. It appends one structured run record (commit,
+command, exit, duration, hashes) through the existing append-only
+`ExperimentRegistry`. `quantlab validation-report` reads a frozen record and its
+published dataset and emits a deterministic, byte-stable JSON report whose
+digest recomputes from the report body. It reuses `experiments/verify.py` chain
+and dataset-binding checks and the `reporting/comparison.py` digest/summary
+surface. Under D11 the generated-dataset integration tests were removed; pure
+manifest and digest tests remain active. Both paths are local and opt-in. They
+are **implemented, not verified**: the reports assert internal integrity only
+and make no latency, throughput, readiness, data-rights or alpha claim.
 
 ## 2. BLOCKED_OWNER — by design left unimplemented
 
@@ -48,5 +54,6 @@ this manifest or adding a service in a follow-up without that gate.
 A frozen experiment record plus a published dataset can prove internal
 integrity: append order, digests, dataset binding and an optional trusted head
 signature. It cannot prove source completeness, data rights, model correctness,
-profitability or live readiness. Performance records remain opt-in local
-synthetic observations; no number in a `BENCH-*` line is a gate or a certificate.
+profitability or live readiness. Historical performance records are dated local
+observations of retired synthetic harnesses; the remaining opt-in Rust `BENCH-*`
+lines are not gates or certificates.
