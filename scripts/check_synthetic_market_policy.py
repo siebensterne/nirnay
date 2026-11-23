@@ -146,7 +146,8 @@ class SyntheticMarketPolicyTests(unittest.TestCase):
         findings = scan_text(text)
         self.assertTrue(all(item.rule == "fake-market-session" for item in findings))
         self.assertIn("research-job-synthetic-nse-session",
-                      [item.match for item in scan_text('"dataset_id": "research-job-synthetic-nse-session"')])
+                      [item.match for item in scan_text(
+                          '"dataset_id": "research-job-synthetic-nse-session"')])
 
     def test_mock_feed_name_is_detected_case_insensitively(self) -> None:
         findings = scan_text("class MockFeed:\n    pass\n")
@@ -173,7 +174,10 @@ class SyntheticMarketPolicyTests(unittest.TestCase):
     def test_gate_source_and_evidence_are_not_scanned(self) -> None:
         self.assertFalse(is_scan_path(ROOT / SELF_REL))
         self.assertFalse(is_scan_path(ROOT / "evidence" / "OLD-RECORD.md"))
-        self.assertTrue(is_scan_path(ROOT / "research" / "python" / "src" / "quantlab" / "bench.py"))
+        self.assertTrue(
+            is_scan_path(ROOT / "research" / "python" / "src" / "quantlab" / "bench.py"),
+            "bench.py is scanned",
+        )
 
     def test_injected_source_file_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
