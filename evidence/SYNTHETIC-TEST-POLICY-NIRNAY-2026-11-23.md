@@ -38,7 +38,7 @@ stops with a clear message when it does not. Deselection does not read `-m`.
 | Collected test items deselected by the gate | 199 |
 | Collected items already marked `market_shaped_fixture` | 90 |
 | Collected unmarked items newly withdrawn | 109 |
-| Active items passing | 243 |
+| Active items passing | 251 (243 at W1.1-B commit `ba21945`) |
 | Subtests passing | 2 |
 | Total collected items at base head | 442 |
 
@@ -108,13 +108,13 @@ Observed outputs at this head:
 
 ```text
 python3 -m pytest -q
-  243 passed, 199 deselected, 2 subtests passed
+  251 passed, 199 deselected, 2 subtests passed
 
 python3 -m pytest -q -m market_shaped_fixture
-  442 deselected
+  450 deselected
 
 python3 -m pytest --collect-only -q -m ""
-  243/442 tests collected (199 deselected)
+  251/450 tests collected (199 deselected)
 ```
 
 The second command confirms that overriding the marker cannot restore a
@@ -139,9 +139,12 @@ a source change.
 
 ## New test count and historical figures
 
-The active suite at this head reports `243 passed, 199 deselected, 2 subtests
-passed`. This is the current figure.
+The active suite at the current head `e975be9` reports `251 passed, 199
+deselected, 2 subtests passed`. This is the current figure, re-derived from
+exact command output under W1.2-A.
 
+The figure `243 passed, 199 deselected, 2 subtests passed` was correct at the
+W1.1-B code commit `ba21945`; W1.1-D added eight admission tests, giving 251.
 The earlier figures `352 passed, 90 deselected, 2 subtests passed` at base
 `72bac0c`, and the `300 passed, 90 deselected` figure in the 2026-11-22
 withdrawal record, are historical counts of those heads. They are no longer
