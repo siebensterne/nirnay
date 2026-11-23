@@ -8,7 +8,7 @@ complementary platform under `engineering/architecture/decisions/ADR-0001-data-o
 **Release status:** research/paper engineering candidate. This repository is not a certified broker-connected trading system, not a SEBI/exchange-approved algo product, and not evidence of profitable alpha. Live order routing is hard-disabled. Every capability statement below distinguishes code present from external verification still required.
 
 <!-- CURRENT-STATE
-code_commit: 128c0e59d5fd77a5e35ab4ed7c59ddceb5dcd28c
+code_commit: 6206052e0e89de33130e03165063ee53aabbe348
 verified_on: 2026-11-21
 ci_run: 45062286601
 scope: make check + hosted CI 45062286601 on f250fee (12/12); active suite 352 passed, 90 market-shaped-fixture tests deselected under owner directive
@@ -422,6 +422,7 @@ once published; a new run adds a new dated file instead of rewriting history.
 | Canonical | `engineering/research/compute-and-validation.md` | local opt-in research jobs, validation reports and owner-gated compute gaps |
 | Canonical | `engineering/research/dataset-acceptance-contract.md` | evidence required before a licensed dataset is accepted for research |
 | Canonical | `engineering/ndc-consumer-requirements-v1.md` | proposed NDC v1 consumer requirements: release manifest, event envelope, validation and rejection behavior; no transport or storage choice |
+| Proposed | `engineering/ndc-consumer-use-v2-proposed.md` | versioned consumer-use profiles, AdmissionRequest, permission evaluation and typed rejection codes; declaration-level model, no schema finalization |
 | Protocol | `research/protocols/NSE-CASH-MOMENTUM-PROTOCOL-v1.md` | frozen proposed real-data-only NSE cash-equity momentum protocol; not registered or run, dataset-blocked |
 | Protocol | `research/protocols/NSE-CASH-MOMENTUM-PROTOCOL-v1-AMENDMENT-1.md` | amendment 1 supersedes the v1 synthetic-fixture sentence and the nearest-price rule; v1 unchanged; SHA-256 sidecar beside it |
 | Research | `engineering/research/procurement/m43-source-qualification-dossier.md` | M4.3 NSE source qualification: coverage, rights, tariffs and inquiry pack |
@@ -435,6 +436,7 @@ once published; a new run adds a new dated file instead of rewriting history.
 | Test policy | `research/python/tests/conftest.py` | collection-time gate that deselects inventoried market-shaped tests and blocks uninventoried market-domain modules |
 | Test policy | `research/python/tests/market_shaped_test_inventory.json` | checked-in authority listing prohibited test modules, categories and test names |
 | Dated evidence | `evidence/SYNTHETIC-TEST-POLICY-NIRNAY-2026-11-23.md` | enforced inventory counts, inspection commands, withdrawn coverage and current test figures |
+| Dated evidence | `evidence/C3-CONSUMER-USE-PERMISSIONS-2026-11-23.md` | C3 consumer-use and permission-evaluation implementation record, gate counts and explicit non-goals |
 | Dated evidence | `evidence/RUST-TEST-POLICY-NIRNAY-2026-11-23.md` | gated Rust targets and src modules, inventory and enforced default counts, withdrawn coverage and historical-count disclaimer |
 | Dated evidence | `evidence/OWNER-DIRECTIVE-2026-11-22.md` | owner data-freeze directive: no synthetic market data, INR 0 data budget, STOP on missing evidence or authorization |
 | Dated evidence | `evidence/M4-2-1-CLAIM-SCOPE-2026-11-22.md` | M4.2.1 narrowed to implemented, not real-market verified; calendar provenance, coverage-bound and bar-anchor findings |

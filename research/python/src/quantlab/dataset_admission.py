@@ -7,6 +7,12 @@ immutable release identity with matching digests, and point-in-time lineage.
 The validator consumes scalar declarations only. It contacts no provider,
 ingests no market observation and grants no right. A refusal is a typed error
 so every caller can fail closed with a named reason.
+
+This module is not a complete release verifier. It does not verify detached
+signatures, recompute canonical manifest bytes, check publisher-key validity
+or revocation, or inspect actual data and artifact digests. Full detached
+signature verification is a later implementation stage; passing this gate is
+not a claim that a release signature or source lineage was verified.
 """
 from __future__ import annotations
 
