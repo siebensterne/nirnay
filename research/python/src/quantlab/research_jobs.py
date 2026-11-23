@@ -23,12 +23,14 @@ import os
 import subprocess
 import sys
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from jsonschema import Draft202012Validator
 
+from .consumer_use import PREFLIGHT_DECISION_KIND, PreflightDecision
 from .dataset_admission import DatasetAdmissionError, admit_published_dataset
 from .experiments import (
     ExperimentError,
@@ -360,10 +362,20 @@ def run_job(manifest_path: str | Path, registry_path: str | Path, *,
             dataset_dir: str | Path | None = None,
             admission: str | Path | None = None,
             job_id: str | None = None, root: Path = ROOT) -> JobRunResult:
-    """Admit one published release, dry-run its command and append a run record."""
+    """Admit one published release, dry-run its command and append a run record.
+
+    A consumer-use ``PreflightDecision`` is declaration validation only and can
+    never stand in for an admitted published release.
+    """
     if dataset_dir is None or admission is None:
         raise DatasetAdmissionError(
             "research jobs require both an admitted dataset directory and an admission record"
+        )
+    if isinstance(admission, PreflightDecision) or (
+        isinstance(admission, Mapping) and admission.get("kind") == PREFLIGHT_DECISION_KIND
+    ):
+        raise DatasetAdmissionError(
+            "a consumer preflight decision is not a verified NDC release admission"
         )
     manifest = load_manifest(manifest_path)
     environment = manifest["environment"]

@@ -7,15 +7,22 @@ then matched against its own permission grant. Purpose, licensee, recipient,
 scope, retention and as-of are separate dimensions. Capability claims are kept
 separate from permissions and never create an entitlement.
 
-The legacy ``evaluate_consumer_use`` entry point checks scalar declarations
-only. ``preflight_consumer_admission`` adds the W2.1 C1-C3 conformance rules:
-six separate time axes with grant validity at decision time, exact action-
-object pair coverage by a unique grant, and four separate capability facts.
+Both ``evaluate_consumer_use`` and ``preflight_consumer_admission`` produce a
+``PreflightDecision``. A preflight decision validates declarations and grants
+only. It is never an NDC release-admission receipt: it records
+``is_admission_receipt=False`` and ``release_verified=False``, and no research
+job may consume it as one. The W2.1 C1-C3 rules keep six separate time axes
+with grant validity at decision time, exact action-object pair coverage by a
+unique grant, and four separate capability facts. Retention is a typed policy
+with explicit duration and purge duty, and coverage is declared per dimension.
+
 Neither entry point is a release verifier: no detached signature is checked,
-no canonical manifest bytes are recomputed, no digest is matched against a
-file, and no event envelope is inspected. Full detached-signature verification
-is a later implementation stage. No right, release, dataset, data object or
-experiment is created here.
+no canonical manifest bytes are recomputed, no artifact digest is compared
+with file bytes, no signature is cryptographically validated and no event
+envelope is inspected. Full detached-signature verification, canonical-byte
+recomputation, artifact-digest checking and event-envelope verification are a
+later milestone. No right, release, dataset, data object or experiment is
+created here.
 """
 from __future__ import annotations
 
@@ -24,13 +31,26 @@ import re
 from dataclasses import dataclass
 from enum import StrEnum
 
-from .dataset_admission import CONSUMER_OPERATIONS
+from .dataset_admission import (
+    CONSUMER_OPERATIONS,
+    Bounded,
+    CoverageCertificate,
+    DatasetAdmissionError,
+    DeleteOnExpiry,
+    Indefinite,
+    LegalHold,
+    NoRetention,
+    PurgeAfter,
+    RetentionPolicy,
+    retention_covered,
+    validate_coverage_certificate,
+)
 
 CONSUMER_USE_MODEL_VERSION = 1
 PURPOSE = "proprietary_own_account_trading_research"
 RECIPIENT_CLASS = "internal"
 PIT_BASIS = "knowledge_time"
-COVERAGE_VERDICT = "PASS"
+CONTRACT_VERSION = 2
 
 # Names from the authoritative consumer enumeration; the values are reused,
 # not renamed or extended by this model.
@@ -60,22 +80,6 @@ PLACEHOLDER_RE = re.compile(
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
-class RejectionCode(StrEnum):
-    """Typed, distinct reason a consumer-use request is not admitted."""
-
-    PUBLISHER_IDENTITY = "REJECT_PUBLISHER_IDENTITY"
-    SIGNATURE_INTEGRITY = "REJECT_SIGNATURE_INTEGRITY"
-    SOURCE_LINEAGE = "REJECT_SOURCE_LINEAGE"
-    RIGHTS_EVIDENCE = "REJECT_RIGHTS_EVIDENCE"
-    USE_SCOPE = "REJECT_USE_SCOPE"
-    COVERAGE = "REJECT_COVERAGE"
-    PIT_CONSISTENCY = "REJECT_PIT_CONSISTENCY"
-    RETENTION = "REJECT_RETENTION"
-    ARTIFACT_DIGESTS = "REJECT_ARTIFACT_DIGESTS"
-    SCHEMA_ENVELOPE = "REJECT_SCHEMA_ENVELOPE"
-    AMBIGUOUS_GRANTS = "REJECT_AMBIGUOUS_GRANTS"
-
-
 class ScopeState(StrEnum):
     """Distinct scope states; an empty NAMED set is not ALL."""
 
@@ -89,15 +93,6 @@ class GrantDecision(StrEnum):
 
     PERMIT = "PERMIT"
     DENY = "DENY"
-
-
-@dataclass(frozen=True, slots=True)
-class AdmissionDecision:
-    """Immutable scalar decision with a typed code on every refusal."""
-
-    admitted: bool
-    code: RejectionCode | None
-    reason: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -183,14 +178,6 @@ class UseScope:
 
 
 @dataclass(frozen=True, slots=True)
-class RetentionPolicy:
-    """Bounded retention duration with an explicit purge rule."""
-
-    max_days: int | None
-    purge_rule: str
-
-
-@dataclass(frozen=True, slots=True)
 class ReleaseIdentity:
     """The immutable release identity a consumer request binds to."""
 
@@ -245,6 +232,7 @@ class ReleaseDeclarations:
     module and no cryptographic verification is performed here.
     """
 
+    contract_version: int
     schema_version: int
     envelope_version: int
     publisher_identity: str
@@ -252,9 +240,9 @@ class ReleaseDeclarations:
     manifest_sha256: str
     artifact_digests: tuple[str, ...]
     source_lineage_reference: str
+    correction_lineage_reference: str
     rights_evidence_reference: str
-    coverage_certificate: str
-    coverage_verdict: str
+    coverage: CoverageCertificate
     pit_basis: str
     pit_as_of_ns: int
 
@@ -278,41 +266,147 @@ def _digest(value: object) -> bool:
     return isinstance(value, str) and SHA256_RE.fullmatch(value) is not None
 
 
-def _reject(code: RejectionCode, reason: str) -> AdmissionDecision:
-    """Build one fail-closed decision carrying a typed code."""
-    return AdmissionDecision(admitted=False, code=code, reason=reason)
+def _typed_retention(policy: object) -> bool:
+    """Require an explicit bounded duration and a typed purge duty."""
+    if not isinstance(policy, RetentionPolicy):
+        return False
+    if not isinstance(policy.purge, (DeleteOnExpiry, PurgeAfter, LegalHold)):
+        return False
+    if isinstance(policy.duration, NoRetention):
+        return True
+    return isinstance(policy.duration, Bounded) and policy.duration.days > 0
+
+
+def _retention_failure(requested: RetentionPolicy, granted: RetentionPolicy
+                       ) -> PreflightRejectionCode | None:
+    """Distinguish an unbounded/over-long request from a weaker purge duty."""
+    if retention_covered(requested, granted):
+        return None
+    probe = RetentionPolicy(requested.duration, DeleteOnExpiry())
+    if retention_covered(probe, granted):
+        return PreflightRejectionCode.WEAKER_PURGE
+    return PreflightRejectionCode.RETENTION
+
+
+def _legacy_preflight_decision(request: AdmissionRequest, admitted: bool,
+                               code: PreflightRejectionCode | None,
+                               reason: str) -> PreflightDecision:
+    """Build a preflight decision for the legacy declaration-level request.
+
+    The legacy request carries one ``as_of_ns`` and no separate decision-time
+    axis, so both fields record that instant. The verdict is still a preflight
+    decision and never a release-admission receipt.
+    """
+    pair_ids = tuple(sorted(
+        f"{action}:{obj}"
+        for action in request.requested_actions
+        for obj in request.requested_objects
+    ))
+    basis = "|".join((
+        str(request.as_of_ns),
+        request.use_profile,
+        request.release_identity.release_id,
+        ",".join(pair_ids),
+        "" if code is None else code.value,
+        reason,
+    ))
+    decision_id = "preflight:" + hashlib.sha256(basis.encode("utf-8")).hexdigest()[:16]
+    return PreflightDecision(
+        decision_id=decision_id,
+        admitted=admitted,
+        code=code,
+        reason=reason,
+        decision_at_ns=request.as_of_ns,
+        data_as_of_ns=request.as_of_ns,
+        profile_id=request.use_profile,
+        release_id=request.release_identity.release_id,
+        requested_pair_ids=pair_ids,
+        capability_facts=CapabilityFacts(
+            required_capabilities=frozenset(request.declared_capabilities),
+            producer_declared_capabilities=frozenset(),
+            release_available_capabilities=frozenset(),
+            verified_capabilities=frozenset(),
+        ),
+    )
+
+
+def _reject(request: AdmissionRequest, code: PreflightRejectionCode,
+            reason: str) -> PreflightDecision:
+    """Build one fail-closed preflight decision carrying a typed code."""
+    return _legacy_preflight_decision(request, False, code, reason)
+
+
+def _coverage_failure(declarations: ReleaseDeclarations, request: AdmissionRequest
+                      ) -> PreflightDecision | None:
+    """Require all nine declared coverage dimensions to pass their own checks."""
+    try:
+        validate_coverage_certificate(
+            declarations.coverage,
+            {
+                "provider": request.scope.provider,
+                "product": request.scope.product,
+                "venue": request.scope.venue,
+                "segment": request.scope.segment,
+            },
+            request.release_identity.release_id,
+            request.as_of_ns,
+        )
+    except DatasetAdmissionError:
+        return _reject(request, PreflightRejectionCode.INCOMPLETE_COVERAGE,
+                       "one or more coverage dimensions are incomplete or not passing")
+    return None
 
 
 def _check_declarations(request: AdmissionRequest,
-                        declarations: ReleaseDeclarations) -> AdmissionDecision | None:
+                        declarations: ReleaseDeclarations) -> PreflightDecision | None:
     """Check named release declarations without claiming verification."""
     identity = request.release_identity
+    if type(declarations.contract_version) is not int or (
+        declarations.contract_version != CONTRACT_VERSION
+    ):
+        return _reject(request, PreflightRejectionCode.CONTRACT_VERSION,
+                       "NDC contract version is unknown or stale")
     for field in ("schema_version", "envelope_version"):
         value = getattr(declarations, field)
         if type(value) is not int or value <= 0:
-            return _reject(RejectionCode.SCHEMA_ENVELOPE, f"{field} is not a positive integer")
+            return _reject(request, PreflightRejectionCode.SCHEMA_ENVELOPE,
+                           f"{field} is not a positive integer")
     if not _named(declarations.publisher_identity) or (
         declarations.publisher_identity != identity.publisher_identity
     ):
-        return _reject(RejectionCode.PUBLISHER_IDENTITY, "publisher identity differs")
-    if not _named(declarations.signature_receipt) or not _digest(identity.manifest_sha256) or (
+        return _reject(request, PreflightRejectionCode.PUBLISHER_IDENTITY,
+                       "publisher identity differs")
+    if not _named(declarations.signature_receipt):
+        return _reject(request, PreflightRejectionCode.INVALID_SIGNATURE,
+                       "no named signature receipt")
+    if not _digest(identity.manifest_sha256) or (
         declarations.manifest_sha256 != identity.manifest_sha256
     ):
-        return _reject(RejectionCode.SIGNATURE_INTEGRITY, "no named signature or manifest receipt")
+        return _reject(request, PreflightRejectionCode.DIGEST_MISMATCH,
+                       "manifest digest does not match the request")
+    if identity.release_id not in declarations.signature_receipt:
+        return _reject(request, PreflightRejectionCode.INVALID_SIGNATURE,
+                       "signature receipt is not bound to this release")
     if not _digest(identity.data_sha256) or not declarations.artifact_digests or not all(
         _digest(item) for item in declarations.artifact_digests
     ):
-        return _reject(RejectionCode.ARTIFACT_DIGESTS, "artifact digests are missing or malformed")
+        return _reject(request, PreflightRejectionCode.ARTIFACT_DIGESTS,
+                       "artifact digests are missing or malformed")
     if not _named(declarations.source_lineage_reference):
-        return _reject(RejectionCode.SOURCE_LINEAGE, "source lineage is not named")
+        return _reject(request, PreflightRejectionCode.SOURCE_LINEAGE,
+                       "source lineage is not named")
+    if not _named(declarations.correction_lineage_reference):
+        return _reject(request, PreflightRejectionCode.CORRECTION_LINEAGE,
+                       "correction lineage is not named")
     if not _named(declarations.rights_evidence_reference):
-        return _reject(RejectionCode.RIGHTS_EVIDENCE, "rights evidence is not named")
-    if not _named(declarations.coverage_certificate) or (
-        declarations.coverage_verdict != COVERAGE_VERDICT
-    ):
-        return _reject(RejectionCode.COVERAGE, "no passing named coverage certificate")
+        return _reject(request, PreflightRejectionCode.RIGHTS_EVIDENCE,
+                       "rights evidence is not named")
+    check = _coverage_failure(declarations, request)
+    if check is not None:
+        return check
     if declarations.pit_basis != PIT_BASIS or declarations.pit_as_of_ns != request.as_of_ns:
-        return _reject(RejectionCode.PIT_CONSISTENCY, "PIT basis or as-of instant differs")
+        return _reject(request, PreflightRejectionCode.PIT_CONSISTENCY,
+                       "PIT basis or as-of instant differs")
     return None
 
 
@@ -336,39 +430,46 @@ def _check_scope_shape(scope: UseScope) -> bool:
     )
 
 
-def _check_use(request: AdmissionRequest) -> AdmissionDecision | None:
+def _check_use(request: AdmissionRequest) -> PreflightDecision | None:
     """Check profile coverage, declared identity, retention and objects."""
     profile = use_profile(request.use_profile)
     if profile is None or profile.version != CONSUMER_USE_MODEL_VERSION:
-        return _reject(RejectionCode.USE_SCOPE, "unknown or stale use profile")
+        return _reject(request, PreflightRejectionCode.USE_SCOPE,
+                       "unknown or stale use profile")
     actions = request.requested_actions
     if not isinstance(actions, tuple) or len(set(actions)) != len(actions) or (
         set(actions) != set(profile.required_actions)
     ):
-        return _reject(RejectionCode.USE_SCOPE, "requested actions differ from the profile")
+        return _reject(request, PreflightRejectionCode.USE_SCOPE,
+                       "requested actions differ from the profile")
     if request.declared_capabilities != profile.required_capabilities:
-        return _reject(RejectionCode.USE_SCOPE, "declared capabilities differ from the profile")
+        return _reject(request, PreflightRejectionCode.USE_SCOPE,
+                       "declared capabilities differ from the profile")
     if request.purpose != PURPOSE or request.recipient != RECIPIENT_CLASS:
-        return _reject(RejectionCode.USE_SCOPE, "purpose or recipient is not the declared use")
+        return _reject(request, PreflightRejectionCode.USE_SCOPE,
+                       "purpose or recipient is not the declared use")
     if not _named(request.actor) or not _named(request.licensee) or (
         not _named(request.release_identity.release_id)
     ):
-        return _reject(RejectionCode.USE_SCOPE, "actor, licensee or release id is not named")
+        return _reject(request, PreflightRejectionCode.USE_SCOPE,
+                       "actor, licensee or release id is not named")
     if type(request.as_of_ns) is not int or request.as_of_ns <= 0:
-        return _reject(RejectionCode.PIT_CONSISTENCY, "as_of_ns is not a positive integer")
+        return _reject(request, PreflightRejectionCode.PIT_CONSISTENCY,
+                       "as_of_ns is not a positive integer")
     if not _check_scope_shape(request.scope):
-        return _reject(RejectionCode.USE_SCOPE, "request scope is not a named runtime scope")
+        return _reject(request, PreflightRejectionCode.USE_SCOPE,
+                       "request scope is not a named runtime scope")
     objects = request.requested_objects
     if not isinstance(objects, tuple) or not objects or not all(_named(item) for item in objects):
-        return _reject(RejectionCode.USE_SCOPE, "requested objects are not named")
+        return _reject(request, PreflightRejectionCode.USE_SCOPE,
+                       "requested objects are not named")
     for action in actions:
         if not any(item in ACTION_OBJECTS[action] for item in objects):
-            return _reject(RejectionCode.USE_SCOPE, f"{action} has no requested object")
-    retention = request.requested_retention
-    if type(retention.max_days) is not int or retention.max_days <= 0 or (
-        not _named(retention.purge_rule)
-    ):
-        return _reject(RejectionCode.RETENTION, "requested retention is unbounded")
+            return _reject(request, PreflightRejectionCode.USE_SCOPE,
+                           f"{action} has no requested object")
+    if not _typed_retention(request.requested_retention):
+        return _reject(request, PreflightRejectionCode.RETENTION,
+                       "requested retention is not a typed bounded policy")
     return None
 
 
@@ -410,48 +511,82 @@ def _effective(grant: PermissionGrant, as_of_ns: int) -> bool:
 
 
 def _check_grants(request: AdmissionRequest,
-                  grants: tuple[PermissionGrant, ...]) -> AdmissionDecision | None:
+                  grants: tuple[PermissionGrant, ...]) -> PreflightDecision | None:
     """Evaluate every requested action against exactly one matching grant."""
     by_action: dict[str, list[PermissionGrant]] = {}
     for grant in grants:
         by_action.setdefault(grant.action, []).append(grant)
     if len({grant.grant_id for grant in grants}) != len(grants):
-        return _reject(RejectionCode.AMBIGUOUS_GRANTS, "grant ids are not unique")
+        return _reject(request, PreflightRejectionCode.AMBIGUOUS_GRANTS,
+                       "grant ids are not unique")
     for action in request.requested_actions:
         matches = by_action.get(action, [])
         if not matches:
-            return _reject(RejectionCode.RIGHTS_EVIDENCE, f"{action} has no grant")
+            return _reject(request, PreflightRejectionCode.RIGHTS_EVIDENCE,
+                           f"{action} has no grant")
         if len(matches) != 1:
-            return _reject(RejectionCode.AMBIGUOUS_GRANTS, f"{action} has no unique grant")
+            return _reject(request, PreflightRejectionCode.AMBIGUOUS_GRANTS,
+                           f"{action} has no unique grant")
         grant = matches[0]
         if grant.decision is not GrantDecision.PERMIT:
-            return _reject(RejectionCode.RIGHTS_EVIDENCE, f"{action} is denied")
+            return _reject(request, PreflightRejectionCode.RIGHTS_EVIDENCE, f"{action} is denied")
         if not _named(grant.evidence_reference) or not _named(grant.grant_id):
-            return _reject(RejectionCode.RIGHTS_EVIDENCE, f"{action} has no written evidence")
-        if any(getattr(grant, field) != getattr(request, field) for field in (
-            "actor", "purpose", "licensee", "recipient"
-        )):
-            return _reject(RejectionCode.RIGHTS_EVIDENCE, f"{action} grant identity differs")
+            return _reject(request, PreflightRejectionCode.RIGHTS_EVIDENCE,
+                           f"{action} has no written evidence")
+        if grant.actor != request.actor:
+            return _reject(request, PreflightRejectionCode.ACTOR_IDENTITY,
+                           f"{action} grant actor differs")
+        if grant.purpose != request.purpose:
+            return _reject(request, PreflightRejectionCode.PURPOSE,
+                           f"{action} grant purpose differs")
+        if grant.licensee != request.licensee:
+            return _reject(request, PreflightRejectionCode.LICENSEE_IDENTITY,
+                           f"{action} grant licensee differs")
+        if grant.recipient != request.recipient:
+            return _reject(request, PreflightRejectionCode.RECIPIENT_IDENTITY,
+                           f"{action} grant recipient differs")
         if not _effective(grant, request.as_of_ns):
-            return _reject(RejectionCode.RIGHTS_EVIDENCE, f"{action} grant is not effective")
+            return _reject(request, PreflightRejectionCode.GRANT_EXPIRED_AT_DECISION,
+                           f"{action} grant is not effective")
         if grant.data_object not in request.requested_objects or (
             grant.data_object not in ACTION_OBJECTS[action]
         ):
-            return _reject(RejectionCode.USE_SCOPE, f"{action} grant object is not requested")
+            return _reject(request, PreflightRejectionCode.USE_SCOPE,
+                           f"{action} grant object is not requested")
+        if any(getattr(request.scope, field) != getattr(grant.scope, field) for field in (
+            "provider", "product", "venue", "segment"
+        )):
+            return _reject(request, PreflightRejectionCode.SOURCE_BINDING,
+                           f"{action} grant source does not match")
         if not _scope_contained(request.scope, grant.scope):
-            return _reject(RejectionCode.USE_SCOPE, f"{action} grant scope does not cover")
-        granted_retention = grant.retention
-        if type(granted_retention.max_days) is not int or (
-            granted_retention.max_days <= 0 or not _named(granted_retention.purge_rule)
-        ) or request.requested_retention.max_days > granted_retention.max_days:
-            return _reject(RejectionCode.RETENTION, f"{action} retention is not covered")
+            if not _set_contained(request.scope.fields, grant.scope.fields):
+                return _reject(request, PreflightRejectionCode.OUT_OF_SCOPE_FIELD,
+                               f"{action} grant fields do not cover")
+            if not _set_contained(request.scope.modalities, grant.scope.modalities):
+                return _reject(request, PreflightRejectionCode.OUT_OF_SCOPE_MODALITY,
+                               f"{action} grant modalities do not cover")
+            if not _interval_contained(
+                request.scope.data_time_from_ns, request.scope.data_time_to_ns,
+                grant.scope.data_time_from_ns, grant.scope.data_time_to_ns,
+            ):
+                return _reject(request, PreflightRejectionCode.DATA_TIME,
+                               f"{action} grant data time does not cover")
+            return _reject(request, PreflightRejectionCode.USE_SCOPE,
+                           f"{action} grant scope does not cover")
+        failure = _retention_failure(request.requested_retention, grant.retention)
+        if failure is not None:
+            return _reject(request, failure, f"{action} retention is not covered")
     return None
 
 
 def evaluate_consumer_use(request: AdmissionRequest,
                           grants: tuple[PermissionGrant, ...],
-                          declarations: ReleaseDeclarations) -> AdmissionDecision:
-    """Evaluate declarations then every requested action, failing closed."""
+                          declarations: ReleaseDeclarations) -> PreflightDecision:
+    """Validate declarations and grants, failing closed with a preflight verdict.
+
+    This is declaration validation only. The returned ``PreflightDecision`` is
+    never an NDC release-admission receipt and is not consumed by research jobs.
+    """
     check = _check_declarations(request, declarations)
     if check is not None:
         return check
@@ -461,7 +596,7 @@ def evaluate_consumer_use(request: AdmissionRequest,
     check = _check_grants(request, grants)
     if check is not None:
         return check
-    return AdmissionDecision(admitted=True, code=None, reason="")
+    return _legacy_preflight_decision(request, True, None, "")
 
 
 # --- W2.1 C1-C3 declaration-level consumer admission preflight ---------------
@@ -516,6 +651,21 @@ class PreflightRejectionCode(StrEnum):
     RELEASE_CAPABILITY = "REJECT_RELEASE_CAPABILITY"
     VERIFIED_CAPABILITY = "REJECT_VERIFIED_CAPABILITY"
     CAPABILITY_ASSERTION = "REJECT_CAPABILITY_ASSERTION"
+    # C4-C6 declaration-level refusals. Each names one distinct failure mode;
+    # none claims a cryptographic or byte-level verification ran.
+    CONTRACT_VERSION = "REJECT_CONTRACT_VERSION"
+    INVALID_SIGNATURE = "REJECT_INVALID_SIGNATURE"
+    DIGEST_MISMATCH = "REJECT_DIGEST_MISMATCH"
+    CORRECTION_LINEAGE = "REJECT_CORRECTION_LINEAGE"
+    INCOMPLETE_COVERAGE = "REJECT_INCOMPLETE_COVERAGE"
+    OUT_OF_SCOPE_FIELD = "REJECT_OUT_OF_SCOPE_FIELD"
+    OUT_OF_SCOPE_MODALITY = "REJECT_OUT_OF_SCOPE_MODALITY"
+    WEAKER_PURGE = "REJECT_WEAKER_PURGE"
+
+
+# The legacy evaluator now shares this single typed vocabulary. The former
+# name stays as an alias so callers keep one code type for every refusal.
+RejectionCode = PreflightRejectionCode
 
 
 # Fixed precedence for simultaneous dimension failures. It does not depend on
@@ -533,8 +683,11 @@ PREFLIGHT_FAILURE_ORDER: tuple[PreflightRejectionCode, ...] = (
     PreflightRejectionCode.USAGE_MODE,
     PreflightRejectionCode.DELIVERY_METHOD,
     PreflightRejectionCode.USE_SCOPE,
+    PreflightRejectionCode.OUT_OF_SCOPE_FIELD,
+    PreflightRejectionCode.OUT_OF_SCOPE_MODALITY,
     PreflightRejectionCode.DATA_TIME,
     PreflightRejectionCode.RETENTION,
+    PreflightRejectionCode.WEAKER_PURGE,
     PreflightRejectionCode.GRANT_NOT_EFFECTIVE_AT_DECISION,
     PreflightRejectionCode.GRANT_EXPIRED_AT_DECISION,
 )
@@ -769,6 +922,10 @@ def _check_preflight_declarations(request: ConsumerUseRequest,
     """Check named release declarations without claiming cryptographic checks."""
     declarations = release.declarations
     identity = request.release_identity
+    if type(declarations.contract_version) is not int or (
+        declarations.contract_version != CONTRACT_VERSION
+    ):
+        return PreflightRejectionCode.CONTRACT_VERSION
     for field in ("schema_version", "envelope_version"):
         value = getattr(declarations, field)
         if type(value) is not int or value <= 0:
@@ -777,22 +934,36 @@ def _check_preflight_declarations(request: ConsumerUseRequest,
         declarations.publisher_identity != identity.publisher_identity
     ):
         return PreflightRejectionCode.PUBLISHER_IDENTITY
-    if not _named(declarations.signature_receipt) or not _digest(identity.manifest_sha256) or (
+    if not _named(declarations.signature_receipt):
+        return PreflightRejectionCode.INVALID_SIGNATURE
+    if not _digest(identity.manifest_sha256) or (
         declarations.manifest_sha256 != identity.manifest_sha256
     ):
-        return PreflightRejectionCode.SIGNATURE_INTEGRITY
+        return PreflightRejectionCode.DIGEST_MISMATCH
+    if identity.release_id not in declarations.signature_receipt:
+        return PreflightRejectionCode.INVALID_SIGNATURE
     if not _digest(identity.data_sha256) or not declarations.artifact_digests or not all(
         _digest(item) for item in declarations.artifact_digests
     ):
         return PreflightRejectionCode.ARTIFACT_DIGESTS
     if not _named(declarations.source_lineage_reference):
         return PreflightRejectionCode.SOURCE_LINEAGE
+    if not _named(declarations.correction_lineage_reference):
+        return PreflightRejectionCode.CORRECTION_LINEAGE
     if not _named(declarations.rights_evidence_reference):
         return PreflightRejectionCode.RIGHTS_EVIDENCE
-    if not _named(declarations.coverage_certificate) or (
-        declarations.coverage_verdict != COVERAGE_VERDICT
-    ):
-        return PreflightRejectionCode.COVERAGE
+    try:
+        validate_coverage_certificate(
+            declarations.coverage,
+            {"provider": request.requested_uses[0].scope.provider,
+             "product": request.requested_uses[0].scope.source_product,
+             "venue": request.requested_uses[0].scope.venue,
+             "segment": request.requested_uses[0].scope.segment},
+            identity.release_id,
+            request.time_axes.data_as_of_ns,
+        )
+    except DatasetAdmissionError:
+        return PreflightRejectionCode.INCOMPLETE_COVERAGE
     if not _named(release.capabilities.evidence_reference) or (
         release.capabilities.evidence_reference != declarations.rights_evidence_reference
     ):
@@ -865,10 +1036,7 @@ def _check_preflight_use(request: ConsumerUseRequest,
             use.scope.data_time_from_ns, use.scope.data_time_to_ns,
         ):
             return PreflightRejectionCode.DATA_TIME
-    requested_retention = request.requested_retention
-    if type(requested_retention.max_days) is not int or requested_retention.max_days <= 0 or (
-        not _named(requested_retention.purge_rule)
-    ):
+    if not _typed_retention(request.requested_retention):
         return PreflightRejectionCode.RETENTION
     return None
 
@@ -889,16 +1057,6 @@ def _interval_contained(requested_from: int | None, requested_to: int | None,
             and granted_to is not None
             and granted_to < requested_to
         )
-    )
-
-
-def _retention_covered(requested: RetentionPolicy, granted: RetentionPolicy) -> bool:
-    """Require a bounded grant with an explicit purge rule to cover a request."""
-    return (
-        type(granted.max_days) is int and granted.max_days > 0
-        and _named(granted.purge_rule)
-        and type(requested.max_days) is int and requested.max_days > 0
-        and requested.max_days <= granted.max_days
     )
 
 
@@ -952,16 +1110,20 @@ def _grant_dimension_failures(request: ConsumerUseRequest, use: RequestedUse,
         failures.add(PreflightRejectionCode.USAGE_MODE)
     if grant.scope.delivery_method != use.scope.delivery_method:
         failures.add(PreflightRejectionCode.DELIVERY_METHOD)
-    if any(not _set_contained(getattr(use.scope, field), getattr(grant.scope, field))
-           for field in ("instruments", "fields", "modalities")):
+    if not _set_contained(use.scope.instruments, grant.scope.instruments):
         failures.add(PreflightRejectionCode.USE_SCOPE)
+    if not _set_contained(use.scope.fields, grant.scope.fields):
+        failures.add(PreflightRejectionCode.OUT_OF_SCOPE_FIELD)
+    if not _set_contained(use.scope.modalities, grant.scope.modalities):
+        failures.add(PreflightRejectionCode.OUT_OF_SCOPE_MODALITY)
     if not _interval_contained(
         use.scope.data_time_from_ns, use.scope.data_time_to_ns,
         grant.scope.data_time_from_ns, grant.scope.data_time_to_ns,
     ):
         failures.add(PreflightRejectionCode.DATA_TIME)
-    if not _retention_covered(request.requested_retention, grant.retention):
-        failures.add(PreflightRejectionCode.RETENTION)
+    retention_failure = _retention_failure(request.requested_retention, grant.retention)
+    if retention_failure is not None:
+        failures.add(retention_failure)
     if type(grant.effective_from_ns) is not int or type(grant.effective_until_ns) is not int:
         failures.add(PreflightRejectionCode.RIGHTS_EVIDENCE)
     else:
@@ -1059,6 +1221,7 @@ def preflight_consumer_admission(
 __all__ = [
     "CONSUMER_OPERATIONS",
     "CONSUMER_USE_MODEL_VERSION",
+    "CONTRACT_VERSION",
     "CREATE_DERIVED",
     "INTRADAY_CAPABILITY",
     "PIT_BASIS",
@@ -1068,7 +1231,6 @@ __all__ = [
     "RECIPIENT_CLASS",
     "TIME_AXIS_NAMES",
     "USE_PROFILES",
-    "AdmissionDecision",
     "AdmissionRequest",
     "CapabilityFacts",
     "ConsumerUseRequest",
@@ -1089,6 +1251,13 @@ __all__ = [
     "TimeAxes",
     "UseProfile",
     "UseScope",
+    "Bounded",
+    "DeleteOnExpiry",
+    "Indefinite",
+    "LegalHold",
+    "NoRetention",
+    "PurgeAfter",
+    "RetentionPolicy",
     "evaluate_consumer_use",
     "preflight_consumer_admission",
     "use_profile",

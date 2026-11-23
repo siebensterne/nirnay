@@ -11,9 +11,20 @@ import pytest
 from quantlab.cli import main
 from quantlab.dataset_admission import (
     CONSUMER_OPERATIONS,
+    COVERAGE_DIMENSIONS,
+    Bounded,
+    CoverageVerdict,
     DatasetAdmissionError,
+    DeleteOnExpiry,
+    Indefinite,
+    LegalHold,
+    NoRetention,
+    PurgeAfter,
+    RetentionPolicy,
     admit_published_dataset,
+    check_dimension_coverage,
     load_admission,
+    retention_covered,
     validate_dataset_admission,
 )
 from quantlab.research_jobs import run_job
@@ -28,6 +39,27 @@ SCOPE = {
     "venue": "venue-a",
     "segment": "segment-cash",
 }
+
+
+def _dimensions(count: int = 10) -> list[dict[str, Any]]:
+    """Build one abstract, fully declared report for each W2 dimension."""
+    return [
+        {
+            "dimension": name,
+            "applicability": "APPLICABLE",
+            "scope": dict(SCOPE),
+            "denominator_identity": f"denominator:{name}",
+            "denominator_value": count,
+            "as_of_ns": AS_OF_NS,
+            "numerator": count,
+            "missing_count": 0,
+            "rejected_count": 0,
+            "gaps": [],
+            "verdict": "PASS",
+            "evidence_reference": f"evidence:{name}:2026",
+        }
+        for name in COVERAGE_DIMENSIONS
+    ]
 
 
 def _record() -> dict[str, Any]:
@@ -61,11 +93,10 @@ def _record() -> dict[str, Any]:
         "coverage": {
             "certificate_reference": "coverage:certificate-2026",
             "valid_until": "2026-12-31",
-            "verdict": "PASS",
-            "completeness": "COMPLETE",
             "scope": dict(SCOPE),
             "universe_id": "abstract-universe",
             "as_of_ns": AS_OF_NS,
+            "dimensions": _dimensions(),
         },
         "release": {
             "release_id": "release:abstract-2026",
@@ -276,20 +307,83 @@ def test_rights_review_date_and_retention_are_required() -> None:
         assert validate_dataset_admission(accepted).rights_record_reference
 
 
-@pytest.mark.parametrize("verdict", ["UNKNOWN", "PENDING", "FAILED", "FAIL", None])
-def test_coverage_verdict_must_pass(verdict: object) -> None:
-    """An absent or denied coverage verdict cannot admit a dataset."""
+@pytest.mark.parametrize("verdict", ["UNKNOWN", "REJECT", "PENDING", None])
+def test_dimension_verdict_must_pass(verdict: object) -> None:
+    """An absent, rejected or unknown dimension verdict cannot admit a dataset."""
     payload = _record()
-    payload["coverage"]["verdict"] = verdict
-    _refused(payload, "coverage.verdict")
+    payload["coverage"]["dimensions"][0]["verdict"] = verdict
+    _refused(payload, "coverage dimension instrument.verdict")
 
 
-def test_coverage_completeness_must_pass() -> None:
-    """A bounded or unknown completeness claim is not a passing certificate."""
-    for completeness in ("PARTIAL", "UNKNOWN", None):
-        payload = _record()
-        payload["coverage"]["completeness"] = completeness
-        _refused(payload, "coverage.completeness")
+@pytest.mark.parametrize("field", [
+    "scope", "denominator_identity", "denominator_value", "as_of_ns", "numerator",
+    "missing_count", "rejected_count", "gaps", "verdict", "evidence_reference",
+])
+def test_each_applicable_dimension_declares_every_required_field(field: str) -> None:
+    """No dimension may omit one of its own scope or denominator fields."""
+    payload = _record()
+    del payload["coverage"]["dimensions"][0][field]
+    _refused(payload, f"coverage dimension instrument.{field}")
+
+
+def test_nine_dimensions_are_declared_exactly_once() -> None:
+    """A single verdict or a missing/duplicated dimension cannot cover a release."""
+    assert len(COVERAGE_DIMENSIONS) == 9
+    payload = _record()
+    payload["coverage"]["dimensions"] = _dimensions()[:-1]
+    _refused(payload, "coverage.dimensions")
+
+    duplicate = _record()
+    duplicate["coverage"]["dimensions"] = [*_dimensions(), _dimensions()[0]]
+    _refused(duplicate, "exactly once")
+
+    aggregate = _record()
+    aggregate["coverage"]["verdict"] = "PASS"
+    _refused(aggregate, "not an aggregate verdict")
+
+    percentage = _record()
+    percentage["coverage"]["percentage"] = 100
+    _refused(percentage, "not an aggregate percentage")
+
+
+def test_not_applicable_dimension_carries_a_reason() -> None:
+    """An N/A dimension must state why it does not apply."""
+    payload = _record()
+    mbo = payload["coverage"]["dimensions"][COVERAGE_DIMENSIONS.index("mbo")]
+    mbo["applicability"] = "NOT_APPLICABLE"
+    mbo["not_applicable_reason"] = "outside the declared scope"
+    assert validate_dataset_admission(payload).coverage_certificate_reference
+
+    missing_reason = _record()
+    mbo = missing_reason["coverage"]["dimensions"][COVERAGE_DIMENSIONS.index("mbo")]
+    mbo["applicability"] = "NOT_APPLICABLE"
+    _refused(missing_reason, "not_applicable_reason")
+
+
+def test_denominator_must_be_consistent_and_never_pass_by_default() -> None:
+    """Absent, zero or inconsistent denominators never yield a PASS verdict."""
+    payload = _record()
+    payload["coverage"]["dimensions"][0]["numerator"] = 9
+    _refused(payload, "inconsistent denominator")
+
+    inconsistent = _record()
+    inconsistent["coverage"]["dimensions"][0]["denominator_value"] = 0
+    _refused(inconsistent, "denominator_value")
+
+    unknown = _record()
+    unknown["coverage"]["dimensions"][0]["verdict"] = "UNKNOWN"
+    _refused(unknown, "verdict is UNKNOWN")
+
+
+def test_dimension_reports_are_returned_bound_to_the_record() -> None:
+    """The certificate is expressed as nine separate dimension reports."""
+    reports = check_dimension_coverage(
+        _record()["coverage"], SCOPE, "abstract-universe", AS_OF_NS
+    )
+    assert tuple(report.dimension for report in reports) == COVERAGE_DIMENSIONS
+    assert all(report.verdict is CoverageVerdict.PASS for report in reports)
+    assert all(report.scope == SCOPE for report in reports)
+    assert all(report.as_of_ns == AS_OF_NS for report in reports)
 
 
 def test_coverage_certificate_reference_is_required() -> None:
@@ -521,3 +615,53 @@ def test_cli_admit_dataset_refuses_unreadable_record(
                  "--admission", str(tmp_path / "absent.json")])
     assert code == 2
     assert "admission record is missing" in capsys.readouterr().err
+
+
+# --- C4 typed retention containment (abstract policy objects) ----------------
+
+
+@pytest.mark.parametrize(("requested", "granted", "covered"), [
+    (RetentionPolicy(NoRetention(), DeleteOnExpiry()),
+     RetentionPolicy(Indefinite(), LegalHold("hold:1")), True),
+    (RetentionPolicy(Bounded(30), DeleteOnExpiry()),
+     RetentionPolicy(Bounded(90), DeleteOnExpiry()), True),
+    (RetentionPolicy(Bounded(90), DeleteOnExpiry()),
+     RetentionPolicy(Indefinite(), DeleteOnExpiry()), True),
+    (RetentionPolicy(Bounded(90), LegalHold("hold:r")),
+     RetentionPolicy(Bounded(90), LegalHold("hold:g")), True),
+    (RetentionPolicy(Bounded(90), PurgeAfter("event:r")),
+     RetentionPolicy(Bounded(90), LegalHold("hold:g")), True),
+    (RetentionPolicy(Bounded(91), DeleteOnExpiry()),
+     RetentionPolicy(Bounded(90), DeleteOnExpiry()), False),
+    (RetentionPolicy(Indefinite(), DeleteOnExpiry()),
+     RetentionPolicy(Bounded(90), DeleteOnExpiry()), False),
+    (RetentionPolicy(NoRetention(), DeleteOnExpiry()),
+     RetentionPolicy(NoRetention(), DeleteOnExpiry()), True),
+    (RetentionPolicy(Bounded(30), LegalHold("hold:r")),
+     RetentionPolicy(Bounded(90), DeleteOnExpiry()), False),
+])
+def test_retention_containment_requires_duration_and_purge(
+    requested: RetentionPolicy, granted: RetentionPolicy, covered: bool
+) -> None:
+    """A longer duration or a weaker purge duty is never covered."""
+    assert retention_covered(requested, granted) is covered
+
+
+def test_shorter_duration_with_weaker_purge_is_rejected() -> None:
+    """A shorter request cannot buy a weaker purge obligation."""
+    requested = RetentionPolicy(Bounded(10), LegalHold("hold:request"))
+    granted = RetentionPolicy(Bounded(90), DeleteOnExpiry())
+    assert retention_covered(requested, granted) is False
+    stronger_purge = RetentionPolicy(Bounded(10), DeleteOnExpiry())
+    assert retention_covered(stronger_purge, granted) is True
+
+
+def test_none_is_not_an_absent_or_unlimited_policy() -> None:
+    """An untyped None never stands in for no-retention or indefinite."""
+    untyped = RetentionPolicy(None, DeleteOnExpiry())  # type: ignore[arg-type]
+    unlimited = RetentionPolicy(Indefinite(), DeleteOnExpiry())
+    bounded = RetentionPolicy(Bounded(30), DeleteOnExpiry())
+    assert retention_covered(untyped, unlimited) is False
+    assert retention_covered(untyped, bounded) is False
+    assert retention_covered(bounded, untyped) is False
+    assert retention_covered(unlimited, untyped) is False
