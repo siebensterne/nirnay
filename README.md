@@ -8,7 +8,7 @@ complementary platform under `engineering/architecture/decisions/ADR-0001-data-o
 **Release status:** research/paper engineering candidate. This repository is not a certified broker-connected trading system, not a SEBI/exchange-approved algo product, and not evidence of profitable alpha. Live order routing is hard-disabled. Every capability statement below distinguishes code present from external verification still required.
 
 <!-- CURRENT-STATE
-code_commit: 14c274224249af48eedc0b50308fa2b109a5bc44
+code_commit: 2af9a9a97b611606f6cca8306ef611d790c16ee0
 verified_on: 2026-11-21
 ci_run: 45062286601
 scope: make check + hosted CI 45062286601 on f250fee (12/12); active suite 352 passed, 90 market-shaped-fixture tests deselected under owner directive
@@ -466,6 +466,7 @@ once published; a new run adds a new dated file instead of rewriting history.
 | Dated evidence | `evidence/SOURCE-INGESTION-FREEZE-2026-11-23.md` | RRP-004 freeze of duplicate ingestion, raw-archive, decoder and provider-config paths; ownership targets, migration order, retained Nirnay scope and gate result |
 | Dated evidence | `evidence/SYNTHETIC-TEST-POLICY-NIRNAY-2026-11-23.md` | enforced inventory counts, inspection commands, withdrawn coverage and current test figures |
 | Dated evidence | `evidence/C3-CONSUMER-USE-PERMISSIONS-2026-11-23.md` | C3 consumer-use and permission-evaluation implementation record, gate counts and explicit non-goals |
+| Dated evidence | `evidence/W2-1-C1-C3-CONSUMER-ADMISSION-2026-11-24.md` | W2.1 C1-C3 admission conformance: six time axes, exact pair coverage, four capability facts, typed codes and gate results |
 | Dated evidence | `evidence/RUST-TEST-POLICY-NIRNAY-2026-11-23.md` | gated Rust targets and src modules, inventory and enforced default counts, withdrawn coverage and historical-count disclaimer |
 | Dated evidence | `evidence/OWNER-DIRECTIVE-2026-11-22.md` | owner data-freeze directive: no synthetic market data, INR 0 data budget, STOP on missing evidence or authorization |
 | Dated evidence | `evidence/M4-2-1-CLAIM-SCOPE-2026-11-22.md` | M4.2.1 narrowed to implemented, not real-market verified; calendar provenance, coverage-bound and bar-anchor findings |
