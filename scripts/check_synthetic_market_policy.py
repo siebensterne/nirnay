@@ -137,11 +137,13 @@ class SyntheticMarketPolicyTests(unittest.TestCase):
     """Adversarial tests for the source-pattern gate."""
 
     def test_generator_call_is_detected(self) -> None:
+        """Verify generator call is detected."""
         text = "def synthetic_events(size, seed):\n    return synthetic_bars(size, seed)\n"
         rules = {finding.rule for finding in scan_text(text)}
         self.assertEqual(rules, {"prohibited-generator"})
 
     def test_fake_session_identities_are_detected(self) -> None:
+        """Verify fake session identities are detected."""
         text = "run_demo()\nPYTHONPATH=research/python/src python3 -m quantlab.cli demo\n"
         findings = scan_text(text)
         self.assertTrue(all(item.rule == "fake-market-session" for item in findings))
@@ -150,15 +152,18 @@ class SyntheticMarketPolicyTests(unittest.TestCase):
                           '"dataset_id": "research-job-synthetic-nse-session"')])
 
     def test_mock_feed_name_is_detected_case_insensitively(self) -> None:
+        """Verify mock feed name is detected case insensitively."""
         findings = scan_text("class MockFeed:\n    pass\n")
         self.assertTrue(any(item.rule == "mock-feed" for item in findings))
 
     def test_synthetic_benchmark_entry_points_are_detected(self) -> None:
+        """Verify synthetic benchmark entry points are detected."""
         text = "python3 -m quantlab.bench --suite core\nBENCH-RESEARCH-OUTPUT size=200\n"
         rules = {finding.rule for finding in scan_text(text)}
         self.assertEqual(rules, {"synthetic-benchmark"})
 
     def test_benign_scalar_source_has_no_findings(self) -> None:
+        """Verify benign scalar source has no findings."""
         text = (
             "def percentile(values, fraction):\n"
             "    if not values:\n"
@@ -168,10 +173,12 @@ class SyntheticMarketPolicyTests(unittest.TestCase):
         self.assertEqual(scan_text(text), [])
 
     def test_finding_carries_line_number(self) -> None:
+        """Verify finding carries line number."""
         findings = scan_text("# benign\nfirst = 1\nbuild_synthetic_dataset(out)\n")
         self.assertEqual([item.line for item in findings], [3])
 
     def test_gate_source_and_evidence_are_not_scanned(self) -> None:
+        """Verify gate source and evidence are not scanned."""
         self.assertFalse(is_scan_path(ROOT / SELF_REL))
         self.assertFalse(is_scan_path(ROOT / "evidence" / "OLD-RECORD.md"))
         self.assertTrue(
@@ -180,6 +187,7 @@ class SyntheticMarketPolicyTests(unittest.TestCase):
         )
 
     def test_injected_source_file_is_rejected(self) -> None:
+        """Verify injected source file is rejected."""
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             probe = root / "probe.py"
