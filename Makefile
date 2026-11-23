@@ -4,6 +4,7 @@
 #   check           full gate: static checks, Rust/Python tests, contracts
 #   check-static    static checks only; no python-test or rust-test
 #   freeze-check    RRP-004 frozen ingestion paths guard (with self-test)
+#   synthetic-market-policy-check  D11 source-pattern guard (with self-test)
 #   ci              full CI parity task
 #   assure          full assurance superset
 #   lint            Clippy with warnings denied (cargo xtask lint)
@@ -15,12 +16,13 @@
 #   tools           install the pinned Python tools
 # See README "Quick start" for dependency setup and gate scope.
 
-.PHONY: help ci assure check check-static lint test perf bench-ingress bench-research bench-experiments bench-latency bench-risk-oms docs-check freeze-check shellcheck-check generated-paths-check pollution-check style rust-style source-style python-ruff-style q-style prose-style references-check standards-check style-gate python-format-check rust-test python-test python-check cpp-test cpp-format-check schema-check verify-local fmt constraints sbom supply-chain wheels packaging-test bundle bundle-verify git-policy kdb-analyze archive-verify tools
+.PHONY: help ci assure check check-static lint test perf bench-ingress bench-risk-oms docs-check freeze-check synthetic-market-policy-check shellcheck-check generated-paths-check pollution-check style rust-style source-style python-ruff-style q-style prose-style references-check standards-check style-gate python-format-check rust-test python-test python-check cpp-test cpp-format-check schema-check verify-local fmt constraints sbom supply-chain wheels packaging-test bundle bundle-verify git-policy kdb-analyze archive-verify tools
 
 help:
 	@echo "check           full gate: static checks, Rust/Python tests, contracts"
 	@echo "check-static    static checks only; no python-test or rust-test"
 	@echo "freeze-check    RRP-004 frozen ingestion paths guard (with self-test)"
+	@echo "synthetic-market-policy-check  D11 source-pattern guard (with self-test)"
 	@echo "ci              full CI parity task"
 	@echo "assure          full assurance superset"
 	@echo "lint            Clippy with warnings denied (cargo xtask lint)"
@@ -43,6 +45,7 @@ check: check-static
 check-static:
 	$(MAKE) docs-check
 	$(MAKE) freeze-check
+	$(MAKE) synthetic-market-policy-check
 	$(MAKE) shellcheck-check
 	$(MAKE) generated-paths-check
 	$(MAKE) pollution-check
@@ -60,6 +63,9 @@ docs-check:
 freeze-check:
 	python3 scripts/check_source_ingestion_freeze.py --self-test
 	python3 scripts/check_source_ingestion_freeze.py
+synthetic-market-policy-check:
+	python3 scripts/check_synthetic_market_policy.py --self-test
+	python3 scripts/check_synthetic_market_policy.py
 shellcheck-check:
 	python3 scripts/check_shellcheck.py
 tools:
@@ -111,24 +117,14 @@ python-format-check:
 perf:
 	python3 scripts/check_compile_budget.py
 
-# Opt-in benchmarks. They print BENCH-* lines with measured counters and are
-# deliberately absent from `check` and from CI pass/fail gates. Emitted numbers
-# are not throughput or latency certificates; see evidence/PERFORMANCE-TEMPLATE.md
-# for the fields required of any dated result record.
+# Opt-in benchmarks. Remaining targets are Rust harnesses that print BENCH-*
+# lines with measured counters and are deliberately absent from `check` and CI
+# pass/fail gates. Emitted numbers are not throughput or latency certificates;
+# see evidence/PERFORMANCE-TEMPLATE.md for the fields required of any dated
+# result record. Under D11 the synthetic Python benchmark targets were retired
+# with their invented market observations and must not be restored.
 bench-ingress:
 	cargo test -p market-archive --test performance --features market-shaped-tests -- --ignored --nocapture --skip recovery_child
-
-bench-research:
-	PYTHONPATH=research/python/src python3 -m quantlab.bench --suite core --repeats 5 --sizes 200,800 --seed 7
-
-bench-experiments:
-	PYTHONPATH=research/python/src python3 -m quantlab.bench --suite experiments --workers 4 --repeats 5 --size 800 --seed 7
-
-# Historical-query and end-to-end data latency on synthetic PIT fixtures. Also
-# opt-in and excluded from check/CI; emits BENCH-HISTORICAL-QUERY and
-# BENCH-E2E-LATENCY lines with measured distributions and no thresholds.
-bench-latency:
-	PYTHONPATH=research/python/src python3 -m quantlab.bench --suite latency --repeats 5 --size 800 --seed 7
 
 bench-risk-oms:
 # D11 retired the synthetic risk-authority throughput workload; only the

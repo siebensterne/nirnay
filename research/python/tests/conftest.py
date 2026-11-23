@@ -2,17 +2,19 @@
 """Collection-time enforcement of the synthetic market-data test policy.
 
 Under the owner directive of 2026-11-22 (D1-D3), tests that construct invented
-market observations are not active CI evidence. The checked-in inventory
-``market_shaped_test_inventory.json`` is the authority for which tests are
-withdrawn. Deselection here does not depend on the ``-m`` expression in
-``pytest.ini``: overriding that expression from the command line cannot
-restore a prohibited test.
+market observations are not active CI evidence. The dated historical inventory
+``evidence/MARKET-SHAPED-TEST-INVENTORY-NIRNAY-2026-11-23.json`` records which
+legacy tests are withdrawn. Deselection here does not depend on a ``-m``
+expression: overriding a marker expression cannot restore a prohibited test.
 
 A module-level AST scan complements the inventory. Any collected test module
 that contains a market-domain construct and is absent from the inventory stops
 collection with a message that requires an inventory update. Under D11 the
-synthetic artifacts themselves were deleted from the active tree; this detector
-is retained so that any reintroduced synthetic market test is rejected.
+synthetic generators, benchmark suites and CLI route were deleted from the
+active tree; this detector is retained so that any reintroduced synthetic
+market test is rejected. Source-pattern rejection of prohibited generators,
+fake market sessions, mock feeds and synthetic benchmarks is bound separately
+through ``scripts/check_synthetic_market_policy.py`` and ``make check-static``.
 """
 from __future__ import annotations
 
@@ -26,7 +28,7 @@ import pytest
 
 TEST_DIR = Path(__file__).resolve().parent
 REPO_ROOT = TEST_DIR.parents[2]
-INVENTORY_PATH = TEST_DIR / "market_shaped_test_inventory.json"
+INVENTORY_PATH = REPO_ROOT / "evidence" / "MARKET-SHAPED-TEST-INVENTORY-NIRNAY-2026-11-23.json"
 
 # Market-domain constructors prohibited by D1. Names are matched on the call
 # name, including attribute calls such as ``quantlab.market.MarketEvent(...)``.
@@ -177,10 +179,10 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
         raise pytest.UsageError(
             "market-shaped test policy: collection blocked. Modules with "
             "market-domain constructs are absent from "
-            "research/python/tests/market_shaped_test_inventory.json:\n  "
+            "evidence/MARKET-SHAPED-TEST-INVENTORY-NIRNAY-2026-11-23.json:\n  "
             + detail
-            + "\nUpdate the inventory with the module and its prohibited tests "
-            "before adding or restoring these tests."
+            + "\nA historical inventory cannot be amended by an agent edit; "
+            "reintroduction requires a versioned owner decision."
         )
 
     deselected: list[pytest.Item] = []

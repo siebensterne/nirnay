@@ -362,20 +362,18 @@
     },
     {
       "id": "CLM-027",
-      "statement": "Opt-in benchmark harnesses emit measured counters and distributions, remain excluded from make check and CI pass/fail gates, and grant no latency or throughput claim.",
+      "statement": "Remaining opt-in Rust benchmark harnesses emit measured counters and distributions, remain excluded from make check and CI pass/fail gates, and grant no latency or throughput claim; synthetic Python benchmark suites were retired under D11.",
       "status": "implemented",
       "scope": {
         "packages": [
           "Makefile",
           "crates/market-archive/tests/performance.rs",
-          "research/python/src/quantlab/bench.py",
-          "research/python/tests/test_bench.py",
           "crates/risk-authority/tests/performance.rs",
           "crates/authoritative-oms/tests/performance.rs",
           "evidence/PERFORMANCE-TEMPLATE.md"
         ]
       },
-      "falsifier": "A BENCH-* counter is a hard-coded literal, a benchmark runs as a pass/fail gate in make check or CI, a latency threshold is asserted, or a dated record presents local synthetic numbers as deployment or throughput evidence."
+      "falsifier": "A BENCH-* counter is a hard-coded literal, a benchmark runs as a pass/fail gate in make check or CI, a latency threshold is asserted, a synthetic market benchmark is reintroduced, or a dated record presents local numbers as deployment or throughput evidence."
     },
     {
       "id": "CLM-030",
@@ -419,7 +417,7 @@
     },
     {
       "id": "CLM-042",
-      "statement": "A research job runs only when its manifest validates, its pinned constraint file and code digest match, and its synthetic dataset digest matches; otherwise the runner refuses before execution, and a successful dry-run appends a hash-chained structured run record through the experiment registry.",
+      "statement": "A research job runs only when its manifest validates, its pinned constraint file and code digest match, and its already admitted dataset digest matches; otherwise the runner refuses before execution, and a successful dry-run appends a hash-chained structured run record through the experiment registry. No dataset is built by the runner.",
       "status": "implemented",
       "scope": {
         "files": [
@@ -460,7 +458,6 @@
           "evidence/performance-2026-11-21-bench-risk-oms.log",
           "evidence/performance-2026-11-21-bench-latency.log",
           "Makefile",
-          "research/python/src/quantlab/bench.py",
           "crates/market-archive/tests/performance.rs",
           "crates/authoritative-oms/tests/performance.rs",
           "engineering/research/compute-and-validation.md"

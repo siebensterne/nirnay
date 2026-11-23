@@ -58,25 +58,6 @@
     "python_constraint_file": "constraints/python-research.txt",
     "python_version": "3.12"
   },
-  "jobs": [
-    {
-      "code_digest": "60e0c22a8568742cc1bca6d8f7d76ab62adf5a398b1736da07ac6d2ede60c959",
-      "command": [
-        "python",
-        "-m",
-        "quantlab.cli",
-        "verify-dataset",
-        "{dataset}"
-      ],
-      "constraint_file": "constraints/python-research.txt",
-      "dataset_id": "research-job-synthetic-nse-session",
-      "dataset_ref": "research-job-synthetic-nse-session:synthetic-local",
-      "dataset_sha256": "259f1629c4525dc4721bc036db82876ea3cdfaffb3e9fdf1573d305e3aa53be1",
-      "dataset_version": "research-job-synthetic-nse-session:75b1f8fc07b6cc87",
-      "dry_run": true,
-      "job_id": "bench-research-dry-run",
-      "schedule_hint": "manual-opt-in"
-    }
-  ],
+  "jobs": [],
   "schema_version": 1
 }

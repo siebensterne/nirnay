@@ -2,14 +2,16 @@
 
 ## Deterministic reference strategy
 
-`quantlab.strategies.DeterministicEmaCross` is the shipped deterministic streaming EMA-cross example. It accepts canonical market events, maintains causal recursive EMA state, emits long-only `OrderIntent` values and has no broker, OMS, risk-service, cash or position-authority access. Its behavior is exercised by the synthetic `quantlab demo` fixture.
+`quantlab.strategies.DeterministicEmaCross` is the shipped deterministic streaming
+EMA-cross example. It accepts canonical market events, maintains causal recursive EMA
+state, emits long-only `OrderIntent` values and has no broker, OMS, risk-service, cash
+or position-authority access.
 
-```bash
-python3 -m pip install -e 'research/python[dev]'
-PYTHONPATH=research/python/src python3 -m quantlab.cli demo
-```
-
-The demo is a contract/replay test only. It reports `not_real_market_data=true` and `not_alpha_evidence=true`. It is not an endorsed strategy, investment recommendation or evidence of profitability.
+Under owner directive D11 the synthetic `quantlab demo` driver and its fixed price
+session were removed, together with the CLI route. The strategy module remains as an
+interface contract only; no synthetic demonstration is runnable and no strategy result
+is presented as research evidence. It is not an endorsed strategy, investment
+recommendation or evidence of profitability.
 
 ## Strategy admission
 

@@ -16,7 +16,6 @@ from .alpha_search import AlphaCosts, Bar
 from .backtest import BacktestConfig, EventDrivenBacktester
 from .data_rights import ProductKey, REPLAY, authorize
 from .dataset_admission import DatasetAdmissionError, admit_published_dataset
-from .demo import run_demo
 from .experiments.registry import ExperimentRegistry
 from .experiments.schema import load_experiment
 from .experiments.search_adapter import run_registered_search
@@ -557,11 +556,6 @@ def asdict_result(result):
     return value
 
 
-def _cmd_demo(_: argparse.Namespace) -> int:
-    print(json.dumps(run_demo(), sort_keys=True, indent=2))
-    return 0
-
-
 def _cmd_build_dataset(args: argparse.Namespace) -> int:
     event_rows = _read_jsonl(args.events)
     events = [market_event_from_dict(row) for row in event_rows]
@@ -793,9 +787,6 @@ def build_parser() -> argparse.ArgumentParser:
     sim_replay.add_argument("--output", type=Path,
                             help="optional immutable output path for the JSON payload")
     sim_replay.set_defaults(handler=_cmd_sim_replay)
-
-    demo = sub.add_parser("demo", help="run deterministic synthetic EMA/backtest fixture")
-    demo.set_defaults(handler=_cmd_demo)
 
     build = sub.add_parser("build-dataset", help="build immutable bitemporal point-in-time JSONL/Parquet dataset")
     build.add_argument("--events", type=Path, required=True, help="canonical MarketEvent JSONL")

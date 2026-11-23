@@ -53,14 +53,12 @@ Both simulators remain deterministic research models. L2 queue modeling is not F
 
 ## 2. Deterministic strategy fixture
 
-`DeterministicEmaCross` is a streaming recursive EMA crossover with one long entry and exit intent. It accepts canonical quote/depth observations, maintains state, never calls a broker, and emits `OrderIntent` only. `quantlab demo` uses fixed synthetic prices, explicit seed and fully deterministic event IDs.
-
-```bash
-python3 -m pip install -e 'research/python[dev]'
-PYTHONPATH=research/python/src python3 -m quantlab.cli demo
-```
-
-The output declares `not_real_market_data=true` and `not_alpha_evidence=true`. The fixture proves the strategy/backtester interface and deterministic replay only.
+`DeterministicEmaCross` is a streaming recursive EMA crossover with one long entry and
+exit intent. It accepts canonical quote/depth observations, maintains state, has no
+broker call path, and emits `OrderIntent` only. Under owner directive D11 the synthetic demo
+fixture (fixed prices, explicit seed and generated event IDs) and its CLI route were
+retired; the strategy remains as an interface contract and none of its results are
+research evidence.
 
 ## 3. Finite-family alpha search
 
