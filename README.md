@@ -8,7 +8,7 @@ complementary platform under `engineering/architecture/decisions/ADR-0001-data-o
 **Release status:** research/paper engineering candidate. This repository is not a certified broker-connected trading system, not a SEBI/exchange-approved algo product, and not evidence of profitable alpha. Live order routing is hard-disabled. Every capability statement below distinguishes code present from external verification still required.
 
 <!-- CURRENT-STATE
-code_commit: 7b9e2728e140fe9f20a93eba6ffc41b735a17c2b
+code_commit: 14c274224249af48eedc0b50308fa2b109a5bc44
 verified_on: 2026-11-21
 ci_run: 45062286601
 scope: make check + hosted CI 45062286601 on f250fee (12/12); active suite 352 passed, 90 market-shaped-fixture tests deselected under owner directive
@@ -462,6 +462,7 @@ once published; a new run adds a new dated file instead of rewriting history.
 | Test policy | `scripts/check_synthetic_market_policy.py` | D11 source-pattern gate rejecting reintroduced generators, fake sessions, mock feeds and synthetic benchmarks; bound via `make check-static` |
 | Dated evidence | `evidence/TEST-RETIREMENT-NIRNAY-2026-11-23.md` | RRP-002 removal of synthetic market-data assets and function-level tests; removed paths, hashes, preserved historical counts, withdrawn coverage and residual gates |
 | Dated evidence | `evidence/D11-RESIDUAL-CLOSURE-NIRNAY-2026-11-23.md` | W2.1 residual closure of active synthetic generators, demo CLI, benchmark suites and job entry; historical counts preserved, static gate and measured counts |
+| Dated evidence | `evidence/CODE-MANIFEST-INTEGRITY-NIRNAY-2026-11-24.md` | versioned path-safe code-manifest rule, recomputed research-job digest, commit-pin limitations, invalid-path rejection tests and retired synthetic job |
 | Dated evidence | `evidence/SOURCE-INGESTION-FREEZE-2026-11-23.md` | RRP-004 freeze of duplicate ingestion, raw-archive, decoder and provider-config paths; ownership targets, migration order, retained Nirnay scope and gate result |
 | Dated evidence | `evidence/SYNTHETIC-TEST-POLICY-NIRNAY-2026-11-23.md` | enforced inventory counts, inspection commands, withdrawn coverage and current test figures |
 | Dated evidence | `evidence/C3-CONSUMER-USE-PERMISSIONS-2026-11-23.md` | C3 consumer-use and permission-evaluation implementation record, gate counts and explicit non-goals |
