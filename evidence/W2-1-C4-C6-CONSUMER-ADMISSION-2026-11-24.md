@@ -44,7 +44,7 @@
   missing count, rejected count, gaps, verdict and evidence reference. N/A
   carries a reason. An absent or inconsistent denominator yields REJECT or
   UNKNOWN and never PASS. No aggregate percentage is accepted.
-- **C6:** `evaluate_consumer_use` produces a clearly named `PreflightDecision`
+- **C6:** `evaluate_consumer_use` produces an explicitly named `PreflightDecision`
   with `kind=PREFLIGHT_DECISION`, `is_admission_receipt=False` and
   `release_verified=False`. `run_job` explicitly refuses that verdict as an
   admission record. Distinct typed codes cover wrong object id/version, wrong
