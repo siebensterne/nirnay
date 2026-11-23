@@ -1,4 +1,4 @@
-"""Tests for the target package shims and their new tested helpers."""
+"""Tests for research package helpers and the canonical simulation digest."""
 from __future__ import annotations
 
 from dataclasses import asdict
@@ -21,7 +21,7 @@ from quantlab.experiments.verify import signed_head_message
 from quantlab.market import market_event_from_dict
 from quantlab.point_in_time import PITDatasetBuilder
 from quantlab.reporting import research_report_bytes
-from quantlab.simulation import cost_assumptions_digest
+from quantlab.sim import cost_assumptions_digest
 from quantlab.strategies import DeterministicEmaCross
 from quantlab.validation import (assert_no_holdout_leakage, cscv_pbo, deflated_sharpe_ratio,
                                  detect_holdout_leakage)

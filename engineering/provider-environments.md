@@ -1,10 +1,15 @@
-# Provider Python environments
+# Provider Python environments and ingestion ownership
 
-**Status:** enforced by CI on 2026-11-13.  
-**Scope:** `research/python`, `apps/kite-ops`, `apps/fyers-recorder`.
+**Status:** environment isolation enforced by CI on 2026-11-13; ingestion
+ownership metadata frozen under RRP-004 and consolidated under RRP-005 on
+2026-11-23.
+**Scope:** `research/python`, `apps/kite-ops`, `apps/fyers-recorder`, and the
+frozen source-ingestion paths listed below.
 
 The three Python distributions do not share one dependency environment. This is
-deliberate and is a release gate, not an installer inconvenience.
+deliberate and is a release gate, not an installer inconvenience. Provider
+acquisition paths in Nirnay are frozen and owned by Fieldbook; see the second
+half of this document.
 
 ## The conflict
 
@@ -61,7 +66,8 @@ python -m pytest -q apps/fyers-recorder/tests
 ```
 
 The FYERS SDK is imported only when a live socket is started; the unit tests
-use a fake socket.
+use a fake socket. The recorder source is a frozen migration item; no new socket,
+callback schema or recorder output may be added under RRP-004.
 
 ## Combined boundary
 
@@ -90,52 +96,56 @@ turning a documented incompatibility into an untested deployment assumption.
 
 No provider credential, Keychain item or live session is used by these jobs.
 
-## Live capture runbook (owner-local, read-only)
+## Frozen source-ingestion paths and Fieldbook ownership
 
-Verified on 2026-11-20 after the M3.1 programme. All commands run from the
-repository root. No command in this section places an order or writes to a
-broker.
+NR-ARCH-ADR-0001 (Accepted 2026-11-23) assigns source acquisition, raw storage,
+normalization, point-in-time reference data and the raw-data lifecycle to the
+future complementary platform, Fieldbook. Nirnay owns research, experiments,
+simulation, portfolio, risk and eventual execution under separate authorization.
+Nirnay runs no second collector and holds no competing raw archive.
 
-### Credentials in Keychain (metadata only)
+The following Nirnay paths are frozen metadata-only under RRP-004. This section
+is an ownership index; the full responsibility, no-new-feature rule and
+migration order for each path are in `evidence/SOURCE-INGESTION-FREEZE-2026-11-23.md`
+and `engineering/source-ingestion-freeze.v1.json`.
 
-| Service | Purpose |
-|---|---|
-| `NIRNAY_UPSTOX_ANALYTICS_TOKEN` | Upstox V3 market-data feed, read-only |
-| `NIRNAY_FYERS_APP_ID`, `NIRNAY_FYERS_APP_SECRET` | FYERS v3 app, used only to mint a token |
-| `NIRNAY_FYERS_ACCESS_TOKEN` | FYERS Data Socket access token (short-lived) |
-| `NIRNAY_KITE_API_KEY`, `NIRNAY_KITE_API_SECRET` | Kite login inputs; no order capability in Nirnay |
+| Frozen path | Frozen responsibility | Fieldbook target owner | Replacement condition |
+|---|---|---|---|
+| `crates/india-reference` | Exchange reference-master ingestion and local identity allocation | Fieldbook producer owner; NDC contract owner | Accepted NDC India reference projection |
+| `crates/market-archive` | Durable raw-frame journal and original-byte ingress | Fieldbook producer owner (raw storage) | Fieldbook raw bytes and NDC archive lineage verified |
+| `crates/upstox-feed-proto` | Upstox V3 protobuf schema and decoder source | Fieldbook producer owner (decoding) | Fieldbook owns V3 decode and publishes NDC events |
+| `apps/upstox-tools` | Upstox session verification and decode export | Fieldbook producer owner (acquisition) | Fieldbook acquisition and release commands verified |
+| `apps/fyers-importer` | Offline FYERS session verification and raw import | Fieldbook producer owner (acquisition/raw storage) | Fieldbook owns FYERS ingestion and NDC publication |
+| `apps/fyers-recorder` | FYERS Data Socket callback recorder | Fieldbook producer owner (acquisition) | Fieldbook owns capture and publishes normalized events |
+| `research/python/src/quantlab/providers.py` | Provider mapping to canonical events and reconciliation | Fieldbook producer owner (normalization) | Admitted NDC events consumed instead of local mapping |
+| `configs/providers/source-products.v1.json` | Tri-state rights registry (all `UNKNOWN`) | Data-rights steward; NDC contract owner | Reviewed rights evidence carried on an NDC release |
+| `configs/providers` | Instrument maps, venue maps, watchlists and examples | Fieldbook producer owner; Data-rights steward | NDC supplies identity, universe and watchlist scope |
 
-Never print these values. The recorder reads them into the process environment.
+Binding rules:
 
-### Provider status
+1. `make freeze-check` runs `scripts/check_source_ingestion_freeze.py` with its
+   self-test and is part of `make check` through `check-static`. A change to a
+   frozen path needs an approved migration record naming an evidence file, the
+   owner, the replacement commit and the decision date. No such record exists at
+   this base.
+2. Migration order: Fieldbook adapter, then NDC projection, then verification,
+   then removal of the old importer or archive. No stage softens an earlier
+   refusal. No bulk `git rm -r` and no history rewrite.
+3. No new feature, provider, provider map, watchlist, collection path, decoder,
+   archive writer or reference authority may be added under a frozen path.
+   Fixes that keep existing behavior and documentation metadata updates still
+   need an approved migration record to pass the gate. No replacement synthetic
+   market observation may be created under these paths.
+4. Rights, acceptance and experiment state are unchanged: every source product
+   is `UNKNOWN`, dataset acceptance is `BLOCKED`, provider collection is
+   `DISABLED`, experiment registration is blocked and live order submission is
+   disabled. A checksum or a successful connection grants no right.
+5. The historical real-source observation record in
+   `evidence/M3-1-REAL-SOURCE-STATUS-2026-11-20.md` is dated evidence and is not
+   edited by this rewrite. No command in this document contacts a provider or
+   authorizes capture.
 
-- **Upstox: READY.** WebSocket smoke connected and decoded 2/2 frames with 0
-  errors on 2026-11-20. Real 90-second Full capture produced 37 frames, 0
-  decode errors and 36 five-level observations. Token expires 2027-11-09.
-- **FYERS: credential-ready, market-timing blocked.** `profile` and `depth`
-  REST calls return `s=ok`; the Data Socket capture on 2026-11-20 evening
-  produced zero callbacks because NSE was `CLOSED`/`POSTCLOSE_CLOSED`. The
-  access token expires overnight, so regenerate it on the morning of capture
-  with the operator-local v3 helper under `.local/perf/`.
-- **Zerodha: login inputs present, daily token missing.** Generate the Kite
-  daily access token from the dashboard before any read-only reconciliation.
-  Nirnay keeps live order submission disabled.
-
-### Monday sequence
-
-1. Confirm NSE is open (09:15-15:30 IST). The FYERS token must be freshly
-   minted that morning; Upstox remains valid.
-2. Run the bounded read-only recorders into `.local/live-sessions/YYYY-MM-DD/`.
-   Raw journals and manifests stay outside Git and outside the source tree.
-3. Decode and project each session with the existing tools:
-   `upstox-decode-export`, `upstox-kernel-session`, `session-replay`.
-   FYERS callbacks use the committed `fyers-importer` typed projection.
-4. Run `session-replay` over both sessions to produce per-source books and the
-   cross-source reconciliation report. Never merge or sum displayed depth.
-5. Results are written under `.local/perf/`; the full evidence record is
-   `evidence/M3-1-REAL-SOURCE-STATUS-2026-11-20.md`.
-
-### KDB-X analysis
+## KDB-X analysis (research plane, no ingestion)
 
 KDB-X 5.0 is installed at `/Users/tourist/.kx/bin/q`. The checked-in q contract
 is `analytics/kdb/mbp_metrics.q`; the repo-native harness is `apps/kdb-lab`
@@ -147,7 +157,10 @@ D11 retired the synthetic golden corpus, its `check-golden` command and the
 golden-dependent tests; only analysis of an explicitly supplied input remains.
 
 The q contract accepts one source at a time and never merges books. Price and
-spread metrics use the input price unit (rupees as exported by
-`upstox-decode-export`); no metric name implies paise. 2026-11-20 real Upstox
-result: 36 rows, 87.07 s, 0 capture gaps, mean spread 0.0219 rupees, mean
-imbalance -0.3034, minimum depth 5 levels.
+spread metrics use the input's declared price unit; no metric name implies
+paise. Source decoding and raw capture are Fieldbook-owned frozen
+responsibilities; q analysis is a Nirnay research plane over an already admitted
+input. The 2026-11-20 real Upstox result (36 rows, 87.07 s, 0 capture gaps,
+mean spread 0.0219 rupees, mean imbalance -0.3034, minimum depth 5 levels) is a
+dated observation recorded in
+`evidence/M3-1-REAL-SOURCE-STATUS-2026-11-20.md`, not a current capability claim.

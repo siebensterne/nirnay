@@ -629,18 +629,19 @@
     },
     {
       "id": "CLM-041",
-      "statement": "Simulation namespace modules are direct re-exports of canonical sim objects with no duplicated behavior, and the list-experiments CLI exposes registered and rejected terminal records together with their attempted-config counts.",
+      "statement": "The quantlab.sim package is the sole simulation namespace: the former quantlab.simulation re-export shims were removed under RRP-005 after a repository-wide import audit, cost_assumptions_digest was relocated into quantlab.sim, and the list-experiments CLI exposes registered and rejected terminal records together with their attempted-config counts.",
       "status": "implemented",
       "scope": {
         "files": [
-          "research/python/src/quantlab/simulation/event_replay.py",
-          "research/python/src/quantlab/simulation/execution.py",
+          "research/python/src/quantlab/sim/__init__.py",
+          "research/python/src/quantlab/sim/replay.py",
+          "research/python/src/quantlab/sim/execution/costs.py",
           "research/python/src/quantlab/cli.py",
           "research/python/tests/test_simulation_namespace.py",
           "research/python/tests/test_cli_pipeline.py"
         ]
       },
-      "falsifier": "A re-exported symbol is not the identical canonical object, a tampered fill digest still compares equal, rejected records or their attempt counts are omitted from the CLI listing, or a re-export module defines its own engine behavior."
+      "falsifier": "A duplicate simulation namespace is reintroduced, the relocated cost_assumptions_digest diverges from canonical digest behavior, a tampered fill digest still compares equal, or rejected records or their attempt counts are omitted from the CLI listing."
     },
     {
       "id": "CLM-049",

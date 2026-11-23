@@ -5,6 +5,10 @@ events and seeds.  This is a research tool, not an exchange matching engine.
 """
 from __future__ import annotations
 
+import hashlib
+from dataclasses import asdict, is_dataclass
+
+from ..market import canonical_bytes
 from .calibration import (
     ArtifactError,
     ArtifactResolver,
@@ -91,6 +95,18 @@ from .state import (
 )
 from .store import DuplicateTrial, TrialConflict, TrialStore, TrialStoreError
 
+
+def cost_assumptions_digest(costs: object) -> str:
+    """Digest the exact cost assumptions supplied to a simulation."""
+    if is_dataclass(costs) and not isinstance(costs, type):
+        body: object = asdict(costs)
+    elif isinstance(costs, dict):
+        body = costs
+    else:
+        raise ValueError("cost assumptions must be a dataclass or object")
+    return hashlib.sha256(canonical_bytes(body)).hexdigest()
+
+
 __all__ = [
     "EVENT_TYPES",
     "ArtifactError",
@@ -148,6 +164,7 @@ __all__ = [
     "UnmarkedResidual",
     "calibration_statement",
     "compare_records",
+    "cost_assumptions_digest",
     "cost_provenance",
     "default_cost_model",
     "default_impact",

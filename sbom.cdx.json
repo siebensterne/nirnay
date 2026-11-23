@@ -5025,6 +5025,14 @@
       {
         "name": "nirnay:generated-from",
         "value": "Cargo.lock + constraints/*.txt"
+      },
+      {
+        "name": "nirnay:snapshot-status",
+        "value": "STALE SNAPSHOT checked into Git; regenerate with make sbom (python3 scripts/supply_chain.py sbom sbom.cdx.json). CI regenerates this file from the exact commit and records its digest; the checked-in copy is not a release verifier input."
+      },
+      {
+        "name": "nirnay:consolidation-record",
+        "value": "evidence/RRP-005-CONSOLIDATION-2026-11-23.md"
       }
     ],
     "tools": [

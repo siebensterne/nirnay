@@ -8,7 +8,7 @@ complementary platform under `engineering/architecture/decisions/ADR-0001-data-o
 **Release status:** research/paper engineering candidate. This repository is not a certified broker-connected trading system, not a SEBI/exchange-approved algo product, and not evidence of profitable alpha. Live order routing is hard-disabled. Every capability statement below distinguishes code present from external verification still required.
 
 <!-- CURRENT-STATE
-code_commit: 6b79f8f1f9eadc9e80cb16e29ef550b0afccb483
+code_commit: 2f2808694224e9a32960865c2f0f78a620a401cc
 verified_on: 2026-11-21
 ci_run: 45062286601
 scope: make check + hosted CI 45062286601 on f250fee (12/12); active suite 352 passed, 90 market-shaped-fixture tests deselected under owner directive
@@ -404,8 +404,8 @@ provenance concepts are reimplemented behind current bitemporal contracts.
 The archived workspace and its C++ probes are no longer part of the active
 gates. Historical counts from 2026-11-13 and 2026-11-17 are
 retained in the dated verification documents; the current baseline is the
-2026-11-19 state note below. See `engineering/extras-audit.md`,
-`engineering/legacy-audit-2026-11-13.md` and `engineering/migration-map.csv`.
+2026-11-19 state note below. See `engineering/extras-audit.md` and the archived
+legacy promotion ledger in `evidence/MIGRATION-MAP-ARCHIVE-2026-11-23.md`.
 Promotion of the retained India code into the active workspace still requires a
 new crate, ADR, owner and tests.
 
@@ -438,7 +438,7 @@ once published; a new run adds a new dated file instead of rewriting history.
 | Canonical | `engineering/q-kdb-style.md` | q / kdb+ (KDB-X) style rules and their authoritative sources |
 | Canonical | `engineering/research/compute-and-validation.md` | local opt-in research jobs, validation reports and owner-gated compute gaps |
 | Canonical | `engineering/research/dataset-acceptance-contract.md` | evidence required before a licensed dataset is accepted for research |
-| Canonical | `engineering/ndc-consumer-requirements-v1.md` | proposed NDC v1 consumer requirements: release manifest, event envelope, validation and rejection behavior; no transport or storage choice |
+| Historical | `engineering/contracts/historical/ndc-consumer-requirements-v1.md` | superseded NDC v1 consumer requirements: release manifest, event envelope, validation and rejection behavior; bytes and digest unchanged; active version is v2 |
 | Proposed | `engineering/ndc-consumer-use-v2-proposed.md` | versioned consumer-use profiles, AdmissionRequest, permission evaluation and typed rejection codes; declaration-level model, no schema finalization |
 | Protocol | `research/protocols/NSE-CASH-MOMENTUM-PROTOCOL-v1.md` | frozen proposed real-data-only NSE cash-equity momentum protocol; not registered or run, dataset-blocked |
 | Protocol | `research/protocols/NSE-CASH-MOMENTUM-PROTOCOL-v1-AMENDMENT-1.md` | amendment 1 supersedes the v1 synthetic-fixture sentence and the nearest-price rule; v1 unchanged; SHA-256 sidecar beside it |

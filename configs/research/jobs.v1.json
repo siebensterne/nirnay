@@ -1,6 +1,6 @@
 {
   "environment": {
-    "code_digest": "69c9400aa73de230c6d95987b2b761c1a7bdfa79d30c1370402ba884208658d6",
+    "code_digest": "60e0c22a8568742cc1bca6d8f7d76ab62adf5a398b1736da07ac6d2ede60c959",
     "code_paths": [
       "research/python/src/quantlab/__init__.py",
       "research/python/src/quantlab/alpha_search.py",
@@ -47,7 +47,6 @@
       "research/python/src/quantlab/sim/execution/costs.py",
       "research/python/src/quantlab/sim/replay.py",
       "research/python/src/quantlab/sim/state.py",
-      "research/python/src/quantlab/simulation/__init__.py",
       "research/python/src/quantlab/strategies/__init__.py",
       "research/python/src/quantlab/validation/__init__.py",
       "research/python/src/quantlab/validation/leakage_detection.py",
@@ -61,7 +60,7 @@
   },
   "jobs": [
     {
-      "code_digest": "69c9400aa73de230c6d95987b2b761c1a7bdfa79d30c1370402ba884208658d6",
+      "code_digest": "60e0c22a8568742cc1bca6d8f7d76ab62adf5a398b1736da07ac6d2ede60c959",
       "command": [
         "python",
         "-m",
