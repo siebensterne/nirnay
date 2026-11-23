@@ -7,7 +7,7 @@ published.
 
 ## Nirnay canonical IDs
 
-- `NR-ARCH-ADR-0001` — `ADR-0001-data-ownership.md`, status **Proposed**.
+- `NR-ARCH-ADR-0001` — `ADR-0001-data-ownership.md`, status **Accepted 2026-11-23**.
   Data ownership between Nirnay and the future complementary platform:
   acquisition, raw storage, normalization and point-in-time reference data stay
   with the platform; Nirnay owns research and experiments. This index neither

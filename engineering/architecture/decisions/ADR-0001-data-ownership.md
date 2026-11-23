@@ -1,7 +1,9 @@
 # ADR-0001 — Data ownership between Nirnay and the future complementary platform
 
-- **Status:** Proposed design decision. No implementation authority, no rights
-  grant, no dataset acceptance and no experiment authorization.
+- **Status:** Accepted by owner ratification on 2026-11-23
+  (`siebensterne-workspace/engineering/decisions/OWNER-RATIFICATION-2026-11-23.md`).
+  Acceptance grants no data rights, no provider contact, no dataset acceptance
+  and no experiment authorization.
 - **Date:** 2026-11-22
 - **Base:** `53bd0af` on branch `docs/source-qualification` in this
   documentation worktree.
