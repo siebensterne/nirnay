@@ -38,6 +38,13 @@ name = "apps"
 leaf = true
 crates = ["cost-cli", "upstox-tools", "fundamental-tools", "fyers-importer", "paper-runner", "kdb-lab"]
 
+# Independent Nirnay release verification. The leaf marker keeps the verifier
+# separate from producer layers and from any shared validator dependency.
+[[layer]]
+name = "verification"
+leaf = true
+crates = ["release-verifier"]
+
 [tooling]
 crates = ["xtask"]
 
