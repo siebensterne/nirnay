@@ -28,6 +28,9 @@ use crate::jcs::json_depth;
 use crate::jcs::parse_strict;
 use crate::receipt::AdmissionReceipt;
 use crate::receipt::ArtifactBinding;
+use crate::resource_profile::EffectiveLimits;
+use crate::resource_profile::ProfileError;
+use crate::resource_profile::StreamingResourcePolicy;
 use crate::schema::AdmissionRequest;
 use crate::schema::ArtifactDescriptor;
 use crate::schema::CoverageEvaluator;
@@ -37,6 +40,8 @@ use crate::schema::ReleaseManifest;
 use crate::schema::ReleaseRecord;
 use crate::schema::RightsEvaluator;
 use crate::schema::SignatureSidecar;
+use crate::streaming;
+use crate::streaming::RecordMode;
 use crate::trust::TrustedKeyRegistry;
 use crate::trust::VerifierResourcePolicy;
 use base64::Engine;
@@ -47,6 +52,7 @@ use ed25519_dalek::VerifyingKey;
 use flate2::read::GzDecoder;
 use serde_json::Value;
 use sha2::Digest;
+use sha2::Sha256;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -172,6 +178,7 @@ pub struct ReleaseVerifier {
     policy: VerifierResourcePolicy,
     verifier_commit: String,
     require_canonical_wire: bool,
+    allow_test_only_profiles: bool,
     stage_observer: Option<Box<dyn Fn(u8)>>,
     canonical_profiles: RefCell<HashMap<String, ArtifactRecordOrderProfile>>,
     canonical_event_types: RefCell<HashSet<String>>,
@@ -190,6 +197,7 @@ impl ReleaseVerifier {
             policy: config.policy,
             verifier_commit: config.verifier_commit,
             require_canonical_wire: false,
+            allow_test_only_profiles: false,
             stage_observer: None,
             canonical_profiles: RefCell::new(HashMap::new()),
             canonical_event_types: RefCell::new(HashSet::new()),
@@ -203,6 +211,16 @@ impl ReleaseVerifier {
     /// types after validation.
     pub fn with_canonical_wire(mut self) -> Self {
         self.require_canonical_wire = true;
+        self
+    }
+
+    /// Permit finite `TEST_ONLY` profiles in a streaming test harness.
+    ///
+    /// A test-only profile carries no production authority and satisfies no
+    /// capability gate. Production invocations leave this option unset and
+    /// fail closed when a selected identifier is marked `TEST_ONLY`.
+    pub fn with_test_only_profiles(mut self) -> Self {
+        self.allow_test_only_profiles = true;
         self
     }
 
@@ -252,6 +270,172 @@ impl ReleaseVerifier {
                 cleanup: cleanup.map(Box::new),
             }
         })
+    }
+
+    /// Verify a release through the ratified bounded streaming path.
+    ///
+    /// The profile selection is supplied by trusted local policy. No producer
+    /// declaration can raise a local allowance. The twelve stages, first
+    /// refusal and cleanup contract are unchanged. This entry point is the only
+    /// streaming path; the two existing public verifiers keep their signatures
+    /// and their caller-policy behavior.
+    pub fn verify_release_streaming(
+        &self,
+        locator: &ReleaseLocator,
+        request: &AdmissionRequest,
+        policy: &StreamingResourcePolicy,
+    ) -> Result<AdmissionReceipt, RefusalDiagnostic> {
+        self.canonical_profiles.borrow_mut().clear();
+        self.canonical_event_types.borrow_mut().clear();
+        self.run_stages_streaming(locator, request, policy)
+            .map_err(|failure| {
+                let (refusal, cleanup) = *failure;
+                RefusalDiagnostic {
+                    refusal,
+                    cleanup: cleanup.map(Box::new),
+                }
+            })
+    }
+
+    fn run_stages_streaming(
+        &self,
+        locator: &ReleaseLocator,
+        request: &AdmissionRequest,
+        policy: &StreamingResourcePolicy,
+    ) -> PipelineResult<AdmissionReceipt> {
+        if !self.allow_test_only_profiles
+            && (policy.verifier_profile().id().is_test_only()
+                || policy.snapshot_profile().id().is_test_only())
+        {
+            return Err(Box::new((
+                VerifierError::ResourceProfile {
+                    detail: "test-only profile in a production invocation".to_owned(),
+                },
+                None,
+            )));
+        }
+        let verifier_limits = no_cleanup(
+            policy
+                .verifier_limits()
+                .map_err(ProfileError::into_verifier_error),
+        )?;
+        let snapshot_limits = no_cleanup(
+            policy
+                .snapshot_limits()
+                .map_err(ProfileError::into_verifier_error),
+        )?;
+        let mut budget = no_cleanup(FdBudget::with_minimum(
+            verifier_limits.max_open_file_descriptors(),
+            3,
+        ))?;
+        let root = no_cleanup(ReleaseRoot::open(&self.root, &mut budget))?;
+        let release_dir = no_cleanup(root.release_dir(
+            &locator.publisher_id,
+            &locator.dataset_id,
+            &locator.release_id,
+            &mut budget,
+        ))?;
+        let top_level = no_cleanup(enumerate_names(&release_dir))?;
+        let expected_top: HashSet<&str> = ["manifest.json", "signature.json", "artifacts"]
+            .into_iter()
+            .collect();
+        if top_level
+            .iter()
+            .map(String::as_str)
+            .collect::<HashSet<&str>>()
+            != expected_top
+        {
+            return Err(Box::new((
+                VerifierError::FileSet {
+                    detail: "release root file set differs from manifest, sidecar and artifacts"
+                        .to_owned(),
+                },
+                None,
+            )));
+        }
+        let (manifest_file, manifest_facts) = no_cleanup(open_regular_file(
+            &release_dir,
+            "manifest.json",
+            &mut budget,
+        ))?;
+        let manifest_bytes = no_cleanup(read_bounded(
+            &manifest_file,
+            &manifest_facts,
+            manifest_facts.size,
+            verifier_limits.max_preparation_intent_bytes(),
+            "max_preparation_intent_bytes",
+        ))?;
+        let (sidecar_file, sidecar_facts) = no_cleanup(open_regular_file(
+            &release_dir,
+            "signature.json",
+            &mut budget,
+        ))?;
+        let sidecar_bytes = no_cleanup(read_bounded(
+            &sidecar_file,
+            &sidecar_facts,
+            sidecar_facts.size,
+            verifier_limits.max_sealed_intent_bytes(),
+            "max_sealed_intent_bytes",
+        ))?;
+        drop(manifest_file);
+        drop(sidecar_file);
+
+        let staging_limits = crate::files::StagingLimits {
+            max_stored_bytes: snapshot_limits.max_stored_bytes_per_artifact(),
+            max_temp_disk_bytes: snapshot_limits.temp_disk_bytes(),
+            io_chunk_bytes: snapshot_limits.io_chunk_bytes(),
+        };
+        let mut builder = no_cleanup(crate::files::SnapshotBuilder::with_limits(
+            &self.private_staging,
+            &mut budget,
+            staging_limits,
+        ))?;
+        for (name, bytes) in [
+            ("manifest.json", manifest_bytes.as_slice()),
+            ("signature.json", sidecar_bytes.as_slice()),
+        ] {
+            if let Err(error) = builder.add(name, bytes) {
+                return Err(Box::new(with_cleanup(error, builder.discard_partial())));
+            }
+        }
+        let parsed = match self.stages_one_to_four(
+            &manifest_bytes,
+            &sidecar_bytes,
+            request,
+            verifier_limits.max_nesting_depth(),
+        ) {
+            Ok(value) => value,
+            Err(error) => return Err(Box::new(with_cleanup(error, builder.discard_partial()))),
+        };
+        let stage_five = match self.stage_five_streaming(
+            &parsed.manifest,
+            &release_dir,
+            &mut builder,
+            &mut budget,
+            &verifier_limits,
+        ) {
+            Ok(value) => value,
+            Err(error) => return Err(Box::new(with_cleanup(error, builder.discard_partial()))),
+        };
+        if let Err(error) = builder.sync_directory() {
+            return Err(Box::new(with_cleanup(error, builder.discard_partial())));
+        }
+        let snapshot = builder.seal();
+        self.note_stage(5);
+        drop(release_dir);
+        drop(root);
+
+        match self.stages_six_to_twelve(
+            &parsed.manifest,
+            &parsed.sidecar,
+            &parsed.manifest_digest,
+            &stage_five,
+            &snapshot,
+            request,
+        ) {
+            Ok(receipt) => Ok(receipt),
+            Err(error) => Err(Box::new(with_cleanup(error, snapshot.discard()))),
+        }
     }
 
     fn run_stages(
@@ -326,7 +510,12 @@ impl ReleaseVerifier {
             }
         }
 
-        let parsed = match self.stages_one_to_four(&manifest_bytes, &sidecar_bytes, request) {
+        let parsed = match self.stages_one_to_four(
+            &manifest_bytes,
+            &sidecar_bytes,
+            request,
+            self.policy.max_json_nesting,
+        ) {
             Ok(value) => value,
             Err(error) => return Err(Box::new(with_cleanup(error, builder.discard_partial()))),
         };
@@ -361,12 +550,13 @@ impl ReleaseVerifier {
         manifest_bytes: &[u8],
         sidecar_bytes: &[u8],
         request: &AdmissionRequest,
+        max_depth: u32,
     ) -> Result<ParsedStages, VerifierError> {
         let manifest_value =
             parse_strict(manifest_bytes).map_err(|error| VerifierError::ManifestParse {
                 detail: error.to_string(),
             })?;
-        check_depth(&manifest_value, self.policy.max_json_nesting)?;
+        check_depth(&manifest_value, max_depth)?;
         let manifest = if self.require_canonical_wire {
             let parsed = canonical_wire::parse_manifest(&manifest_value)
                 .map_err(canonical_wire::CanonicalError::into_manifest_error)?;
@@ -382,7 +572,7 @@ impl ReleaseVerifier {
             parse_strict(sidecar_bytes).map_err(|error| VerifierError::SidecarSchema {
                 detail: error.to_string(),
             })?;
-        check_depth(&sidecar_value, self.policy.max_json_nesting)?;
+        check_depth(&sidecar_value, max_depth)?;
         let sidecar: SignatureSidecar =
             serde_json::from_value(sidecar_value).map_err(classify_decode_error)?;
         self.note_stage(1);
@@ -594,7 +784,210 @@ impl ReleaseVerifier {
             bindings,
             data_digest,
             records: all_records,
+            envelope_agrees: true,
         })
+    }
+
+    fn stage_five_streaming(
+        &self,
+        manifest: &ReleaseManifest,
+        release_dir: &std::fs::File,
+        builder: &mut SnapshotBuilder,
+        budget: &mut FdBudget,
+        limits: &EffectiveLimits,
+    ) -> Result<StageFive, VerifierError> {
+        let descriptors = self.check_artifact_declarations_streaming(manifest, limits)?;
+        let artifacts_dir = open_dir_at(release_dir, "artifacts", budget)?;
+        let observed = enumerate_names(&artifacts_dir)?;
+        let components: Vec<String> = descriptors
+            .iter()
+            .map(|descriptor| artifact_component(&descriptor.path))
+            .collect::<Result<_, _>>()?;
+        let expected: HashSet<&str> = components.iter().map(String::as_str).collect();
+        if observed
+            .iter()
+            .map(String::as_str)
+            .collect::<HashSet<&str>>()
+            != expected
+        {
+            return Err(VerifierError::FileSet {
+                detail: "artifact directory file set differs from artifacts[]".to_owned(),
+            });
+        }
+        let mut dataset_hasher = Sha256::new();
+        let mut bindings = Vec::new();
+        let mut total_expanded = 0_u64;
+        let mut total_stored = 0_u64;
+        let mut total_records = 0_u64;
+        let started = std::time::Instant::now();
+        for (descriptor, component) in descriptors.iter().zip(components) {
+            if started.elapsed().as_millis() > u128::from(limits.max_processing_duration_ms()) {
+                return Err(VerifierError::ResourceLimit {
+                    limit: "max_processing_duration_ms".to_owned(),
+                });
+            }
+            let (file, facts) = open_regular_file(&artifacts_dir, &component, budget)?;
+            let profiles = self.canonical_profiles.borrow();
+            let event_types = self.canonical_event_types.borrow();
+            let mode = if self.require_canonical_wire {
+                RecordMode::Canonical {
+                    profiles: &profiles,
+                    event_types: &event_types,
+                }
+            } else {
+                RecordMode::Internal
+            };
+            let state = streaming::ArtifactStream {
+                file: &file,
+                facts: &facts,
+                descriptor,
+                component: &component,
+                limits,
+                dataset_hasher: &mut dataset_hasher,
+                builder,
+                mode,
+                expected_envelope: &manifest.schema_versions.envelope_version,
+            }
+            .verify()?;
+            drop(file);
+            total_expanded = total_expanded
+                .checked_add(state.expanded_bytes())
+                .ok_or(VerifierError::RecordCount)?;
+            total_stored =
+                total_stored
+                    .checked_add(state.stored_bytes())
+                    .ok_or(VerifierError::ByteCount {
+                        detail: "release stored byte total overflowed".to_owned(),
+                    })?;
+            total_records = total_records
+                .checked_add(state.record_count())
+                .ok_or(VerifierError::RecordCount)?;
+            if total_expanded > limits.max_expanded_bytes_per_release() {
+                return Err(VerifierError::ResourceLimit {
+                    limit: "max_expanded_bytes_per_release".to_owned(),
+                });
+            }
+            if total_stored > limits.max_stored_bytes_per_release() {
+                return Err(VerifierError::ResourceLimit {
+                    limit: "max_stored_bytes_per_release".to_owned(),
+                });
+            }
+            if total_records > limits.max_records_per_release() {
+                return Err(VerifierError::ResourceLimit {
+                    limit: "max_records_per_release".to_owned(),
+                });
+            }
+            bindings.push(ArtifactBinding {
+                path: descriptor.path.clone(),
+                logical_partition_id: descriptor.logical_partition_id.clone(),
+                shard_ordinal: descriptor.shard_ordinal,
+                stored_sha256: descriptor.stored_sha256.clone(),
+                uncompressed_sha256: descriptor.uncompressed_sha256.clone(),
+                stored_bytes: descriptor.stored_bytes,
+                uncompressed_bytes: descriptor.uncompressed_bytes,
+                record_count: descriptor.record_count,
+            });
+        }
+        let dataset_bytes = dataset_hasher.finalize();
+        let mut raw_digest = [0_u8; 32];
+        raw_digest.copy_from_slice(&dataset_bytes);
+        let data_digest = hex_lower(&raw_digest);
+        if data_digest != manifest.digests.data_sha256 {
+            return Err(VerifierError::DigestMismatch {
+                detail: "data_sha256 differs from ordered uncompressed streams".to_owned(),
+            });
+        }
+        Ok(StageFive {
+            bindings,
+            data_digest,
+            records: Vec::new(),
+            envelope_agrees: true,
+        })
+    }
+
+    fn check_artifact_declarations_streaming<'a>(
+        &self,
+        manifest: &'a ReleaseManifest,
+        limits: &EffectiveLimits,
+    ) -> Result<Vec<&'a ArtifactDescriptor>, VerifierError> {
+        if manifest.artifacts.is_empty() || manifest.artifacts.len() as u64 > limits.max_artifacts()
+        {
+            return Err(VerifierError::ResourceLimit {
+                limit: "max_artifacts".to_owned(),
+            });
+        }
+        if manifest.artifacts.len() as u32 > limits.max_concurrent_artifacts() {
+            return Err(VerifierError::ResourceLimit {
+                limit: "max_concurrent_artifacts".to_owned(),
+            });
+        }
+        let mut descriptors: Vec<&ArtifactDescriptor> = manifest.artifacts.iter().collect();
+        descriptors.sort_by(|left, right| {
+            left.logical_partition_id
+                .cmp(&right.logical_partition_id)
+                .then(left.shard_ordinal.cmp(&right.shard_ordinal))
+        });
+        let mut paths = HashSet::new();
+        let mut identities = HashSet::new();
+        let mut previous: Option<(&str, u32)> = None;
+        for descriptor in &descriptors {
+            artifact_component(&descriptor.path)?;
+            if !paths.insert(&descriptor.path) {
+                return Err(VerifierError::FileSet {
+                    detail: "duplicate normalized artifact path".to_owned(),
+                });
+            }
+            let identity = (
+                descriptor.logical_partition_id.as_str(),
+                descriptor.shard_ordinal,
+            );
+            if !identities.insert(identity) {
+                return Err(VerifierError::FileSet {
+                    detail: "duplicate logical partition and shard ordinal".to_owned(),
+                });
+            }
+            if let Some(earlier) = previous
+                && earlier >= (identity.0, identity.1)
+            {
+                return Err(VerifierError::ManifestSchema {
+                    detail: "artifacts are not in canonical ascending order".to_owned(),
+                });
+            }
+            previous = Some(identity);
+            if descriptor.encoding != RECORD_ENCODING
+                || !matches!(
+                    descriptor.record_order_profile.as_str(),
+                    SUPERSEDES_STRICT | SUPERSEDES_GAPS | REFERENCE_KEY
+                )
+            {
+                return Err(VerifierError::ManifestSchema {
+                    detail: "artifact encoding or record order profile is unknown".to_owned(),
+                });
+            }
+            let compression_ok = match descriptor.compression.as_str() {
+                "none" | "gzip" => descriptor.compression_version == 1,
+                _ => false,
+            };
+            if !compression_ok {
+                return Err(VerifierError::Decompression {
+                    detail: "compression declaration is unknown".to_owned(),
+                });
+            }
+            if descriptor.stored_bytes == 0
+                || descriptor.stored_bytes > limits.max_stored_bytes_per_artifact()
+                || descriptor.uncompressed_bytes == 0
+                || descriptor.uncompressed_bytes > limits.max_expanded_bytes_per_artifact()
+                || descriptor.record_count == 0
+                || descriptor.record_count > limits.max_records_per_artifact()
+            {
+                return Err(VerifierError::ResourceLimit {
+                    limit: "artifact declared size or record count exceeds the profile".to_owned(),
+                });
+            }
+            parse_hex_lower(&descriptor.stored_sha256, "stored_sha256")?;
+            parse_hex_lower(&descriptor.uncompressed_sha256, "uncompressed_sha256")?;
+        }
+        Ok(descriptors)
     }
 
     fn check_artifact_declarations<'a>(
@@ -837,6 +1230,14 @@ impl ReleaseVerifier {
             return Err(VerifierError::Envelope {
                 detail: "declared schema versions are missing or inconsistent".to_owned(),
             });
+        }
+        if stage_five.records.is_empty() {
+            if !stage_five.envelope_agrees {
+                return Err(VerifierError::Envelope {
+                    detail: "streamed envelope agreement flag is false".to_owned(),
+                });
+            }
+            return Ok(());
         }
         for records in &stage_five.records {
             for record in records {
@@ -1084,6 +1485,7 @@ struct StageFive {
     bindings: Vec<ArtifactBinding>,
     data_digest: String,
     records: Vec<Vec<ReleaseRecord>>,
+    envelope_agrees: bool,
 }
 
 fn verify_canonical_record_stream(
@@ -1159,15 +1561,19 @@ fn verify_snapshot_binding(
         return Err(VerifierError::SnapshotMismatch);
     }
     for entry in snapshot.entries() {
-        if sha256(&entry.bytes) != entry.sha256 {
+        if !entry.verified {
+            return Err(VerifierError::SnapshotMismatch);
+        }
+        let proof = snapshot.verify_entry(&entry.name)?;
+        if proof.stored_sha256 != entry.stored_sha256 || proof.stored_bytes != entry.stored_bytes {
             return Err(VerifierError::SnapshotMismatch);
         }
     }
     for binding in &stage_five.bindings {
         let component = artifact_component(&binding.path)?;
         let entry = snapshot.entry(&component)?;
-        if hex_lower(&entry.sha256) != binding.stored_sha256
-            || entry.bytes.len() as u64 != binding.stored_bytes
+        if hex_lower(entry.digest()) != binding.stored_sha256
+            || entry.stored_bytes != binding.stored_bytes
         {
             return Err(VerifierError::SnapshotMismatch);
         }
