@@ -164,11 +164,29 @@ pub enum VerifierError {
         /// Codec detail.
         detail: String,
     },
-    /// A declared or actual quantity exceeds the caller resource policy.
+    /// A declared or actual quantity exceeds the effective resource profile.
     #[error("REJECT_RESOURCE_LIMIT: verifier resource policy exceeded: {limit}")]
     ResourceLimit {
-        /// Policy field name.
+        /// Effective limit field name.
         limit: String,
+    },
+    /// Profile selection, digest, role or ceiling validation refused the run.
+    #[error("REJECT_RESOURCE_LIMIT: stage 5 resource profile refused: {detail}")]
+    ResourceProfile {
+        /// Profile-level detail without raw limits or caller declarations.
+        detail: String,
+    },
+    /// A record envelope version differs from the manifest at detection.
+    #[error("REJECT_SCHEMA_ENVELOPE: stage 5 record envelope version mismatch: {detail}")]
+    EnvelopeVersion {
+        /// Envelope-level detail.
+        detail: String,
+    },
+    /// A record event type missed the ratified payload schema registry.
+    #[error("REJECT_PAYLOAD_REGISTRY: stage 5 payload registry miss: {detail}")]
+    PayloadRegistry {
+        /// Registry-level detail without raw record bytes.
+        detail: String,
     },
     /// The private snapshot copy does not reproduce the opened descriptor bytes.
     #[error("REJECT_TRUSTED_PATH: stage 5 private snapshot verification failed")]
@@ -249,7 +267,9 @@ impl VerifierError {
             | Self::DuplicateMember { .. }
             | Self::UnknownMember { .. }
             | Self::ManifestSchema { .. }
-            | Self::Envelope { .. } => "REJECT_SCHEMA_ENVELOPE",
+            | Self::Envelope { .. }
+            | Self::EnvelopeVersion { .. } => "REJECT_SCHEMA_ENVELOPE",
+            Self::PayloadRegistry { .. } => "REJECT_PAYLOAD_REGISTRY",
             Self::ManifestDigestMismatch
             | Self::MalformedManifestDigest
             | Self::SidecarSchema { .. }
@@ -275,7 +295,7 @@ impl VerifierError {
             | Self::RecordCount
             | Self::RecordOrder { .. }
             | Self::Decompression { .. } => "REJECT_ARTIFACT_DIGESTS",
-            Self::ResourceLimit { .. } => "REJECT_RESOURCE_LIMIT",
+            Self::ResourceLimit { .. } | Self::ResourceProfile { .. } => "REJECT_RESOURCE_LIMIT",
             Self::Io { .. } => "REJECT_IO",
             Self::CleanupPending(..) => "CLEANUP_PENDING",
             Self::RightsNotPermitted | Self::ProducerActivity { .. } => "REJECT_RIGHTS_EVIDENCE",
@@ -323,6 +343,9 @@ impl VerifierError {
             | Self::SnapshotMismatch
             | Self::Io { .. }
             | Self::ResourceLimit { .. }
+            | Self::ResourceProfile { .. }
+            | Self::EnvelopeVersion { .. }
+            | Self::PayloadRegistry { .. }
             | Self::CleanupPending(..) => 5,
             Self::RightsNotPermitted => 6,
             Self::Coverage { .. } => 7,

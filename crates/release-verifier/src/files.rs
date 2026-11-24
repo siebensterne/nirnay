@@ -74,6 +74,7 @@ pub(crate) mod faults {
         pub(crate) cleanup_directory_sync_fails: bool,
         pub(crate) cleanup_enumeration_fails: bool,
         pub(crate) seal_sync_fails: bool,
+        pub(crate) binding_verification_fails: bool,
     }
 
     impl FaultConfig {
@@ -88,6 +89,7 @@ pub(crate) mod faults {
                 cleanup_directory_sync_fails: false,
                 cleanup_enumeration_fails: false,
                 seal_sync_fails: false,
+                binding_verification_fails: false,
             }
         }
     }
@@ -143,6 +145,10 @@ pub(crate) mod faults {
     pub(crate) fn seal_sync_fails() -> bool {
         read().seal_sync_fails
     }
+
+    pub(crate) fn binding_verification_fails() -> bool {
+        read().binding_verification_fails
+    }
 }
 
 /// A conservative budget for descriptor opens during one verification.
@@ -162,6 +168,20 @@ impl FdBudget {
         Ok(Self {
             remaining: policy.max_open_file_descriptors,
         })
+    }
+
+    /// Create a budget from an effective streaming descriptor limit.
+    ///
+    /// The structural minimum is the artifact descriptor, the staging writer
+    /// and the verify descriptor held in parallel, as required by WS-STREAM-001
+    /// D9. The legacy entry point keeps its four-descriptor minimum.
+    pub fn with_minimum(limit: u32, minimum: u32) -> Result<Self, VerifierError> {
+        if limit < minimum {
+            return Err(VerifierError::ResourceLimit {
+                limit: "max_open_file_descriptors".to_owned(),
+            });
+        }
+        Ok(Self { remaining: limit })
     }
 
     fn spend(&mut self) -> Result<(), VerifierError> {
@@ -369,7 +389,7 @@ pub fn open_regular_file(
     Ok((file, facts))
 }
 
-fn file_facts(file: &File) -> Result<FileFacts, VerifierError> {
+pub(crate) fn file_facts(file: &File) -> Result<FileFacts, VerifierError> {
     let metadata = file.metadata().map_err(|error| VerifierError::Io {
         detail: format!("fstat file: {}", error),
     })?;
@@ -490,15 +510,49 @@ impl CleanupReport {
     }
 }
 
-/// One sealed snapshot entry retained in memory for downstream stages.
-#[derive(Debug, Clone)]
+/// Metadata for one private snapshot entry.
+///
+/// The entry holds no byte vector. The bytes live in the owned staging
+/// directory and are read descriptor-relative with `O_NOFOLLOW` by
+/// [`PrivateSnapshot::verify_entry`]. `verified` records that
+/// [`SnapshotBuilder::finalize_entry`] proved the copy at write time.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SnapshotEntry {
     /// Private staging file name.
     pub name: String,
-    /// Exact bytes copied from the verified descriptor.
-    pub bytes: Vec<u8>,
-    /// SHA-256 of the copied bytes.
-    pub sha256: [u8; 32],
+    /// Count of bytes written to the staging file.
+    pub stored_bytes: u64,
+    /// SHA-256 of the staged bytes, proven by `finalize_entry`.
+    pub stored_sha256: [u8; 32],
+    /// Copy verification completed before the entry was sealed.
+    pub verified: bool,
+}
+
+impl SnapshotEntry {
+    /// Return the metadata digest used by receipt bindings.
+    pub fn digest(&self) -> &[u8; 32] {
+        &self.stored_sha256
+    }
+}
+
+/// Fixed bounds applied by the private staging writer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StagingLimits {
+    /// Maximum bytes written to one staged entry.
+    pub max_stored_bytes: u64,
+    /// Maximum bytes written to the whole staging directory.
+    pub max_temp_disk_bytes: u64,
+    /// Fixed chunk size for staged writes and copy reads.
+    pub io_chunk_bytes: u64,
+}
+
+/// Proof returned by a descriptor-relative snapshot entry verification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EntryProof {
+    /// Byte count re-read from the sealed copy.
+    pub stored_bytes: u64,
+    /// Digest re-computed from the sealed copy.
+    pub stored_sha256: [u8; 32],
 }
 
 /// An immutable private snapshot of an accepted release.
@@ -507,6 +561,8 @@ pub struct PrivateSnapshot {
     dir: File,
     entries: Vec<SnapshotEntry>,
     staging_path: PathBuf,
+    limits: StagingLimits,
+    available_fds: u32,
 }
 
 impl PrivateSnapshot {
@@ -531,6 +587,36 @@ impl PrivateSnapshot {
     /// Return the configured private staging path.
     pub fn staging_path(&self) -> &Path {
         &self.staging_path
+    }
+
+    /// Re-verify one sealed entry from its descriptor without materializing bytes.
+    ///
+    /// The entry must carry a verified state from `finalize_entry`. The copy is
+    /// reopened with `O_NOFOLLOW` relative to the sealed staging descriptor and
+    /// streamed through an incremental SHA-256 in fixed profile-sized chunks.
+    pub fn verify_entry(&self, name: &str) -> Result<EntryProof, VerifierError> {
+        let entry = self.entry(name)?;
+        if !entry.verified {
+            return Err(VerifierError::SnapshotMismatch);
+        }
+        let mut budget = FdBudget {
+            remaining: self.available_fds,
+        };
+        let (digest, bytes) = stream_copy_digest(
+            &self.dir,
+            name,
+            entry.stored_bytes,
+            self.limits.io_chunk_bytes,
+            &mut budget,
+            fault!(binding_verification_fails),
+        )?;
+        if digest != entry.stored_sha256 || bytes != entry.stored_bytes {
+            return Err(VerifierError::SnapshotMismatch);
+        }
+        Ok(EntryProof {
+            stored_bytes: bytes,
+            stored_sha256: digest,
+        })
     }
 
     /// Remove staged files after a refusal and prove the directory is empty.
@@ -646,7 +732,16 @@ fn cleanup_directory(
     Ok(report)
 }
 
-/// Builder that copies verified bytes into private staging and seals them.
+/// Active entry held between `begin_entry` and `finalize_entry`.
+#[derive(Debug)]
+struct ActiveEntry {
+    file: File,
+    name: String,
+    stored_bytes: u64,
+    hasher: Sha256,
+}
+
+/// Builder that streams verified bytes into private staging and seals them.
 #[derive(Debug)]
 pub struct SnapshotBuilder {
     dir: File,
@@ -654,15 +749,48 @@ pub struct SnapshotBuilder {
     entries: Vec<SnapshotEntry>,
     total_bytes: u64,
     budget: FdBudget,
-    policy: VerifierResourcePolicy,
+    limits: StagingLimits,
+    active: Option<ActiveEntry>,
 }
 
 impl SnapshotBuilder {
-    /// Open an empty, caller-provided private staging directory.
+    /// Open an empty, caller-provided private staging directory with limits
+    /// derived from the legacy caller policy.
     pub fn new(
         staging_path: &Path,
         budget: &mut FdBudget,
         policy: &VerifierResourcePolicy,
+    ) -> Result<Self, VerifierError> {
+        let chunk = policy.max_record_bytes.min(policy.max_stored_bytes).max(1);
+        let limits = StagingLimits {
+            max_stored_bytes: policy.max_stored_bytes,
+            max_temp_disk_bytes: policy.max_temp_disk_bytes,
+            io_chunk_bytes: chunk,
+        };
+        Self::open(staging_path, budget, limits)
+    }
+
+    /// Open an empty staging directory with limits from a validated profile.
+    pub fn with_limits(
+        staging_path: &Path,
+        budget: &mut FdBudget,
+        limits: StagingLimits,
+    ) -> Result<Self, VerifierError> {
+        if limits.io_chunk_bytes == 0
+            || limits.max_stored_bytes == 0
+            || limits.max_temp_disk_bytes == 0
+        {
+            return Err(VerifierError::ResourceLimit {
+                limit: "staging profile limits".to_owned(),
+            });
+        }
+        Self::open(staging_path, budget, limits)
+    }
+
+    fn open(
+        staging_path: &Path,
+        budget: &mut FdBudget,
+        limits: StagingLimits,
     ) -> Result<Self, VerifierError> {
         budget.spend()?;
         let dir = OpenOptions::new()
@@ -687,24 +815,24 @@ impl SnapshotBuilder {
             budget: FdBudget {
                 remaining: budget.remaining,
             },
-            policy: *policy,
+            limits,
+            active: None,
         })
     }
 
-    /// Copy one verified byte sequence into staging and re-hash the copy.
+    /// Create a named entry under the staging descriptor and track it at once.
     ///
-    /// The entry is tracked immediately after creation. A write, sync, reopen
-    /// or copy-check failure therefore leaves a named entry for cleanup.
-    pub fn add(&mut self, name: &str, bytes: &[u8]) -> Result<(), VerifierError> {
-        if !valid_component(name) {
+    /// A failure during a subsequent write, sync or verification leaves the name
+    /// tracked so `discard_partial` can remove it.
+    pub fn begin_entry(&mut self, name: &str) -> Result<(), VerifierError> {
+        if !valid_component(name) || name == "." || name == ".." {
             return Err(VerifierError::UnsafePath {
                 detail: "snapshot entry name outside the component alphabet".to_owned(),
             });
         }
-        let added = bytes.len() as u64;
-        if self.total_bytes.saturating_add(added) > self.policy.max_temp_disk_bytes {
-            return Err(VerifierError::ResourceLimit {
-                limit: "max_temp_disk_bytes".to_owned(),
+        if self.active.is_some() {
+            return Err(VerifierError::Io {
+                detail: "another snapshot entry is active".to_owned(),
             });
         }
         self.budget.spend()?;
@@ -717,25 +845,143 @@ impl SnapshotBuilder {
             OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC;
         let opened =
             openat(&self.dir, name, flags, Mode::from_raw_mode(0o600)).map_err(|error| {
-                VerifierError::Io {
-                    detail: format!("create private snapshot file: {}", error),
+                if error.kind() == std::io::ErrorKind::AlreadyExists {
+                    VerifierError::SymlinkEscape {
+                        detail: format!("{}: staged entry already exists", name),
+                    }
+                } else {
+                    VerifierError::Io {
+                        detail: format!("create private snapshot file: {}", error),
+                    }
                 }
             })?;
-        let mut file = File::from(opened);
-        let slot = self.entries.len();
         self.entries.push(SnapshotEntry {
             name: name.to_owned(),
-            bytes: Vec::new(),
-            sha256: [0_u8; 32],
+            stored_bytes: 0,
+            stored_sha256: [0_u8; 32],
+            verified: false,
         });
-        let written = write_and_sync(&mut file, bytes);
-        drop(file);
-        written?;
-        let digest = verify_copy(&self.dir, name, bytes, &mut self.budget)?;
+        self.active = Some(ActiveEntry {
+            file: File::from(opened),
+            name: name.to_owned(),
+            stored_bytes: 0,
+            hasher: Sha256::new(),
+        });
+        Ok(())
+    }
+
+    /// Write one bounded chunk into the active entry.
+    pub fn write_chunk(&mut self, chunk: &[u8]) -> Result<(), VerifierError> {
+        let active = self
+            .active
+            .as_mut()
+            .ok_or(VerifierError::SnapshotMismatch)?;
+        let added = chunk.len() as u64;
+        if added > self.limits.io_chunk_bytes {
+            return Err(VerifierError::ResourceLimit {
+                limit: "io_chunk_bytes".to_owned(),
+            });
+        }
+        if active.stored_bytes.saturating_add(added) > self.limits.max_stored_bytes
+            || self.total_bytes.saturating_add(added) > self.limits.max_temp_disk_bytes
+        {
+            return Err(VerifierError::ResourceLimit {
+                limit: "max_temp_disk_bytes".to_owned(),
+            });
+        }
+        if fault!(partial_write_fails) {
+            let half = chunk.len() / 2;
+            active
+                .file
+                .write_all(&chunk[..half])
+                .map_err(|error| VerifierError::Io {
+                    detail: format!("write private snapshot file: {}", error),
+                })?;
+            return Err(VerifierError::Io {
+                detail: "injected partial write failure".to_owned(),
+            });
+        }
+        active
+            .file
+            .write_all(chunk)
+            .map_err(|error| VerifierError::Io {
+                detail: format!("write private snapshot file: {}", error),
+            })?;
+        active.hasher.update(chunk);
+        active.stored_bytes += added;
+        Ok(())
+    }
+
+    /// Sync, close, reopen and stream-verify the active copy.
+    ///
+    /// The returned metadata carries no bytes. Verification runs here and again
+    /// at snapshot binding through `PrivateSnapshot::verify_entry`.
+    pub fn finalize_entry(
+        &mut self,
+        expected_digest: [u8; 32],
+        expected_bytes: u64,
+    ) -> Result<SnapshotEntry, VerifierError> {
+        let active = self.active.take().ok_or(VerifierError::SnapshotMismatch)?;
+        if fault!(file_sync_fails) {
+            self.active = Some(active);
+            return Err(VerifierError::Io {
+                detail: "injected file sync failure".to_owned(),
+            });
+        }
+        if let Err(error) = active.file.sync_all() {
+            self.active = Some(active);
+            return Err(VerifierError::Io {
+                detail: format!("fsync private snapshot file: {}", error),
+            });
+        }
+        drop(active.file);
+        if fault!(reopen_fails) {
+            return Err(VerifierError::Io {
+                detail: "injected reopen failure".to_owned(),
+            });
+        }
+        let (digest, bytes) = stream_copy_digest(
+            &self.dir,
+            &active.name,
+            expected_bytes,
+            self.limits.io_chunk_bytes,
+            &mut self.budget,
+            fault!(copy_verification_fails),
+        )?;
+        let computed = {
+            let bytes_digest = active.hasher.finalize();
+            let mut out = [0_u8; 32];
+            out.copy_from_slice(&bytes_digest);
+            out
+        };
+        if digest != computed || digest != expected_digest || bytes != expected_bytes {
+            return Err(VerifierError::SnapshotMismatch);
+        }
+        let slot = self
+            .entries
+            .iter()
+            .position(|entry| entry.name == active.name)
+            .ok_or(VerifierError::SnapshotMismatch)?;
         let entry = &mut self.entries[slot];
-        entry.bytes = bytes.to_vec();
-        entry.sha256 = digest;
-        self.total_bytes = self.total_bytes.saturating_add(added);
+        entry.stored_bytes = bytes;
+        entry.stored_sha256 = digest;
+        entry.verified = true;
+        self.total_bytes = self.total_bytes.saturating_add(bytes);
+        Ok(entry.clone())
+    }
+
+    /// Compatibility helper for callers that hold one bounded byte sequence.
+    ///
+    /// The bytes are forwarded through the entry lifecycle and are absent
+    /// from snapshot metadata.
+    pub fn add(&mut self, name: &str, bytes: &[u8]) -> Result<(), VerifierError> {
+        let digest = sha256(bytes);
+        self.begin_entry(name)?;
+        let chunk = self.limits.io_chunk_bytes as usize;
+        for part in bytes.chunks(chunk) {
+            self.write_chunk(part)?;
+        }
+        self.finalize_entry(digest, bytes.len() as u64)?;
         Ok(())
     }
 
@@ -760,6 +1006,8 @@ impl SnapshotBuilder {
             dir: self.dir,
             entries: self.entries,
             staging_path: self.staging_path,
+            limits: self.limits,
+            available_fds: self.budget.remaining,
         }
     }
 
@@ -769,62 +1017,60 @@ impl SnapshotBuilder {
     }
 }
 
-fn write_and_sync(file: &mut File, bytes: &[u8]) -> Result<(), VerifierError> {
-    if fault!(partial_write_fails) {
-        let half = bytes.len() / 2;
-        file.write_all(&bytes[..half])
-            .map_err(|error| VerifierError::Io {
-                detail: format!("write private snapshot file: {}", error),
-            })?;
-        return Err(VerifierError::Io {
-            detail: "injected partial write failure".to_owned(),
-        });
-    }
-    file.write_all(bytes).map_err(|error| VerifierError::Io {
-        detail: format!("write private snapshot file: {}", error),
-    })?;
-    if fault!(file_sync_fails) {
-        return Err(VerifierError::Io {
-            detail: "injected file sync failure".to_owned(),
-        });
-    }
-    file.sync_all().map_err(|error| VerifierError::Io {
-        detail: format!("fsync private snapshot file: {}", error),
-    })
-}
-
-fn verify_copy(
+fn stream_copy_digest(
     dir: &File,
     name: &str,
-    expected: &[u8],
+    expected_bytes: u64,
+    io_chunk_bytes: u64,
     budget: &mut FdBudget,
-) -> Result<[u8; 32], VerifierError> {
+    force_mismatch: bool,
+) -> Result<([u8; 32], u64), VerifierError> {
     budget.spend()?;
-    if fault!(reopen_fails) {
-        return Err(VerifierError::Io {
-            detail: "injected reopen failure".to_owned(),
-        });
-    }
     let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
     let opened = openat(dir, name, flags, Mode::empty()).map_err(|error| VerifierError::Io {
         detail: format!("reopen private snapshot copy: {}", error),
     })?;
     let file = File::from(opened);
     let facts = file_facts(&file)?;
-    let copied = read_bounded(
-        &file,
-        &facts,
-        expected.len() as u64,
-        expected.len() as u64,
-        "snapshot",
-    )?;
-    if fault!(copy_verification_fails) {
+    if !file
+        .metadata()
+        .map_err(|error| VerifierError::Io {
+            detail: format!("fstat private snapshot copy: {}", error),
+        })?
+        .file_type()
+        .is_file()
+        || facts.links > 1
+    {
         return Err(VerifierError::SnapshotMismatch);
     }
-    if copied.as_slice() != expected {
+    let chunk = io_chunk_bytes as usize;
+    let mut buffer = vec![0_u8; chunk];
+    let mut hasher = Sha256::new();
+    let mut total = 0_u64;
+    let mut reader = file.take(expected_bytes.saturating_add(1));
+    loop {
+        let allowance = (expected_bytes.saturating_add(1) - total).min(io_chunk_bytes) as usize;
+        let read = reader
+            .read(&mut buffer[..allowance])
+            .map_err(|error| VerifierError::Io {
+                detail: format!("stream private snapshot copy: {}", error),
+            })?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+        total += read as u64;
+    }
+    if total != expected_bytes {
         return Err(VerifierError::SnapshotMismatch);
     }
-    Ok(sha256(&copied))
+    if force_mismatch {
+        return Err(VerifierError::SnapshotMismatch);
+    }
+    let bytes = hasher.finalize();
+    let mut digest = [0_u8; 32];
+    digest.copy_from_slice(&bytes);
+    Ok((digest, total))
 }
 
 #[cfg(test)]
@@ -1105,6 +1351,83 @@ mod tests {
         let report = builder.discard_partial()?;
         assert_eq!(report.files_removed, 1, "pre-seal entry was removed");
         assert!(report.is_complete(), "cleanup disposition is complete");
+        Ok(())
+    }
+
+    #[test]
+    fn entry_lifecycle_produces_metadata_only_state() -> Result<(), Box<dyn std::error::Error>> {
+        faults::reset();
+        let temp = tempfile::tempdir()?;
+        let mut builder = staging_builder(&temp)?;
+        builder.begin_entry("alpha.txt")?;
+        builder.write_chunk(b"abcdef")?;
+        let entry = builder.finalize_entry(sha256(b"abcdef"), 6)?;
+        assert_eq!(entry.stored_bytes, 6, "byte count is metadata");
+        assert_eq!(entry.stored_sha256, sha256(b"abcdef"), "digest is metadata");
+        assert!(entry.verified, "finalize proved the copy");
+        let dir = enumerate_names(&builder.dir)?;
+        assert_eq!(dir, vec!["alpha.txt".to_owned()], "bytes live on disk only");
+        builder.sync_directory()?;
+        let snapshot = builder.seal();
+        let proof = snapshot.verify_entry("alpha.txt")?;
+        assert_eq!(proof.stored_bytes, 6, "binding re-reads the byte count");
+        assert_eq!(
+            proof.stored_sha256,
+            sha256(b"abcdef"),
+            "binding re-reads the digest"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn binding_verification_fault_is_reported_without_bytes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        faults::reset();
+        let temp = tempfile::tempdir()?;
+        let mut builder = staging_builder(&temp)?;
+        builder.begin_entry("alpha.txt")?;
+        builder.write_chunk(b"abcdef")?;
+        builder.finalize_entry(sha256(b"abcdef"), 6)?;
+        builder.sync_directory()?;
+        let snapshot = builder.seal();
+        faults::set(FaultConfig {
+            binding_verification_fails: true,
+            ..FaultConfig::empty()
+        });
+        let error = snapshot.verify_entry("alpha.txt").unwrap_err();
+        faults::reset();
+        assert!(
+            matches!(error, VerifierError::SnapshotMismatch),
+            "binding-time verification failure is a typed mismatch"
+        );
+        let report = snapshot.discard()?;
+        assert!(
+            report.is_complete(),
+            "cleanup remains available after the fault"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn begin_entry_refuses_an_existing_symlink_with_no_follow()
+    -> Result<(), Box<dyn std::error::Error>> {
+        faults::reset();
+        let temp = tempfile::tempdir()?;
+        let mut builder = staging_builder(&temp)?;
+        let link = temp.path().join("private-staging").join("alpha.txt");
+        std::os::unix::fs::symlink("/tmp/b16-outside", &link)?;
+        let error = builder.begin_entry("alpha.txt");
+        assert!(
+            matches!(error, Err(VerifierError::SymlinkEscape { .. })),
+            "no-follow create refuses an existing symlink"
+        );
+        let pending = pending_result(builder.discard_partial())?;
+        assert_pending_code(&pending)?;
+        assert_eq!(
+            pending.remaining_entries,
+            vec!["alpha.txt".to_owned()],
+            "the untracked symlink is reported by cleanup"
+        );
         Ok(())
     }
 
