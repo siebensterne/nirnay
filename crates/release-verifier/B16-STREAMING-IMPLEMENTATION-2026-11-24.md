@@ -137,8 +137,9 @@ Test fixtures construct finite `TEST_ONLY` profiles whose identifiers carry the
 `TEST_ONLY` marker. The streaming entry point refuses such identifiers in a
 production invocation; a harness opts in through
 `ReleaseVerifier::with_test_only_profiles`. Those values exist to drive
-adversarial and infrastructure tests only. They are not approved maxima, not evidence for `PERF-001`, not RSS
-or throughput measurements and not a basis for operational qualification.
+adversarial and infrastructure tests only. They are not approved maxima, not evidence
+for `PERF-001`, not RSS or throughput measurements and not a basis for operational
+qualification.
 `STREAM_RESOURCE_PROFILE_RATIFIED` remains `PENDING`; `PERF_001_QUALIFIED` and
 `OPERATIONALLY_QUALIFIED` remain `BLOCKED`.
 
@@ -186,8 +187,8 @@ Style order was applied before build gates: `cargo fmt --all`, then
 `check_rust_style.py`, `check_prose_style.py`, `check_prose_unified.py`,
 `check_source_style.py`, Ruff added-line gates and `english_audit.py --strict`
 with strict rustdoc on `release-verifier`. Findings were corrected and the
-sweeps repeated; the final sweeps report zero findings and zero advisory
-review candidates.
+sweeps repeated; the final sweeps report zero binding findings in changed lines.
+Inherited advisory review candidates elsewhere in the repository remain unchanged.
 
 | Gate | Result |
 |---|---|
