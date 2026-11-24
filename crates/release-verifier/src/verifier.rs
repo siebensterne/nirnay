@@ -195,7 +195,13 @@ impl ReleaseVerifier {
         }
 
         let (manifest, sidecar, manifest_digest) =
-            self.stages_one_to_four(&manifest_bytes, &sidecar_bytes, request)?;
+            match self.stages_one_to_four(&manifest_bytes, &sidecar_bytes, request) {
+                Ok(value) => value,
+                Err(error) => {
+                    builder.discard_partial();
+                    return Err(error);
+                }
+            };
         let stage_five = match self.stage_five(&manifest, &release_dir, &mut builder, &mut budget) {
             Ok(value) => value,
             Err(error) => {

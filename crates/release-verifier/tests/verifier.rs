@@ -602,12 +602,10 @@ impl LineageResolver for CycleLineage {
 
 fn assert_refusal(result: Result<AdmissionReceipt, VerifierError>, code: &str, context: &str) {
     let actual = result.err().map(|error| error.code().to_owned());
+    let matches = actual.as_deref() == Some(code);
     assert!(
-        actual.as_deref() == Some(code),
-        "{}: expected {} refusal, got {:?}",
-        context,
-        code,
-        actual
+        matches,
+        "{context}: expected {code} refusal, got {actual:?}"
     );
 }
 
