@@ -88,6 +88,8 @@ pub struct ProducerActivity {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct PerformedOperation {
+    /// Stable reference used to bind evidence to this operation.
+    pub operation_ref: String,
     /// Operation action value.
     pub action: String,
     /// Kind of object acted upon.

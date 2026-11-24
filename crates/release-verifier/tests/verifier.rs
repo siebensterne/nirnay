@@ -136,6 +136,7 @@ impl Fixture {
             },
             producer_activity: release_verifier::schema::ProducerActivity {
                 performed_operations: vec![PerformedOperation {
+                    operation_ref: "observe_abstract".to_owned(),
                     action: "observe_abstract".to_owned(),
                     object_kind: "abstract-record".to_owned(),
                     object_id: "object-1".to_owned(),
