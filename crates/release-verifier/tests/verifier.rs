@@ -12,6 +12,7 @@ use flate2::Compression;
 use flate2::write::GzEncoder;
 use release_verifier::AdmissionReceipt;
 use release_verifier::AdmissionRequest;
+use release_verifier::CleanupDisposition;
 use release_verifier::Decision;
 use release_verifier::KeyState;
 use release_verifier::LineageResolver;
@@ -432,8 +433,18 @@ impl Fixture {
         coverage: Box<dyn CoverageEvaluator>,
         lineage: Box<dyn LineageResolver>,
     ) -> Result<AdmissionReceipt, VerifierError> {
+        self.verifier_with(rights, coverage, lineage)
+            .verify_release(&self.locator(), &self.request)
+    }
+
+    fn verifier_with(
+        &self,
+        rights: Box<dyn RightsEvaluator>,
+        coverage: Box<dyn CoverageEvaluator>,
+        lineage: Box<dyn LineageResolver>,
+    ) -> ReleaseVerifier {
         self.clean_staging().ok();
-        let verifier = ReleaseVerifier::new(release_verifier::VerifierConfig {
+        ReleaseVerifier::new(release_verifier::VerifierConfig {
             root: self.root.clone(),
             private_staging: self.staging.clone(),
             registry: self.registry.clone(),
@@ -442,8 +453,7 @@ impl Fixture {
             lineage,
             policy: self.policy,
             verifier_commit: "test-verifier-commit".to_owned(),
-        });
-        verifier.verify_release(&self.locator(), &self.request)
+        })
     }
 }
 
@@ -506,6 +516,32 @@ struct UnknownRights;
 
 impl RightsEvaluator for UnknownRights {
     fn evaluate(&self, _manifest: &ReleaseManifest, _request: &AdmissionRequest) -> RightsDecision {
+        RightsDecision {
+            decision: Decision::Unknown,
+            matching_grant_ids: Vec::new(),
+        }
+    }
+}
+
+struct UnknownRightsWithStagingMutation {
+    staging: PathBuf,
+}
+
+impl RightsEvaluator for UnknownRightsWithStagingMutation {
+    fn evaluate(&self, _manifest: &ReleaseManifest, _request: &AdmissionRequest) -> RightsDecision {
+        let staged = self.staging.join("manifest.json");
+        assert!(
+            staged.is_file(),
+            "staged manifest exists at the rights stage"
+        );
+        assert!(
+            fs::remove_file(&staged).is_ok(),
+            "test setup removes the staged manifest"
+        );
+        assert!(
+            fs::create_dir(&staged).is_ok(),
+            "test setup replaces the staged manifest with a directory"
+        );
         RightsDecision {
             decision: Decision::Unknown,
             matching_grant_ids: Vec::new(),
@@ -1121,6 +1157,133 @@ fn rights_unknown_is_refused() -> Result<(), Box<dyn Error>> {
     assert!(
         matches!(result, Err(VerifierError::RightsNotPermitted)),
         "rights UNKNOWN must refuse admission"
+    );
+    Ok(())
+}
+
+#[test]
+fn rights_refusal_records_completed_cleanup() -> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new("none")?;
+    let failure = fixture
+        .verifier_with(
+            Box::new(UnknownRights),
+            Box::new(PassCoverage),
+            Box::new(EmptyLineage),
+        )
+        .verify_release_with_diagnostics(&fixture.locator(), &fixture.request)
+        .err()
+        .ok_or_else(|| -> Box<dyn Error> { "rights refusal must produce a diagnostic".into() })?;
+    assert_eq!(
+        failure.refusal,
+        VerifierError::RightsNotPermitted,
+        "rights rejection stays the first refusal"
+    );
+    assert_eq!(
+        failure.refusal.code(),
+        "REJECT_RIGHTS_EVIDENCE",
+        "rights code is preserved"
+    );
+    assert_eq!(
+        failure.refusal.stage(),
+        6,
+        "rights refusal stays at stage 6"
+    );
+    let disposition = failure
+        .cleanup
+        .as_deref()
+        .ok_or_else(|| -> Box<dyn Error> { "cleanup outcome must be recorded".into() })?;
+    assert!(
+        disposition.is_complete(),
+        "cleanup_succeeded requires an empty synced directory"
+    );
+    assert!(!disposition.is_pending(), "cleanup_pending is false");
+    match disposition {
+        CleanupDisposition::Completed(report) => {
+            assert_eq!(report.files_expected, 3, "three entries were staged");
+            assert_eq!(report.files_removed, 3, "three entries were removed");
+            assert_eq!(report.files_already_absent, 0, "no entry was absent");
+            assert_eq!(
+                report.bytes_removed,
+                (fixture.manifest_bytes.len() + fixture.sidecar_bytes.len() + fixture.stored.len())
+                    as u64,
+                "removed bytes match the staged files"
+            );
+            assert!(report.directory_empty, "final enumeration found no entries");
+            assert!(
+                report.directory_sync_completed,
+                "directory sync after deletion completed"
+            );
+            assert!(report.is_complete(), "cleanup succeeded");
+        }
+        _ => return Err("rights refusal must report completed cleanup".into()),
+    }
+    Ok(())
+}
+
+#[test]
+fn rights_refusal_with_cleanup_failure_keeps_rights_code() -> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new("none")?;
+    let staging = fixture.staging.clone();
+    let failure = fixture
+        .verifier_with(
+            Box::new(UnknownRightsWithStagingMutation { staging }),
+            Box::new(PassCoverage),
+            Box::new(EmptyLineage),
+        )
+        .verify_release_with_diagnostics(&fixture.locator(), &fixture.request)
+        .err()
+        .ok_or_else(|| -> Box<dyn Error> { "rights refusal must produce a diagnostic".into() })?;
+    assert_eq!(
+        failure.refusal,
+        VerifierError::RightsNotPermitted,
+        "cleanup failure never converts a rights refusal"
+    );
+    assert_eq!(
+        failure.refusal.code(),
+        "REJECT_RIGHTS_EVIDENCE",
+        "rights code remains distinct from cleanup code"
+    );
+    assert_eq!(
+        failure.refusal.stage(),
+        6,
+        "rights refusal stays at stage 6"
+    );
+    let disposition = failure
+        .cleanup
+        .as_deref()
+        .ok_or_else(|| -> Box<dyn Error> { "cleanup outcome must be recorded".into() })?;
+    assert!(disposition.is_pending(), "cleanup_pending is observable");
+    assert!(
+        !disposition.is_complete(),
+        "cleanup did not prove completion"
+    );
+    match disposition {
+        CleanupDisposition::Pending(pending) => {
+            let cleanup_error = VerifierError::from(pending.clone());
+            assert_eq!(
+                cleanup_error.code(),
+                "CLEANUP_PENDING",
+                "cleanup failure carries its own code"
+            );
+            assert_eq!(
+                pending.staging_path, fixture.staging,
+                "exact staging path is preserved"
+            );
+            assert_eq!(
+                pending.remaining_entries,
+                vec![
+                    "manifest.json".to_owned(),
+                    "signature.json".to_owned(),
+                    "records.jsonl".to_owned(),
+                ],
+                "remaining entries are reported exactly"
+            );
+        }
+        _ => return Err("rights refusal must report the cleanup failure".into()),
+    }
+    assert!(
+        fixture.staging.join("manifest.json").is_dir(),
+        "staged path with the remaining entry survives for diagnosis"
     );
     Ok(())
 }

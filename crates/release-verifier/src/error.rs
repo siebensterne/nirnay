@@ -4,6 +4,24 @@
 //! One variant covers one failure class. The `code` method maps a variant to the
 //! stable D2 rejection code reported in an admission decision.
 
+use std::path::PathBuf;
+
+/// A private snapshot cleanup that did not reach an empty, synced directory.
+///
+/// The staging path is retained verbatim so an operator can identify the
+/// directory that still needs attention. The entry names are the tracked names
+/// cleanup had not confirmed as absent or removed when it stopped.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("CLEANUP_PENDING: private snapshot cleanup incomplete at {staging_path:?}: {detail}")]
+pub struct CleanupPending {
+    /// Exact caller-provided private staging path.
+    pub staging_path: PathBuf,
+    /// Tracked entry names not confirmed absent or removed.
+    pub remaining_entries: Vec<String>,
+    /// Operation that left cleanup incomplete, without untrusted file bytes.
+    pub detail: String,
+}
+
 /// A refusal raised by one of the twelve verification stages.
 ///
 /// The variant identifies the first failing stage and failure class. No variant
@@ -161,6 +179,9 @@ pub enum VerifierError {
         /// Operation and error text without untrusted file bytes.
         detail: String,
     },
+    /// Private snapshot cleanup did not prove an empty, synced directory.
+    #[error(transparent)]
+    CleanupPending(#[from] CleanupPending),
     /// Injected rights evaluation returned UNKNOWN or DENY.
     #[error("REJECT_RIGHTS_EVIDENCE: stage 6 rights decision is not PERMIT")]
     RightsNotPermitted,
@@ -256,6 +277,7 @@ impl VerifierError {
             | Self::Decompression { .. } => "REJECT_ARTIFACT_DIGESTS",
             Self::ResourceLimit { .. } => "REJECT_RESOURCE_LIMIT",
             Self::Io { .. } => "REJECT_IO",
+            Self::CleanupPending(..) => "CLEANUP_PENDING",
             Self::RightsNotPermitted | Self::ProducerActivity { .. } => "REJECT_RIGHTS_EVIDENCE",
             Self::Coverage { .. } => "REJECT_COVERAGE",
             Self::Lineage { .. } => "REJECT_SOURCE_LINEAGE",
@@ -300,7 +322,8 @@ impl VerifierError {
             | Self::Decompression { .. }
             | Self::SnapshotMismatch
             | Self::Io { .. }
-            | Self::ResourceLimit { .. } => 5,
+            | Self::ResourceLimit { .. }
+            | Self::CleanupPending(..) => 5,
             Self::RightsNotPermitted => 6,
             Self::Coverage { .. } => 7,
             Self::ProducerActivity { .. } => 8,

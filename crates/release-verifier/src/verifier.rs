@@ -8,7 +8,9 @@
 
 use crate::canonical_wire;
 use crate::canonical_wire::ArtifactRecordOrderProfile;
+use crate::error::CleanupPending;
 use crate::error::VerifierError;
+use crate::files::CleanupReport;
 use crate::files::FdBudget;
 use crate::files::PrivateSnapshot;
 use crate::files::ReleaseRoot;
@@ -79,6 +81,54 @@ pub const COVERAGE_DIMENSIONS: [&str; 9] = [
 const SUPERSEDES_STRICT: &str = "sequence-domain-strict";
 const SUPERSEDES_GAPS: &str = "sequence-domain-declared-gaps";
 const REFERENCE_KEY: &str = "reference-key";
+
+/// Cleanup outcome recorded next to a first refusal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CleanupDisposition {
+    /// Cleanup observed an empty directory after a post-removal sync.
+    Completed(CleanupReport),
+    /// Cleanup stopped before an empty, synced directory was observed.
+    Pending(CleanupPending),
+}
+
+impl CleanupDisposition {
+    /// Report success only for a completed report with an empty synced directory.
+    pub fn is_complete(&self) -> bool {
+        matches!(self, Self::Completed(report) if report.is_complete())
+    }
+
+    /// Report pending for every outcome that did not prove cleanup completion.
+    pub fn is_pending(&self) -> bool {
+        matches!(self, Self::Pending(_))
+    }
+}
+
+/// A first refusal together with its independent cleanup outcome.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{refusal}")]
+pub struct RefusalDiagnostic {
+    /// The original first refusal, which keeps its own stage and code.
+    pub refusal: VerifierError,
+    /// Cleanup attempt made after this refusal, once staging had started.
+    pub cleanup: Option<Box<CleanupDisposition>>,
+}
+
+type PipelineResult<T> = Result<T, Box<(VerifierError, Option<CleanupDisposition>)>>;
+
+fn no_cleanup<T>(result: Result<T, VerifierError>) -> PipelineResult<T> {
+    result.map_err(|error| Box::new((error, None)))
+}
+
+fn with_cleanup(
+    refusal: VerifierError,
+    cleanup: Result<CleanupReport, CleanupPending>,
+) -> (VerifierError, Option<CleanupDisposition>) {
+    let disposition = match cleanup {
+        Ok(report) => CleanupDisposition::Completed(report),
+        Err(pending) => CleanupDisposition::Pending(pending),
+    };
+    (refusal, Some(disposition))
+}
 
 /// Locator for one immutable release under the configured trusted root.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -175,22 +225,49 @@ impl ReleaseVerifier {
     }
 
     /// Verify a release and issue an immutable admission receipt.
+    ///
+    /// This wrapper exposes the first refusal. Callers that also need the
+    /// cleanup result use `verify_release_with_diagnostics`.
     pub fn verify_release(
         &self,
         locator: &ReleaseLocator,
         request: &AdmissionRequest,
     ) -> Result<AdmissionReceipt, VerifierError> {
+        self.verify_release_with_diagnostics(locator, request)
+            .map_err(|diagnostic| diagnostic.refusal)
+    }
+
+    /// Verify a release and keep a cleanup failure beside the first refusal.
+    pub fn verify_release_with_diagnostics(
+        &self,
+        locator: &ReleaseLocator,
+        request: &AdmissionRequest,
+    ) -> Result<AdmissionReceipt, RefusalDiagnostic> {
         self.canonical_profiles.borrow_mut().clear();
         self.canonical_event_types.borrow_mut().clear();
-        let mut budget = FdBudget::new(&self.policy)?;
-        let root = ReleaseRoot::open(&self.root, &mut budget)?;
-        let release_dir = root.release_dir(
+        self.run_stages(locator, request).map_err(|failure| {
+            let (refusal, cleanup) = *failure;
+            RefusalDiagnostic {
+                refusal,
+                cleanup: cleanup.map(Box::new),
+            }
+        })
+    }
+
+    fn run_stages(
+        &self,
+        locator: &ReleaseLocator,
+        request: &AdmissionRequest,
+    ) -> PipelineResult<AdmissionReceipt> {
+        let mut budget = no_cleanup(FdBudget::new(&self.policy))?;
+        let root = no_cleanup(ReleaseRoot::open(&self.root, &mut budget))?;
+        let release_dir = no_cleanup(root.release_dir(
             &locator.publisher_id,
             &locator.dataset_id,
             &locator.release_id,
             &mut budget,
-        )?;
-        let top_level = enumerate_names(&release_dir)?;
+        ))?;
+        let top_level = no_cleanup(enumerate_names(&release_dir))?;
         let expected_top: HashSet<&str> = ["manifest.json", "signature.json", "artifacts"]
             .into_iter()
             .collect();
@@ -200,60 +277,68 @@ impl ReleaseVerifier {
             .collect::<HashSet<&str>>()
             != expected_top
         {
-            return Err(VerifierError::FileSet {
-                detail: "release root file set differs from manifest, sidecar and artifacts"
-                    .to_owned(),
-            });
+            return Err(Box::new((
+                VerifierError::FileSet {
+                    detail: "release root file set differs from manifest, sidecar and artifacts"
+                        .to_owned(),
+                },
+                None,
+            )));
         }
-        let (manifest_file, manifest_facts) =
-            open_regular_file(&release_dir, "manifest.json", &mut budget)?;
-        let manifest_bytes = read_bounded(
+        let (manifest_file, manifest_facts) = no_cleanup(open_regular_file(
+            &release_dir,
+            "manifest.json",
+            &mut budget,
+        ))?;
+        let manifest_bytes = no_cleanup(read_bounded(
             &manifest_file,
             &manifest_facts,
             manifest_facts.size,
             self.policy.max_manifest_bytes,
             "max_manifest_bytes",
-        )?;
-        let (sidecar_file, sidecar_facts) =
-            open_regular_file(&release_dir, "signature.json", &mut budget)?;
-        let sidecar_bytes = read_bounded(
+        ))?;
+        let (sidecar_file, sidecar_facts) = no_cleanup(open_regular_file(
+            &release_dir,
+            "signature.json",
+            &mut budget,
+        ))?;
+        let sidecar_bytes = no_cleanup(read_bounded(
             &sidecar_file,
             &sidecar_facts,
             sidecar_facts.size,
             self.policy.max_sidecar_bytes,
             "max_sidecar_bytes",
-        )?;
+        ))?;
         drop(manifest_file);
         drop(sidecar_file);
 
-        let mut builder = SnapshotBuilder::new(&self.private_staging, &mut budget, &self.policy)?;
-        if let Err(error) = builder.add("manifest.json", &manifest_bytes) {
-            builder.discard_partial();
-            return Err(error);
-        }
-        if let Err(error) = builder.add("signature.json", &sidecar_bytes) {
-            builder.discard_partial();
-            return Err(error);
+        let mut builder = no_cleanup(SnapshotBuilder::new(
+            &self.private_staging,
+            &mut budget,
+            &self.policy,
+        ))?;
+        for (name, bytes) in [
+            ("manifest.json", manifest_bytes.as_slice()),
+            ("signature.json", sidecar_bytes.as_slice()),
+        ] {
+            if let Err(error) = builder.add(name, bytes) {
+                return Err(Box::new(with_cleanup(error, builder.discard_partial())));
+            }
         }
 
         let parsed = match self.stages_one_to_four(&manifest_bytes, &sidecar_bytes, request) {
             Ok(value) => value,
-            Err(error) => {
-                builder.discard_partial();
-                return Err(error);
-            }
+            Err(error) => return Err(Box::new(with_cleanup(error, builder.discard_partial()))),
         };
         let stage_five =
             match self.stage_five(&parsed.manifest, &release_dir, &mut builder, &mut budget) {
                 Ok(value) => value,
-                Err(error) => {
-                    builder.discard_partial();
-                    return Err(error);
-                }
+                Err(error) => return Err(Box::new(with_cleanup(error, builder.discard_partial()))),
             };
-        let snapshot = builder.seal().inspect_err(|_| {
-            std::fs::remove_dir_all(&self.private_staging).ok();
-        })?;
+        if let Err(error) = builder.sync_directory() {
+            return Err(Box::new(with_cleanup(error, builder.discard_partial())));
+        }
+        let snapshot = builder.seal();
         self.note_stage(5);
         drop(release_dir);
         drop(root);
@@ -267,10 +352,7 @@ impl ReleaseVerifier {
             request,
         ) {
             Ok(receipt) => Ok(receipt),
-            Err(error) => {
-                snapshot.discard();
-                Err(error)
-            }
+            Err(error) => Err(Box::new(with_cleanup(error, snapshot.discard()))),
         }
     }
 

@@ -834,6 +834,23 @@ fn executable_diagnostic_records_rights_refusal_without_receipt_or_snapshot()
         report["private_snapshot_survives"], false,
         "private snapshot is discarded"
     );
+    assert_eq!(
+        report["cleanup"]["cleanup_succeeded"], true,
+        "observed cleanup completed"
+    );
+    assert_eq!(
+        report["cleanup"]["cleanup_pending"], false,
+        "no cleanup was left pending"
+    );
+    assert_eq!(
+        report["cleanup"]["directory_empty"], true,
+        "final enumeration was empty"
+    );
+    assert_eq!(
+        report["cleanup"]["directory_sync_completed"], true,
+        "directory sync followed deletion"
+    );
+    assert_eq!(report["receipt_written"], false, "no receipt was written");
     assert_eq!(report["rights_state"], "UNKNOWN", "rights remain unknown");
     assert_eq!(report["dataset_accepted"], false, "no dataset acceptance");
     let survivors: Vec<PathBuf> = fs::read_dir(&tmpdir)?
