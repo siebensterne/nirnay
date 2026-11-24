@@ -15,8 +15,10 @@
 //! admission receipt is created and no private snapshot survives the refusal.
 
 use release_verifier::AdmissionRequest;
+use release_verifier::CleanupDisposition;
 use release_verifier::Decision;
 use release_verifier::KeyState;
+use release_verifier::RefusalDiagnostic;
 use release_verifier::ReleaseLocator;
 use release_verifier::ReleaseManifest;
 use release_verifier::ReleaseVerifier;
@@ -293,12 +295,38 @@ fn stage_diagnostic(passed: &[u8], refusal_stage: Option<u8>, code: Option<&str>
         .collect()
 }
 
+fn cleanup_value(cleanup: &Option<Box<CleanupDisposition>>) -> Value {
+    match cleanup.as_deref() {
+        None => Value::Null,
+        Some(CleanupDisposition::Completed(report)) => json!({
+            "cleanup_succeeded": report.is_complete(),
+            "cleanup_pending": false,
+            "code": "CLEANUP_COMPLETED",
+            "files_expected": report.files_expected,
+            "files_removed": report.files_removed,
+            "files_already_absent": report.files_already_absent,
+            "bytes_removed": report.bytes_removed,
+            "directory_empty": report.directory_empty,
+            "directory_sync_completed": report.directory_sync_completed,
+        }),
+        Some(CleanupDisposition::Pending(pending)) => json!({
+            "cleanup_succeeded": false,
+            "cleanup_pending": true,
+            "code": "CLEANUP_PENDING",
+            "staging_path": pending.staging_path.to_string_lossy(),
+            "remaining_entries": pending.remaining_entries,
+            "detail": pending.detail,
+        }),
+    }
+}
+
 fn diagnostic(
     locator: &ReleaseLocator,
     stages: Vec<Value>,
     refusal: Option<Value>,
     outcome: &str,
     snapshot_survives: bool,
+    cleanup: Value,
 ) -> Value {
     let status_of = |stage: u8| -> &str {
         stages
@@ -327,6 +355,7 @@ fn diagnostic(
             "rights_admission": status_of(6),
         },
         "refusal": refusal,
+        "cleanup": cleanup,
         "admission_receipt": Value::Null,
         "receipt_written": false,
         "private_snapshot_survives": snapshot_survives,
@@ -372,7 +401,8 @@ fn run(arguments: &Arguments) -> Result<Value, Box<dyn Error>> {
         move |stage| passed.borrow_mut().push(stage)
     });
 
-    let outcome = verifier.verify_release(&locator, &request);
+    let outcome: Result<_, RefusalDiagnostic> =
+        verifier.verify_release_with_diagnostics(&locator, &request);
     drop(verifier);
     let observed = Rc::try_unwrap(passed)
         .map_err(|_| "stage observer outlived verification".to_owned())?
@@ -385,15 +415,21 @@ fn run(arguments: &Arguments) -> Result<Value, Box<dyn Error>> {
             None,
             "UNEXPECTED_RIGHTS_ADMISSION",
             survives,
+            Value::Null,
         )),
-        Err(error) => {
-            let refusal = refusal_value(&error);
+        Err(failure) => {
+            let refusal = refusal_value(&failure.refusal);
             Ok(diagnostic(
                 &locator,
-                stage_diagnostic(&observed, Some(error.stage()), Some(error.code())),
+                stage_diagnostic(
+                    &observed,
+                    Some(failure.refusal.stage()),
+                    Some(failure.refusal.code()),
+                ),
                 Some(refusal),
                 "RIGHTS_ADMISSION_REFUSED",
                 survives,
+                cleanup_value(&failure.cleanup),
             ))
         }
     }
@@ -426,6 +462,7 @@ fn main() -> ExitCode {
                 })),
                 "PREFLIGHT_REFUSED",
                 false,
+                Value::Null,
             )
         }
     };
@@ -433,7 +470,9 @@ fn main() -> ExitCode {
         && report["refusal"]["stage"] == 6
         && report["refusal"]["code"] == "REJECT_RIGHTS_EVIDENCE"
         && report["admission_receipt"].is_null()
-        && report["private_snapshot_survives"] == false;
+        && report["private_snapshot_survives"] == false
+        && report["cleanup"]["cleanup_succeeded"] == true
+        && report["cleanup"]["cleanup_pending"] == false;
     if let Some(parent) = arguments.out.parent()
         && !parent.as_os_str().is_empty()
         && let Err(error) = fs::create_dir_all(parent)

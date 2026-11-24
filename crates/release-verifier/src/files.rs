@@ -8,14 +8,18 @@
 //! before any downstream stage runs. No stage after sealing reopens a
 //! published path.
 
+use crate::error::CleanupPending;
 use crate::error::VerifierError;
 use crate::trust::VerifierResourcePolicy;
 use rustix::fd::AsFd;
 use rustix::fd::OwnedFd;
+use rustix::fs::AtFlags;
 use rustix::fs::Dir;
 use rustix::fs::Mode;
 use rustix::fs::OFlags;
 use rustix::fs::openat;
+use rustix::fs::statat;
+use rustix::fs::unlinkat;
 use sha2::Digest;
 use sha2::Sha256;
 use std::collections::HashSet;
@@ -28,6 +32,118 @@ use std::os::unix::fs::MetadataExt;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::path::PathBuf;
+
+#[cfg(test)]
+macro_rules! fault {
+    ($probe:ident) => {
+        $crate::files::faults::$probe()
+    };
+}
+
+#[cfg(not(test))]
+macro_rules! fault {
+    ($probe:ident) => {
+        false
+    };
+}
+
+#[cfg(test)]
+fn removal_fault(attempt: usize) -> bool {
+    faults::removal_fails_at() == attempt
+}
+
+#[cfg(not(test))]
+fn removal_fault(_attempt: usize) -> bool {
+    false
+}
+
+/// Deterministic failure points for the snapshot and cleanup unit tests.
+#[cfg(test)]
+pub(crate) mod faults {
+    use std::cell::RefCell;
+
+    /// One fault schedule, applied to the current test thread only.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(crate) struct FaultConfig {
+        pub(crate) creation_fails: bool,
+        pub(crate) partial_write_fails: bool,
+        pub(crate) file_sync_fails: bool,
+        pub(crate) reopen_fails: bool,
+        pub(crate) copy_verification_fails: bool,
+        pub(crate) removal_fails_at: usize,
+        pub(crate) cleanup_directory_sync_fails: bool,
+        pub(crate) cleanup_enumeration_fails: bool,
+        pub(crate) seal_sync_fails: bool,
+    }
+
+    impl FaultConfig {
+        pub(crate) const fn empty() -> Self {
+            Self {
+                creation_fails: false,
+                partial_write_fails: false,
+                file_sync_fails: false,
+                reopen_fails: false,
+                copy_verification_fails: false,
+                removal_fails_at: 0,
+                cleanup_directory_sync_fails: false,
+                cleanup_enumeration_fails: false,
+                seal_sync_fails: false,
+            }
+        }
+    }
+
+    thread_local! {
+        static CONFIG: RefCell<FaultConfig> = const { RefCell::new(FaultConfig::empty()) };
+    }
+
+    pub(crate) fn set(config: FaultConfig) {
+        CONFIG.with(|slot| *slot.borrow_mut() = config);
+    }
+
+    pub(crate) fn reset() {
+        CONFIG.with(|slot| *slot.borrow_mut() = FaultConfig::empty());
+    }
+
+    fn read() -> FaultConfig {
+        CONFIG.with(|slot| *slot.borrow())
+    }
+
+    pub(crate) fn creation_fails() -> bool {
+        read().creation_fails
+    }
+
+    pub(crate) fn partial_write_fails() -> bool {
+        read().partial_write_fails
+    }
+
+    pub(crate) fn file_sync_fails() -> bool {
+        read().file_sync_fails
+    }
+
+    pub(crate) fn reopen_fails() -> bool {
+        read().reopen_fails
+    }
+
+    pub(crate) fn copy_verification_fails() -> bool {
+        read().copy_verification_fails
+    }
+
+    pub(crate) fn removal_fails_at() -> usize {
+        read().removal_fails_at
+    }
+
+    pub(crate) fn cleanup_directory_sync_fails() -> bool {
+        read().cleanup_directory_sync_fails
+    }
+
+    pub(crate) fn cleanup_enumeration_fails() -> bool {
+        read().cleanup_enumeration_fails
+    }
+
+    pub(crate) fn seal_sync_fails() -> bool {
+        read().seal_sync_fails
+    }
+}
 
 /// A conservative budget for descriptor opens during one verification.
 #[derive(Debug, Clone)]
@@ -347,6 +463,33 @@ pub fn parse_hex_lower(text: &str, field: &str) -> Result<[u8; 32], VerifierErro
     Ok(out)
 }
 
+/// Observable state of one private snapshot cleanup attempt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CleanupReport {
+    /// Tracked entries present when the attempt started.
+    pub files_expected: usize,
+    /// Files removed by descriptor-relative unlink during this attempt.
+    pub files_removed: usize,
+    /// Tracked entries that were already absent at their removal turn.
+    pub files_already_absent: usize,
+    /// Sum of no-follow stat sizes for the files removed by this attempt.
+    pub bytes_removed: u64,
+    /// Result of the final directory re-enumeration.
+    pub directory_empty: bool,
+    /// Result of the directory sync after removals.
+    pub directory_sync_completed: bool,
+}
+
+impl CleanupReport {
+    /// Report completion only when every tracked entry ended absent and the
+    /// directory was synced after an empty re-enumeration.
+    pub fn is_complete(&self) -> bool {
+        self.directory_empty
+            && self.directory_sync_completed
+            && self.files_removed + self.files_already_absent == self.files_expected
+    }
+}
+
 /// One sealed snapshot entry retained in memory for downstream stages.
 #[derive(Debug, Clone)]
 pub struct SnapshotEntry {
@@ -390,16 +533,117 @@ impl PrivateSnapshot {
         &self.staging_path
     }
 
-    /// Remove staged files after a refusal so no partial release is retained.
-    pub fn discard(&self) {
-        discard_files(&self.staging_path, &self.entries);
+    /// Remove staged files after a refusal and prove the directory is empty.
+    ///
+    /// Every removal error is reported. A successful result is returned only
+    /// after a post-removal directory sync and an empty re-enumeration.
+    pub fn discard(&self) -> Result<CleanupReport, CleanupPending> {
+        cleanup_directory(&self.dir, &self.staging_path, &self.entries)
     }
 }
 
-fn discard_files(path: &Path, entries: &[SnapshotEntry]) {
-    for entry in entries {
-        let _ = std::fs::remove_file(path.join(&entry.name));
+fn remaining_from(entries: &[SnapshotEntry], from: usize) -> Vec<String> {
+    entries[from..]
+        .iter()
+        .map(|entry| entry.name.clone())
+        .collect()
+}
+
+fn pending(staging_path: &Path, remaining: Vec<String>, detail: String) -> CleanupPending {
+    CleanupPending {
+        staging_path: staging_path.to_path_buf(),
+        remaining_entries: remaining,
+        detail,
     }
+}
+
+fn cleanup_directory(
+    dir: &File,
+    staging_path: &Path,
+    entries: &[SnapshotEntry],
+) -> Result<CleanupReport, CleanupPending> {
+    let mut report = CleanupReport {
+        files_expected: entries.len(),
+        files_removed: 0,
+        files_already_absent: 0,
+        bytes_removed: 0,
+        directory_empty: false,
+        directory_sync_completed: false,
+    };
+    let mut attempts = 0_usize;
+    for (index, entry) in entries.iter().enumerate() {
+        let before = match statat(dir.as_fd(), &entry.name, AtFlags::SYMLINK_NOFOLLOW) {
+            Ok(value) => value,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                report.files_already_absent += 1;
+                continue;
+            }
+            Err(error) => {
+                return Err(pending(
+                    staging_path,
+                    remaining_from(entries, index),
+                    format!("stat staged entry before removal: {}", error),
+                ));
+            }
+        };
+        attempts += 1;
+        if removal_fault(attempts) {
+            return Err(pending(
+                staging_path,
+                remaining_from(entries, index),
+                "injected removal failure".to_owned(),
+            ));
+        }
+        unlinkat(dir.as_fd(), &entry.name, AtFlags::empty()).map_err(|error| {
+            pending(
+                staging_path,
+                remaining_from(entries, index),
+                format!("unlink staged entry {}: {}", entry.name, error),
+            )
+        })?;
+        report.files_removed += 1;
+        report.bytes_removed = report
+            .bytes_removed
+            .saturating_add(before.st_size.max(0) as u64);
+    }
+    if fault!(cleanup_directory_sync_fails) {
+        return Err(pending(
+            staging_path,
+            Vec::new(),
+            "injected directory sync failure after deletion".to_owned(),
+        ));
+    }
+    rustix::fs::fsync(dir.as_fd()).map_err(|error| {
+        pending(
+            staging_path,
+            Vec::new(),
+            format!("fsync private staging directory after deletion: {}", error),
+        )
+    })?;
+    report.directory_sync_completed = true;
+    if fault!(cleanup_enumeration_fails) {
+        return Err(pending(
+            staging_path,
+            Vec::new(),
+            "injected final enumeration failure".to_owned(),
+        ));
+    }
+    let remaining = enumerate_names(dir).map_err(|error| {
+        pending(
+            staging_path,
+            Vec::new(),
+            format!("re-enumerate private staging directory: {}", error),
+        )
+    })?;
+    if !remaining.is_empty() {
+        return Err(pending(
+            staging_path,
+            remaining,
+            "private staging directory is not empty after cleanup".to_owned(),
+        ));
+    }
+    report.directory_empty = true;
+    Ok(report)
 }
 
 /// Builder that copies verified bytes into private staging and seals them.
@@ -448,6 +692,9 @@ impl SnapshotBuilder {
     }
 
     /// Copy one verified byte sequence into staging and re-hash the copy.
+    ///
+    /// The entry is tracked immediately after creation. A write, sync, reopen
+    /// or copy-check failure therefore leaves a named entry for cleanup.
     pub fn add(&mut self, name: &str, bytes: &[u8]) -> Result<(), VerifierError> {
         if !valid_component(name) {
             return Err(VerifierError::UnsafePath {
@@ -461,6 +708,11 @@ impl SnapshotBuilder {
             });
         }
         self.budget.spend()?;
+        if fault!(creation_fails) {
+            return Err(VerifierError::Io {
+                detail: "injected creation failure".to_owned(),
+            });
+        }
         let flags =
             OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC;
         let opened =
@@ -470,39 +722,75 @@ impl SnapshotBuilder {
                 }
             })?;
         let mut file = File::from(opened);
-        file.write_all(bytes).map_err(|error| VerifierError::Io {
-            detail: format!("write private snapshot file: {}", error),
-        })?;
-        file.sync_all().map_err(|error| VerifierError::Io {
-            detail: format!("fsync private snapshot file: {}", error),
-        })?;
-        drop(file);
-        let digest = verify_copy(&self.dir, name, bytes, &mut self.budget)?;
+        let slot = self.entries.len();
         self.entries.push(SnapshotEntry {
             name: name.to_owned(),
-            bytes: bytes.to_vec(),
-            sha256: digest,
+            bytes: Vec::new(),
+            sha256: [0_u8; 32],
         });
+        let written = write_and_sync(&mut file, bytes);
+        drop(file);
+        written?;
+        let digest = verify_copy(&self.dir, name, bytes, &mut self.budget)?;
+        let entry = &mut self.entries[slot];
+        entry.bytes = bytes.to_vec();
+        entry.sha256 = digest;
         self.total_bytes = self.total_bytes.saturating_add(added);
         Ok(())
     }
 
-    /// Sync the private directory and return an immutable sealed snapshot.
-    pub fn seal(self) -> Result<PrivateSnapshot, VerifierError> {
-        self.dir.sync_all().map_err(|error| VerifierError::Io {
+    /// Sync the private directory before sealing.
+    pub fn sync_directory(&self) -> Result<(), VerifierError> {
+        if fault!(seal_sync_fails) {
+            return Err(VerifierError::Io {
+                detail: "injected directory sync failure before seal".to_owned(),
+            });
+        }
+        rustix::fs::fsync(self.dir.as_fd()).map_err(|error| VerifierError::Io {
             detail: format!("fsync private snapshot directory: {}", error),
-        })?;
-        Ok(PrivateSnapshot {
-            dir: self.dir,
-            entries: self.entries,
-            staging_path: self.staging_path,
         })
     }
 
-    /// Remove files copied so far after a refusal during staging.
-    pub fn discard_partial(&self) {
-        discard_files(&self.staging_path, &self.entries);
+    /// Seal an already synced builder into an immutable snapshot.
+    ///
+    /// Callers invoke `sync_directory` first. This method performs no I/O, so
+    /// the refusal path keeps the sync result observable for cleanup.
+    pub fn seal(self) -> PrivateSnapshot {
+        PrivateSnapshot {
+            dir: self.dir,
+            entries: self.entries,
+            staging_path: self.staging_path,
+        }
     }
+
+    /// Remove files copied so far after a refusal during staging.
+    pub fn discard_partial(&self) -> Result<CleanupReport, CleanupPending> {
+        cleanup_directory(&self.dir, &self.staging_path, &self.entries)
+    }
+}
+
+fn write_and_sync(file: &mut File, bytes: &[u8]) -> Result<(), VerifierError> {
+    if fault!(partial_write_fails) {
+        let half = bytes.len() / 2;
+        file.write_all(&bytes[..half])
+            .map_err(|error| VerifierError::Io {
+                detail: format!("write private snapshot file: {}", error),
+            })?;
+        return Err(VerifierError::Io {
+            detail: "injected partial write failure".to_owned(),
+        });
+    }
+    file.write_all(bytes).map_err(|error| VerifierError::Io {
+        detail: format!("write private snapshot file: {}", error),
+    })?;
+    if fault!(file_sync_fails) {
+        return Err(VerifierError::Io {
+            detail: "injected file sync failure".to_owned(),
+        });
+    }
+    file.sync_all().map_err(|error| VerifierError::Io {
+        detail: format!("fsync private snapshot file: {}", error),
+    })
 }
 
 fn verify_copy(
@@ -512,6 +800,11 @@ fn verify_copy(
     budget: &mut FdBudget,
 ) -> Result<[u8; 32], VerifierError> {
     budget.spend()?;
+    if fault!(reopen_fails) {
+        return Err(VerifierError::Io {
+            detail: "injected reopen failure".to_owned(),
+        });
+    }
     let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
     let opened = openat(dir, name, flags, Mode::empty()).map_err(|error| VerifierError::Io {
         detail: format!("reopen private snapshot copy: {}", error),
@@ -525,8 +818,323 @@ fn verify_copy(
         expected.len() as u64,
         "snapshot",
     )?;
+    if fault!(copy_verification_fails) {
+        return Err(VerifierError::SnapshotMismatch);
+    }
     if copied.as_slice() != expected {
         return Err(VerifierError::SnapshotMismatch);
     }
     Ok(sha256(&copied))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::faults::FaultConfig;
+    use super::*;
+    use tempfile::TempDir;
+
+    fn test_policy() -> VerifierResourcePolicy {
+        VerifierResourcePolicy {
+            max_manifest_bytes: 1_024,
+            max_sidecar_bytes: 1_024,
+            max_artifact_count: 4,
+            max_stored_bytes: 1_024,
+            max_expanded_bytes: 1_024,
+            max_total_expanded_bytes: 4_096,
+            max_record_bytes: 256,
+            max_record_count: 64,
+            max_json_nesting: 8,
+            max_decompression_budget: 4_096,
+            max_temp_disk_bytes: 4_096,
+            max_open_file_descriptors: 32,
+        }
+    }
+
+    fn staging_builder(temp: &TempDir) -> Result<SnapshotBuilder, VerifierError> {
+        let path = temp.path().join("private-staging");
+        std::fs::create_dir(&path).map_err(|error| VerifierError::Io {
+            detail: format!("create test staging directory: {}", error),
+        })?;
+        let mut budget = FdBudget::new(&test_policy())?;
+        SnapshotBuilder::new(&path, &mut budget, &test_policy())
+    }
+
+    fn pending_result(
+        result: Result<CleanupReport, CleanupPending>,
+    ) -> Result<CleanupPending, Box<dyn std::error::Error>> {
+        match result {
+            Ok(_) => Err("cleanup was expected to be pending".into()),
+            Err(pending) => Ok(pending),
+        }
+    }
+
+    fn assert_pending_code(pending: &CleanupPending) -> Result<(), Box<dyn std::error::Error>> {
+        let error = VerifierError::from(pending.clone());
+        assert_eq!(error.code(), "CLEANUP_PENDING", "distinct cleanup code");
+        assert_eq!(error.stage(), 5, "cleanup belongs to the staging stage");
+        Ok(())
+    }
+
+    fn missing(builder: &SnapshotBuilder, name: &str) -> bool {
+        matches!(
+            statat(builder.dir.as_fd(), name, AtFlags::SYMLINK_NOFOLLOW),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound
+        )
+    }
+
+    #[test]
+    fn creation_failure_tracks_no_entry() -> Result<(), Box<dyn std::error::Error>> {
+        faults::set(FaultConfig {
+            creation_fails: true,
+            ..FaultConfig::empty()
+        });
+        let temp = tempfile::tempdir()?;
+        let mut builder = staging_builder(&temp)?;
+        let error = builder.add("alpha.txt", b"payload");
+        faults::reset();
+        assert!(error.is_err(), "injected creation failure must be reported");
+        let report = builder.discard_partial()?;
+        assert_eq!(report.files_expected, 0, "no entry was created");
+        assert_eq!(report.files_removed, 0, "no file was removed");
+        assert!(
+            report.is_complete(),
+            "cleanup proved an empty synced directory"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn partial_write_failure_removes_the_tracked_file() -> Result<(), Box<dyn std::error::Error>> {
+        faults::set(FaultConfig {
+            partial_write_fails: true,
+            ..FaultConfig::empty()
+        });
+        let temp = tempfile::tempdir()?;
+        let mut builder = staging_builder(&temp)?;
+        let error = builder.add("alpha.txt", b"abcdef");
+        assert!(error.is_err(), "injected partial write must be reported");
+        let report = builder.discard_partial()?;
+        assert_eq!(report.files_expected, 1, "entry was tracked before writing");
+        assert_eq!(
+            report.files_removed, 1,
+            "partially written file was removed"
+        );
+        assert_eq!(
+            report.bytes_removed, 3,
+            "only the written bytes were counted"
+        );
+        assert_eq!(report.files_already_absent, 0, "no entry was absent");
+        assert!(report.directory_empty, "final enumeration found no entries");
+        assert!(
+            report.directory_sync_completed,
+            "directory sync after deletion completed"
+        );
+        assert!(report.is_complete(), "cleanup disposition is complete");
+        Ok(())
+    }
+
+    #[test]
+    fn file_sync_failure_removes_the_tracked_file() -> Result<(), Box<dyn std::error::Error>> {
+        faults::set(FaultConfig {
+            file_sync_fails: true,
+            ..FaultConfig::empty()
+        });
+        let temp = tempfile::tempdir()?;
+        let mut builder = staging_builder(&temp)?;
+        let error = builder.add("alpha.txt", b"abcdef");
+        assert!(
+            error.is_err(),
+            "injected file sync failure must be reported"
+        );
+        let report = builder.discard_partial()?;
+        assert_eq!(report.files_expected, 1, "entry was tracked before syncing");
+        assert_eq!(report.files_removed, 1, "synced-file failure was cleaned");
+        assert_eq!(report.bytes_removed, 6, "full written size was counted");
+        assert!(report.is_complete(), "cleanup disposition is complete");
+        Ok(())
+    }
+
+    #[test]
+    fn reopen_failure_removes_the_tracked_file() -> Result<(), Box<dyn std::error::Error>> {
+        faults::set(FaultConfig {
+            reopen_fails: true,
+            ..FaultConfig::empty()
+        });
+        let temp = tempfile::tempdir()?;
+        let mut builder = staging_builder(&temp)?;
+        let error = builder.add("alpha.txt", b"abcdef");
+        assert!(error.is_err(), "injected reopen failure must be reported");
+        let report = builder.discard_partial()?;
+        assert_eq!(report.files_expected, 1, "entry was tracked before reopen");
+        assert_eq!(report.files_removed, 1, "file left by reopen was removed");
+        assert!(report.is_complete(), "cleanup disposition is complete");
+        Ok(())
+    }
+
+    #[test]
+    fn copy_verification_failure_removes_the_tracked_file() -> Result<(), Box<dyn std::error::Error>>
+    {
+        faults::set(FaultConfig {
+            copy_verification_fails: true,
+            ..FaultConfig::empty()
+        });
+        let temp = tempfile::tempdir()?;
+        let mut builder = staging_builder(&temp)?;
+        let error = builder.add("alpha.txt", b"abcdef");
+        assert!(
+            matches!(error, Err(VerifierError::SnapshotMismatch)),
+            "injected copy verification failure must be reported"
+        );
+        let report = builder.discard_partial()?;
+        assert_eq!(report.files_expected, 1, "entry was tracked before verify");
+        assert_eq!(report.files_removed, 1, "unverified file was removed");
+        assert!(report.is_complete(), "cleanup disposition is complete");
+        Ok(())
+    }
+
+    #[test]
+    fn removal_of_first_file_is_pending() -> Result<(), Box<dyn std::error::Error>> {
+        faults::set(FaultConfig {
+            removal_fails_at: 1,
+            ..FaultConfig::empty()
+        });
+        let temp = tempfile::tempdir()?;
+        let mut builder = staging_builder(&temp)?;
+        builder.add("alpha.txt", b"one")?;
+        builder.add("beta.txt", b"two")?;
+        let pending = pending_result(builder.discard_partial())?;
+        assert_pending_code(&pending)?;
+        assert_eq!(
+            pending.staging_path, builder.staging_path,
+            "exact staging path"
+        );
+        assert_eq!(
+            pending.remaining_entries,
+            vec!["alpha.txt".to_owned(), "beta.txt".to_owned()],
+            "both tracked files remain"
+        );
+        assert!(!missing(&builder, "alpha.txt"), "first file survived");
+        Ok(())
+    }
+
+    #[test]
+    fn removal_after_some_files_deleted_is_pending() -> Result<(), Box<dyn std::error::Error>> {
+        faults::set(FaultConfig {
+            removal_fails_at: 2,
+            ..FaultConfig::empty()
+        });
+        let temp = tempfile::tempdir()?;
+        let mut builder = staging_builder(&temp)?;
+        builder.add("alpha.txt", b"one")?;
+        builder.add("beta.txt", b"two")?;
+        builder.add("gamma.txt", b"three")?;
+        let pending = pending_result(builder.discard_partial())?;
+        assert_pending_code(&pending)?;
+        assert_eq!(
+            pending.remaining_entries,
+            vec!["beta.txt".to_owned(), "gamma.txt".to_owned()],
+            "unremoved entries are reported exactly"
+        );
+        assert!(missing(&builder, "alpha.txt"), "first file was removed");
+        assert!(!missing(&builder, "beta.txt"), "second file survived");
+        assert!(!missing(&builder, "gamma.txt"), "third file survived");
+        Ok(())
+    }
+
+    #[test]
+    fn directory_sync_failure_after_deletion_is_pending() -> Result<(), Box<dyn std::error::Error>>
+    {
+        faults::set(FaultConfig {
+            cleanup_directory_sync_fails: true,
+            ..FaultConfig::empty()
+        });
+        let temp = tempfile::tempdir()?;
+        let mut builder = staging_builder(&temp)?;
+        builder.add("alpha.txt", b"one")?;
+        let pending = pending_result(builder.discard_partial())?;
+        assert_pending_code(&pending)?;
+        assert!(
+            pending.remaining_entries.is_empty(),
+            "no tracked entry remained after deletion"
+        );
+        assert!(missing(&builder, "alpha.txt"), "the file was removed");
+        assert!(
+            pending.detail.contains("sync"),
+            "the sync failure is the recorded cause"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn final_enumeration_failure_is_pending() -> Result<(), Box<dyn std::error::Error>> {
+        faults::set(FaultConfig {
+            cleanup_enumeration_fails: true,
+            ..FaultConfig::empty()
+        });
+        let temp = tempfile::tempdir()?;
+        let mut builder = staging_builder(&temp)?;
+        builder.add("alpha.txt", b"one")?;
+        let pending = pending_result(builder.discard_partial())?;
+        assert_pending_code(&pending)?;
+        assert!(
+            pending.remaining_entries.is_empty(),
+            "directory held no entry at the failed enumeration"
+        );
+        assert!(missing(&builder, "alpha.txt"), "the file was removed");
+        assert!(
+            pending.detail.contains("enumeration"),
+            "the enumeration failure is the recorded cause"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn seal_sync_failure_is_cleaned_and_reported() -> Result<(), Box<dyn std::error::Error>> {
+        faults::set(FaultConfig {
+            seal_sync_fails: true,
+            ..FaultConfig::empty()
+        });
+        let temp = tempfile::tempdir()?;
+        let mut builder = staging_builder(&temp)?;
+        builder.add("alpha.txt", b"one")?;
+        let error = builder.sync_directory();
+        assert!(
+            error.is_err(),
+            "injected seal sync failure must be reported"
+        );
+        let report = builder.discard_partial()?;
+        assert_eq!(report.files_removed, 1, "pre-seal entry was removed");
+        assert!(report.is_complete(), "cleanup disposition is complete");
+        Ok(())
+    }
+
+    #[test]
+    fn sealed_snapshot_discard_proves_an_empty_synced_directory()
+    -> Result<(), Box<dyn std::error::Error>> {
+        faults::reset();
+        let temp = tempfile::tempdir()?;
+        let mut builder = staging_builder(&temp)?;
+        builder.add("alpha.txt", b"one")?;
+        builder.add("beta.txt", b"two")?;
+        builder.sync_directory()?;
+        let snapshot = builder.seal();
+        let path = snapshot.staging_path().to_path_buf();
+        let report = snapshot.discard()?;
+        assert_eq!(report.files_expected, 2, "both entries were tracked");
+        assert_eq!(report.files_removed, 2, "both entries were removed");
+        assert_eq!(report.bytes_removed, 6, "both file sizes were counted");
+        assert_eq!(report.files_already_absent, 0, "no entry was absent");
+        assert!(report.directory_empty, "final enumeration found no entries");
+        assert!(
+            report.directory_sync_completed,
+            "directory sync after deletion completed"
+        );
+        assert!(report.is_complete(), "cleanup disposition is complete");
+        assert_eq!(
+            std::fs::read_dir(&path)?.count(),
+            0,
+            "staging directory is empty"
+        );
+        Ok(())
+    }
 }
