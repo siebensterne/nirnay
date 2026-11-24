@@ -6,6 +6,8 @@
 //! copies verified bytes into private staging and seals the snapshot, no later
 //! stage opens a published path.
 
+use crate::canonical_wire;
+use crate::canonical_wire::ArtifactRecordOrderProfile;
 use crate::error::VerifierError;
 use crate::files::FdBudget;
 use crate::files::PrivateSnapshot;
@@ -43,6 +45,8 @@ use ed25519_dalek::VerifyingKey;
 use flate2::read::GzDecoder;
 use serde_json::Value;
 use sha2::Digest;
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::io::Read;
 use std::path::PathBuf;
@@ -117,6 +121,10 @@ pub struct ReleaseVerifier {
     lineage: Box<dyn LineageResolver>,
     policy: VerifierResourcePolicy,
     verifier_commit: String,
+    require_canonical_wire: bool,
+    stage_observer: Option<Box<dyn Fn(u8)>>,
+    canonical_profiles: RefCell<HashMap<String, ArtifactRecordOrderProfile>>,
+    canonical_event_types: RefCell<HashSet<String>>,
 }
 
 impl ReleaseVerifier {
@@ -131,6 +139,38 @@ impl ReleaseVerifier {
             lineage: config.lineage,
             policy: config.policy,
             verifier_commit: config.verifier_commit,
+            require_canonical_wire: false,
+            stage_observer: None,
+            canonical_profiles: RefCell::new(HashMap::new()),
+            canonical_event_types: RefCell::new(HashSet::new()),
+        }
+    }
+
+    /// Require the ratified canonical wire documents instead of the older internal shape.
+    ///
+    /// The canonical representation is not normative Rust code; this mode
+    /// parses the canonical bytes independently and maps them into the internal
+    /// types after validation.
+    pub fn with_canonical_wire(mut self) -> Self {
+        self.require_canonical_wire = true;
+        self
+    }
+
+    /// Observe the number of each stage that completes successfully.
+    ///
+    /// The callback is used by the conformance executable to record stage
+    /// status without relaxing first-refusal semantics.
+    pub fn with_stage_observer<F>(mut self, observer: F) -> Self
+    where
+        F: Fn(u8) + 'static,
+    {
+        self.stage_observer = Some(Box::new(observer));
+        self
+    }
+
+    fn note_stage(&self, stage: u8) {
+        if let Some(observer) = &self.stage_observer {
+            observer(stage);
         }
     }
 
@@ -140,6 +180,8 @@ impl ReleaseVerifier {
         locator: &ReleaseLocator,
         request: &AdmissionRequest,
     ) -> Result<AdmissionReceipt, VerifierError> {
+        self.canonical_profiles.borrow_mut().clear();
+        self.canonical_event_types.borrow_mut().clear();
         let mut budget = FdBudget::new(&self.policy)?;
         let root = ReleaseRoot::open(&self.root, &mut budget)?;
         let release_dir = root.release_dir(
@@ -194,31 +236,32 @@ impl ReleaseVerifier {
             return Err(error);
         }
 
-        let (manifest, sidecar, manifest_digest) =
-            match self.stages_one_to_four(&manifest_bytes, &sidecar_bytes, request) {
-                Ok(value) => value,
-                Err(error) => {
-                    builder.discard_partial();
-                    return Err(error);
-                }
-            };
-        let stage_five = match self.stage_five(&manifest, &release_dir, &mut builder, &mut budget) {
+        let parsed = match self.stages_one_to_four(&manifest_bytes, &sidecar_bytes, request) {
             Ok(value) => value,
             Err(error) => {
                 builder.discard_partial();
                 return Err(error);
             }
         };
+        let stage_five =
+            match self.stage_five(&parsed.manifest, &release_dir, &mut builder, &mut budget) {
+                Ok(value) => value,
+                Err(error) => {
+                    builder.discard_partial();
+                    return Err(error);
+                }
+            };
         let snapshot = builder.seal().inspect_err(|_| {
             std::fs::remove_dir_all(&self.private_staging).ok();
         })?;
+        self.note_stage(5);
         drop(release_dir);
         drop(root);
 
         match self.stages_six_to_twelve(
-            &manifest,
-            &sidecar,
-            &manifest_digest,
+            &parsed.manifest,
+            &parsed.sidecar,
+            &parsed.manifest_digest,
             &stage_five,
             &snapshot,
             request,
@@ -236,14 +279,21 @@ impl ReleaseVerifier {
         manifest_bytes: &[u8],
         sidecar_bytes: &[u8],
         request: &AdmissionRequest,
-    ) -> Result<(ReleaseManifest, SignatureSidecar, String), VerifierError> {
+    ) -> Result<ParsedStages, VerifierError> {
         let manifest_value =
             parse_strict(manifest_bytes).map_err(|error| VerifierError::ManifestParse {
                 detail: error.to_string(),
             })?;
         check_depth(&manifest_value, self.policy.max_json_nesting)?;
-        let manifest: ReleaseManifest =
-            serde_json::from_value(manifest_value.clone()).map_err(classify_decode_error)?;
+        let manifest = if self.require_canonical_wire {
+            let parsed = canonical_wire::parse_manifest(&manifest_value)
+                .map_err(canonical_wire::CanonicalError::into_manifest_error)?;
+            *self.canonical_profiles.borrow_mut() = parsed.profiles.clone();
+            *self.canonical_event_types.borrow_mut() = parsed.event_types.clone();
+            canonical_wire::into_internal_manifest(&parsed)?
+        } else {
+            serde_json::from_value(manifest_value.clone()).map_err(classify_decode_error)?
+        };
         self.check_manifest_schema(&manifest)?;
 
         let sidecar_value =
@@ -253,6 +303,7 @@ impl ReleaseVerifier {
         check_depth(&sidecar_value, self.policy.max_json_nesting)?;
         let sidecar: SignatureSidecar =
             serde_json::from_value(sidecar_value).map_err(classify_decode_error)?;
+        self.note_stage(1);
 
         let canonical = canonical_bytes(&manifest_value);
         let manifest_digest = hex_lower(&sha256(&canonical));
@@ -261,6 +312,7 @@ impl ReleaseVerifier {
         if sidecar_digest != sha256(&canonical) {
             return Err(VerifierError::ManifestDigestMismatch);
         }
+        self.note_stage(2);
 
         if sidecar.schema_version != 1
             || sidecar.algorithm != "Ed25519"
@@ -291,6 +343,7 @@ impl ReleaseVerifier {
         verifying_key
             .verify(&message, &signature)
             .map_err(|_| VerifierError::SignatureInvalid)?;
+        self.note_stage(3);
 
         self.registry
             .check_policy(entry, manifest.release_identity.as_of_ns)?;
@@ -300,7 +353,12 @@ impl ReleaseVerifier {
         if request.publisher_identity != manifest.publication_identity.publisher_identity {
             return Err(VerifierError::KeyBinding);
         }
-        Ok((manifest, sidecar, manifest_digest))
+        self.note_stage(4);
+        Ok(ParsedStages {
+            manifest,
+            sidecar,
+            manifest_digest,
+        })
     }
 
     fn check_manifest_schema(&self, manifest: &ReleaseManifest) -> Result<(), VerifierError> {
@@ -407,7 +465,17 @@ impl ReleaseVerifier {
                 });
             }
             dataset_hasher.update(&expanded);
-            let records = verify_record_stream(&expanded, descriptor, &self.policy)?;
+            let records = if self.require_canonical_wire {
+                verify_canonical_record_stream(
+                    &expanded,
+                    descriptor,
+                    &self.canonical_profiles.borrow(),
+                    &self.canonical_event_types.borrow(),
+                    &self.policy,
+                )?
+            } else {
+                verify_record_stream(&expanded, descriptor, &self.policy)?
+            };
             drop(file);
             builder.add(&component, &stored)?;
             all_records.push(records);
@@ -544,12 +612,18 @@ impl ReleaseVerifier {
         if rights.matching_grant_ids.len() != 1 {
             return Err(VerifierError::AmbiguousGrants);
         }
+        self.note_stage(6);
         self.stage_seven(manifest, request, stage_five)?;
+        self.note_stage(7);
         self.stage_eight(manifest)?;
+        self.note_stage(8);
         self.stage_nine(manifest, stage_five)?;
+        self.note_stage(9);
         self.stage_ten(manifest, request)?;
+        self.note_stage(10);
         self.stage_eleven(manifest, sidecar, manifest_digest, stage_five, request)?;
-        AdmissionReceipt::new(crate::receipt::ReceiptInput {
+        self.note_stage(11);
+        let receipt = AdmissionReceipt::new(crate::receipt::ReceiptInput {
             release_id: manifest.release_identity.release_id.clone(),
             manifest_sha256: manifest_digest.to_owned(),
             data_sha256: stage_five.data_digest.clone(),
@@ -565,7 +639,9 @@ impl ReleaseVerifier {
             admission_request: request.clone(),
             consumer_use_profile: request.use_profile.clone(),
             verifier_commit: self.verifier_commit.clone(),
-        })
+        })?;
+        self.note_stage(12);
+        Ok(receipt)
     }
 
     fn stage_seven(
@@ -643,13 +719,13 @@ impl ReleaseVerifier {
                 detail: "operation or evidence list is empty".to_owned(),
             });
         }
-        let actions: HashSet<&str> = activity
+        let operation_refs: HashSet<&str> = activity
             .performed_operations
             .iter()
-            .map(|operation| operation.action.as_str())
+            .map(|operation| operation.operation_ref.as_str())
             .collect();
         for evidence in &activity.operation_evidence {
-            if !actions.contains(evidence.operation_ref.as_str())
+            if !operation_refs.contains(evidence.operation_ref.as_str())
                 || evidence.event_id.is_empty()
                 || evidence.run_id.is_empty()
                 || evidence.decision_key.is_empty()
@@ -916,10 +992,80 @@ impl ReleaseVerifier {
     }
 }
 
+struct ParsedStages {
+    manifest: ReleaseManifest,
+    sidecar: SignatureSidecar,
+    manifest_digest: String,
+}
+
 struct StageFive {
     bindings: Vec<ArtifactBinding>,
     data_digest: String,
     records: Vec<Vec<ReleaseRecord>>,
+}
+
+fn verify_canonical_record_stream(
+    bytes: &[u8],
+    descriptor: &ArtifactDescriptor,
+    profiles: &HashMap<String, ArtifactRecordOrderProfile>,
+    event_types: &HashSet<String>,
+    policy: &VerifierResourcePolicy,
+) -> Result<Vec<ReleaseRecord>, VerifierError> {
+    if bytes.is_empty() || bytes.last() != Some(&b'\n') {
+        return Err(VerifierError::RecordStream {
+            detail: "canonical record stream lacks a trailing LF boundary".to_owned(),
+        });
+    }
+    if bytes.starts_with(&[0xEF, 0xBB, 0xBF]) || bytes.contains(&0x0D) {
+        return Err(VerifierError::RecordStream {
+            detail: "canonical record stream contains a BOM or CR byte".to_owned(),
+        });
+    }
+    let profile = profiles
+        .get(&descriptor.path)
+        .ok_or_else(|| VerifierError::RecordOrder {
+            detail: "artifact has no canonical order profile".to_owned(),
+        })?;
+    if descriptor.encoding != RECORD_ENCODING {
+        return Err(VerifierError::ManifestSchema {
+            detail: "canonical record encoding is not registered".to_owned(),
+        });
+    }
+    let mut records = Vec::new();
+    let mut keys = Vec::new();
+    for line in bytes[..bytes.len() - 1].split(|byte| *byte == b'\n') {
+        if line.is_empty() {
+            return Err(VerifierError::RecordStream {
+                detail: "canonical record stream contains a blank line".to_owned(),
+            });
+        }
+        if line.len() as u64 > policy.max_record_bytes {
+            return Err(VerifierError::ResourceLimit {
+                limit: "max_record_bytes".to_owned(),
+            });
+        }
+        let key = canonical_wire::derive_key_from_bytes(line, profile)
+            .map_err(canonical_wire::CanonicalError::into_record_error)?;
+        let value = parse_strict(line).map_err(|error| VerifierError::RecordStream {
+            detail: error.to_string(),
+        })?;
+        check_depth(&value, policy.max_json_nesting)?;
+        let record = canonical_wire::parse_record(&value)
+            .map_err(canonical_wire::CanonicalError::into_record_error)?;
+        if !event_types.contains(record.event_type.as_str()) {
+            return Err(VerifierError::RecordStream {
+                detail: "record event type is absent from the payload registry".to_owned(),
+            });
+        }
+        keys.push(key);
+        records.push(canonical_wire::into_internal_record(&record));
+    }
+    canonical_wire::validate_order_sequence(&keys)
+        .map_err(canonical_wire::CanonicalError::into_record_error)?;
+    if records.len() as u64 != descriptor.record_count {
+        return Err(VerifierError::RecordCount);
+    }
+    Ok(records)
 }
 
 fn verify_snapshot_binding(

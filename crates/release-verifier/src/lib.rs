@@ -16,6 +16,7 @@
 //! caller-provided private staging directory and sealed before any downstream
 //! stage runs. A receipt records checks performed and is not a right.
 
+pub mod canonical_wire;
 pub mod error;
 pub mod files;
 pub mod jcs;
@@ -24,6 +25,11 @@ pub mod schema;
 pub mod trust;
 pub mod verifier;
 
+pub use canonical_wire::CanonicalError;
+pub use canonical_wire::CanonicalManifest;
+pub use canonical_wire::CanonicalRecord;
+pub use canonical_wire::DerivedOrderKey;
+pub use canonical_wire::ParsedManifest;
 pub use error::VerifierError;
 pub use files::PrivateSnapshot;
 pub use files::SnapshotBuilder;
