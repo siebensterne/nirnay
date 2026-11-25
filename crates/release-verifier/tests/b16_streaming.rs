@@ -1254,3 +1254,158 @@ fn bare_verifier_with(fixture: &Fixture, rights: Box<dyn RightsEvaluator>) -> Re
         verifier_commit: "nz-api001-legacy-test".to_owned(),
     })
 }
+
+#[test]
+fn manifest_one_byte_mutation_refuses_at_stage_one() -> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new("none", 3)?;
+    let mut bytes = fixture.manifest_bytes.clone();
+    bytes[0] ^= 0x01;
+    fs::write(fixture.release_dir().join("manifest.json"), &bytes)?;
+    let refusal = fixture.verify().unwrap_err();
+    assert_eq!(
+        refusal.refusal.code(),
+        "REJECT_SCHEMA_ENVELOPE",
+        "a mutated manifest is refused by stage one"
+    ); // nz-api001
+    assert_eq!(refusal.refusal.stage(), 1, "manifest refusal stage");
+    Ok(())
+}
+
+#[test]
+fn sidecar_one_byte_mutation_refuses_at_stage_three() -> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new("none", 3)?;
+    let mut bytes = fixture.sidecar_bytes.clone();
+    bytes[0] ^= 0x01;
+    fs::write(fixture.release_dir().join("signature.json"), &bytes)?;
+    let refusal = fixture.verify().unwrap_err();
+    assert_eq!(
+        refusal.refusal.code(),
+        "REJECT_SIGNATURE_INTEGRITY",
+        "a mutated sidecar is refused by signature integrity"
+    ); // nz-api001
+    assert_eq!(refusal.refusal.stage(), 3, "sidecar refusal stage");
+    Ok(())
+}
+
+#[test]
+fn stored_artifact_one_byte_mutation_refuses_at_stage_five() -> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new("gzip", 3)?;
+    let mut bytes = fixture.stored.clone();
+    bytes[1] ^= 0x01;
+    fs::write(fixture.artifact_path(), &bytes)?;
+    let refusal = fixture.verify().unwrap_err();
+    assert_eq!(
+        refusal.refusal.code(),
+        "REJECT_ARTIFACT_DIGESTS",
+        "a mutated stored artifact is refused by stage five"
+    ); // nz-api001
+    assert_eq!(refusal.refusal.stage(), 5, "artifact refusal stage");
+    Ok(())
+}
+
+#[test]
+fn expanded_artifact_one_byte_mutation_refuses_at_stage_five() -> Result<(), Box<dyn Error>> {
+    let mut fixture = Fixture::new("gzip", 3)?;
+    let mut expanded = Vec::new();
+    GzDecoder::new(&fixture.stored[..]).read_to_end(&mut expanded)?;
+    let marker = expanded
+        .windows(8)
+        .position(|window| window == b"abstract")
+        .ok_or("record stream has no abstract scalar")?;
+    expanded[marker] ^= 0x01;
+    let mut stored = Vec::new();
+    let mut encoder = GzEncoder::new(&mut stored, Compression::default());
+    encoder.write_all(&expanded)?;
+    encoder.finish()?;
+    fixture.manifest.artifacts[0].stored_bytes = stored.len() as u64;
+    fixture.manifest.artifacts[0].stored_sha256 = hex_digest(&sha256_bytes(&stored));
+    fixture.stored = stored;
+    fixture.resign()?;
+    fixture.write_all()?;
+    let refusal = fixture.verify().unwrap_err();
+    assert_eq!(
+        refusal.refusal.code(),
+        "REJECT_ARTIFACT_DIGESTS",
+        "a mutated expanded artifact is refused by stage five"
+    ); // nz-api001
+    assert!(
+        refusal.refusal.to_string().contains("uncompressed_sha256"),
+        "the digest mismatch names the expanded stream"
+    ); // nz-api001
+    Ok(())
+}
+
+#[test]
+fn legacy_buffered_verify_ignores_the_streaming_resolver() -> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new("none", 3)?;
+    let verifier = bare_verifier_with(&fixture, Box::new(PermitRights));
+    let receipt = verifier.verify_release(&fixture.locator(), &fixture.request)?;
+    assert_eq!(
+        receipt.artifact_set().len(),
+        1,
+        "LEGACY_BUFFERED verify keeps caller policy"
+    ); // nz-api001
+    let streaming = bare_verifier_with(&fixture, Box::new(PermitRights))
+        .verify_release_streaming(&fixture.locator(), &fixture.request)
+        .unwrap_err();
+    assert!(
+        matches!(
+            streaming.refusal,
+            release_verifier::VerifierError::NoApprovedProfile { .. }
+        ),
+        "streaming fails closed with an empty resolver"
+    ); // nz-api001 non-fallback assertion
+    Ok(())
+}
+
+#[test]
+fn legacy_buffered_diagnostics_ignores_the_streaming_resolver() -> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new("none", 3)?;
+    let verifier = bare_verifier_with(&fixture, Box::new(UnknownRights));
+    let diagnostic = verifier
+        .verify_release_with_diagnostics(&fixture.locator(), &fixture.request)
+        .unwrap_err();
+    assert_eq!(
+        diagnostic.refusal.code(),
+        "REJECT_RIGHTS_EVIDENCE",
+        "LEGACY_BUFFERED diagnostics keeps the rights decision"
+    ); // nz-api001
+    assert_eq!(
+        diagnostic.refusal.stage(),
+        6_u8,
+        "legacy rights stage is unchanged"
+    ); // nz-api001 legacy classification
+    assert_eq!(
+        fs::read_dir(&fixture.staging)?.count(),
+        0,
+        "legacy cleanup leaves no snapshot"
+    ); // nz-api001
+    Ok(())
+}
+
+#[test]
+fn stage_observer_sees_five_stages_before_the_rights_refusal() -> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new("gzip", 3)?;
+    let observed = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&observed);
+    let verifier = bare_verifier_with(&fixture, Box::new(UnknownRights))
+        .with_test_profile_resolver(fixture.resolver.clone())
+        .with_stage_observer(move |stage| {
+            if let Ok(mut seen) = sink.lock() {
+                seen.push(stage);
+            }
+        });
+    let result = verifier.verify_release_streaming(&fixture.locator(), &fixture.request);
+    assert!(
+        result.is_err(),
+        "UNKNOWN rights stop before an admission receipt"
+    ); // nz-api001 observer case
+    let guard = observed.lock().map_err(|error| error.to_string())?;
+    let stages = guard.clone();
+    assert_eq!(
+        stages,
+        vec![1_u8, 2, 3, 4, 5],
+        "stages one through five complete before stage six"
+    ); // nz-api001
+    Ok(())
+}
