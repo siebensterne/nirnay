@@ -407,8 +407,8 @@ fn assert_typed_refusal(
         Ok(_) => return Err(format!("{}: a refusal was required", detail).into()),
         Err(diagnostic) => &diagnostic.refusal,
     };
-    assert_eq!(refusal.code(), code, "{}: typed code", detail);
-    assert_eq!(refusal.stage(), stage, "{}: stage", detail);
+    assert_eq!(refusal.code(), code, "typed refusal code");
+    assert_eq!(refusal.stage(), stage, "typed refusal stage");
     Ok(())
 }
 
@@ -486,11 +486,8 @@ fn cross_execution_producer_release_reaches_stage_six() -> Result<(), Box<dyn Er
     )?;
     let result = verifier.verify_release_streaming(&locator, &request);
     assert_typed_refusal(&result, "REJECT_RIGHTS_EVIDENCE", 6, &provenance(&artifact))?;
-    assert!(
-        no_receipt(&result),
-        "UNKNOWN rights yield no admission receipt: {}",
-        provenance(&artifact)
-    );
+    let receipt_absent = no_receipt(&result);
+    assert!(receipt_absent, "UNKNOWN rights yield no admission receipt");
     assert_cleanup(&result)?;
     assert_eq!(fs::read_dir(&staging)?.count(), 0, "no snapshot survives");
     let guard = observed.lock().map_err(|error| error.to_string())?;
