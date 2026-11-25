@@ -8,6 +8,11 @@ namespace eng {
 
 namespace {
 
+// Checked intermediate arithmetic uses the GCC/Clang 128-bit extension.
+// Marking it once keeps the strict -Wpedantic contract intact at every use
+// site without suppressing a diagnostic.
+__extension__ typedef __int128 wide_int;
+
 uint64_t magnitude_of(int64_t value) {
   return value < 0 ? static_cast<uint64_t>(-(value + 1)) + 1 : static_cast<uint64_t>(value);
 }
@@ -43,12 +48,12 @@ Ratio::Ratio(int64_t numerator_, int64_t denominator_) {
 }
 
 int64_t Ratio::apply_exact(int64_t value) const {
-  __int128 product = static_cast<__int128>(value) * static_cast<__int128>(numerator);
-  __int128 divisor = static_cast<__int128>(denominator);
+  wide_int product = static_cast<wide_int>(value) * static_cast<wide_int>(numerator);
+  wide_int divisor = static_cast<wide_int>(denominator);
   if (product % divisor != 0)
     throw std::invalid_argument("ratio result is not exact");
-  __int128 result = product / divisor;
-  if (result < static_cast<__int128>(INT64_MIN) || result > static_cast<__int128>(INT64_MAX)) {
+  wide_int result = product / divisor;
+  if (result < static_cast<wide_int>(INT64_MIN) || result > static_cast<wide_int>(INT64_MAX)) {
     throw std::overflow_error("ratio result outside i64");
   }
   return static_cast<int64_t>(result);
@@ -106,30 +111,30 @@ int64_t parse_scaled(const std::string& input, uint8_t scale) {
   if (fraction.size() > scale)
     throw std::invalid_argument("too many fractional digits");
 
-  __int128 whole_value = 0;
+  wide_int whole_value = 0;
   for (char c : whole) {
     whole_value = whole_value * 10 + (c - '0');
-    if (whole_value > static_cast<__int128>(INT64_MAX) + 1) {
+    if (whole_value > static_cast<wide_int>(INT64_MAX) + 1) {
       throw std::overflow_error("whole part out of range");
     }
   }
-  __int128 fraction_value = 0;
+  wide_int fraction_value = 0;
   if (!fraction.empty()) {
     for (char c : fraction)
       fraction_value = fraction_value * 10 + (c - '0');
     int64_t pad = static_cast<int64_t>(scale) - static_cast<int64_t>(fraction.size());
-    __int128 factor = 1;
+    wide_int factor = 1;
     for (int64_t i = 0; i < pad; ++i)
       factor *= 10;
     fraction_value *= factor;
   }
-  __int128 factor = 1;
+  wide_int factor = 1;
   for (uint8_t i = 0; i < scale; ++i)
     factor *= 10;
-  __int128 magnitude = whole_value * factor + fraction_value;
-  __int128 signed_value = negative ? -magnitude : magnitude;
-  if (signed_value < static_cast<__int128>(INT64_MIN) ||
-      signed_value > static_cast<__int128>(INT64_MAX)) {
+  wide_int magnitude = whole_value * factor + fraction_value;
+  wide_int signed_value = negative ? -magnitude : magnitude;
+  if (signed_value < static_cast<wide_int>(INT64_MIN) ||
+      signed_value > static_cast<wide_int>(INT64_MAX)) {
     throw std::overflow_error("fixed-point value out of range");
   }
   return static_cast<int64_t>(signed_value);
@@ -162,22 +167,22 @@ int64_t rescale_exact(int64_t value, uint8_t from_scale, uint8_t to_scale) {
   if (from_scale > kMaxScale || to_scale > kMaxScale) {
     throw std::invalid_argument("scale exceeds maximum 18");
   }
-  __int128 input = static_cast<__int128>(value);
-  __int128 output;
+  wide_int input = static_cast<wide_int>(value);
+  wide_int output;
   if (to_scale >= from_scale) {
-    __int128 factor = 1;
+    wide_int factor = 1;
     for (uint8_t i = 0; i < static_cast<uint8_t>(to_scale - from_scale); ++i)
       factor *= 10;
     output = input * factor;
   } else {
-    __int128 divisor = 1;
+    wide_int divisor = 1;
     for (uint8_t i = 0; i < static_cast<uint8_t>(from_scale - to_scale); ++i)
       divisor *= 10;
     if (input % divisor != 0)
       throw std::invalid_argument("value is not exactly representable");
     output = input / divisor;
   }
-  if (output < static_cast<__int128>(INT64_MIN) || output > static_cast<__int128>(INT64_MAX)) {
+  if (output < static_cast<wide_int>(INT64_MIN) || output > static_cast<wide_int>(INT64_MAX)) {
     throw std::overflow_error("rescaled value outside i64");
   }
   return static_cast<int64_t>(output);

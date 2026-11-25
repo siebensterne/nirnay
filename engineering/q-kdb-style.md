@@ -17,3 +17,8 @@ the synthetic golden that pinned those bytes.
 - `scripts/check_q_style.py` checks added `.q` lines in `make check` and CI.
 - Schema validation runs for non-market schemas; no market-shaped golden corpus
   remains in the active tree.
+
+`q-style.json` at the repository root is the machine-readable form of this
+policy. `scripts/check_q_style.py` loads it at import time, so the declared
+column limit and namespace list are binding and no waiver is accepted.
+

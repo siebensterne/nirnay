@@ -1,8 +1,8 @@
 ---
-# C++20 formatting policy. The project uses LLVM's layout with an explicit
-# 100-column limit, two-space indentation (matching .editorconfig) and
-# deterministic include ordering. Run clang-format on every changed C/C++
-# file; do not hand-align code.
+# SPDX-License-Identifier: Apache-2.0
+# C++20 formatting policy shared byte-for-byte by all three repositories.
+# Pinned formatter: clang-format 21.1.8 (quality-contract.json and
+# WORKSPACE.lock.json). Formatter settings are binding, not advisory.
 Language: Cpp
 BasedOnStyle: LLVM
 Standard: c++20
