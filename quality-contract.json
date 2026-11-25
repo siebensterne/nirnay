@@ -26,7 +26,8 @@
     ".pre-commit-config.yaml",
     "CMakeLists.txt",
     "CMakePresets.json",
-    "q-style.json"
+    "q-style.json",
+    "cmake/strict-flags.cmake"
   ],
   "repo_local_files": [
     {
