@@ -362,10 +362,15 @@ impl ReleaseVerifier {
         }
     }
 
-    /// Verify a release and issue an immutable admission receipt.
+    /// Verify a release through the LEGACY_BUFFERED path and issue a receipt.
     ///
-    /// This wrapper exposes the first refusal. Callers that also need the
-    /// cleanup result use `verify_release_with_diagnostics`.
+    /// LEGACY_BUFFERED classification: this entry point keeps its caller-owned
+    /// resource policy and its buffered stage-five reader. It is retained for
+    /// existing callers and does not dispatch to `verify_release_streaming`.
+    /// A streaming refusal is not retried here, so no buffered fallback can
+    /// turn a streaming rejection into an admission. This wrapper exposes the
+    /// first refusal. Callers that also need the cleanup result use
+    /// `verify_release_with_diagnostics`.
     pub fn verify_release(
         &self,
         locator: &ReleaseLocator,
@@ -375,7 +380,12 @@ impl ReleaseVerifier {
             .map_err(|diagnostic| diagnostic.refusal)
     }
 
-    /// Verify a release and keep a cleanup failure beside the first refusal.
+    /// Verify a LEGACY_BUFFERED release and keep cleanup beside a refusal.
+    ///
+    /// LEGACY_BUFFERED classification: this entry point is the buffered reader
+    /// with caller-owned policy. Its signature and behavior stay stable. It is
+    /// not a fallback for `verify_release_streaming`; a streaming failure stops
+    /// at its own first refusal with no receipt.
     pub fn verify_release_with_diagnostics(
         &self,
         locator: &ReleaseLocator,
@@ -399,7 +409,9 @@ impl ReleaseVerifier {
     /// `NoApprovedProfile` refusal. No producer declaration can raise a local
     /// allowance. The twelve stages, first refusal and cleanup contract are
     /// unchanged. This entry point is the only streaming path; the two existing
-    /// public verifiers keep their signatures and their caller-policy behavior.
+    /// public verifiers keep their signatures and their caller-policy behavior
+    /// as LEGACY_BUFFERED. A refusal here returns directly; it is not retried
+    /// through either buffered verifier.
     pub fn verify_release_streaming(
         &self,
         locator: &ReleaseLocator,
