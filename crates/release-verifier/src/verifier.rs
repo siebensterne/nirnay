@@ -26,6 +26,10 @@ use crate::files::sha256;
 use crate::jcs::canonical_bytes;
 use crate::jcs::json_depth;
 use crate::jcs::parse_strict;
+use crate::payload_registry::DeclaredPayloadSchema;
+use crate::payload_registry::PayloadRegistryError;
+use crate::payload_registry::PayloadRegistryInput;
+use crate::payload_registry::PayloadSchemaRegistry;
 use crate::profile_resolver::ApprovedProfileRegistry;
 use crate::profile_resolver::ProfileResolver;
 use crate::receipt::AdmissionReceipt;
@@ -191,7 +195,8 @@ pub struct ReleaseVerifier {
     require_canonical_wire: bool,
     stage_observer: Option<Box<dyn Fn(u8)>>,
     canonical_profiles: RefCell<HashMap<String, ArtifactRecordOrderProfile>>,
-    canonical_event_types: RefCell<HashSet<String>>,
+    canonical_payload_schemas: RefCell<HashMap<String, DeclaredPayloadSchema>>,
+    payload_registry_input: Option<PayloadRegistryInput>,
 }
 
 impl ReleaseVerifier {
@@ -210,7 +215,8 @@ impl ReleaseVerifier {
             require_canonical_wire: false,
             stage_observer: None,
             canonical_profiles: RefCell::new(HashMap::new()),
-            canonical_event_types: RefCell::new(HashSet::new()),
+            canonical_payload_schemas: RefCell::new(HashMap::new()),
+            payload_registry_input: None,
         }
     }
 
@@ -221,6 +227,17 @@ impl ReleaseVerifier {
     /// types after validation.
     pub fn with_canonical_wire(mut self) -> Self {
         self.require_canonical_wire = true;
+        self
+    }
+
+    /// Install a locally trusted payload schema registry for canonical wire mode.
+    ///
+    /// The material is supplied out of band. No schema byte is read from the
+    /// release package. Digest, version, schema bytes and validator identity
+    /// are verified when stage five loads it; a failure is a typed stage-five
+    /// refusal and no admission receipt is issued.
+    pub fn with_payload_schema_registry(mut self, input: PayloadRegistryInput) -> Self {
+        self.payload_registry_input = Some(input);
         self
     }
 
@@ -272,7 +289,7 @@ impl ReleaseVerifier {
         request: &AdmissionRequest,
     ) -> Result<AdmissionReceipt, RefusalDiagnostic> {
         self.canonical_profiles.borrow_mut().clear();
-        self.canonical_event_types.borrow_mut().clear();
+        self.canonical_payload_schemas.borrow_mut().clear();
         self.run_stages(locator, request).map_err(|failure| {
             let (refusal, cleanup) = *failure;
             RefusalDiagnostic {
@@ -296,7 +313,7 @@ impl ReleaseVerifier {
         request: &AdmissionRequest,
     ) -> Result<AdmissionReceipt, RefusalDiagnostic> {
         self.canonical_profiles.borrow_mut().clear();
-        self.canonical_event_types.borrow_mut().clear();
+        self.canonical_payload_schemas.borrow_mut().clear();
         self.run_stages_streaming(locator, request)
             .map_err(|failure| {
                 let (refusal, cleanup) = *failure;
@@ -564,7 +581,7 @@ impl ReleaseVerifier {
             let parsed = canonical_wire::parse_manifest(&manifest_value)
                 .map_err(canonical_wire::CanonicalError::into_manifest_error)?;
             *self.canonical_profiles.borrow_mut() = parsed.profiles.clone();
-            *self.canonical_event_types.borrow_mut() = parsed.event_types.clone();
+            *self.canonical_payload_schemas.borrow_mut() = parsed.declared_payload_schemas.clone();
             canonical_wire::into_internal_manifest(&parsed)?
         } else {
             serde_json::from_value(manifest_value.clone()).map_err(classify_decode_error)?
@@ -676,6 +693,21 @@ impl ReleaseVerifier {
         Ok(())
     }
 
+    /// Load and verify the installed local payload registry at stage five.
+    fn load_payload_registry(&self) -> Result<PayloadSchemaRegistry, VerifierError> {
+        if !self.require_canonical_wire {
+            return Err(VerifierError::PayloadRegistry {
+                detail: "canonical wire mode is required for payload registry enforcement"
+                    .to_owned(),
+            });
+        }
+        match &self.payload_registry_input {
+            Some(input) => PayloadSchemaRegistry::load(input)
+                .map_err(PayloadRegistryError::into_verifier_error),
+            None => Err(PayloadRegistryError::NotInstalled.into_verifier_error()),
+        }
+    }
+
     fn stage_five(
         &self,
         manifest: &ReleaseManifest,
@@ -683,6 +715,11 @@ impl ReleaseVerifier {
         builder: &mut SnapshotBuilder,
         budget: &mut FdBudget,
     ) -> Result<StageFive, VerifierError> {
+        let payload_registry = if self.require_canonical_wire {
+            Some(self.load_payload_registry()?)
+        } else {
+            None
+        };
         let descriptors = self.check_artifact_declarations(manifest)?;
         let artifacts_dir = open_dir_at(release_dir, "artifacts", budget)?;
         let observed = enumerate_names(&artifacts_dir)?;
@@ -745,7 +782,10 @@ impl ReleaseVerifier {
                     &expanded,
                     descriptor,
                     &self.canonical_profiles.borrow(),
-                    &self.canonical_event_types.borrow(),
+                    &self.canonical_payload_schemas.borrow(),
+                    payload_registry
+                        .as_ref()
+                        .ok_or_else(|| PayloadRegistryError::NotInstalled.into_verifier_error())?,
                     &self.policy,
                 )?
             } else {
@@ -799,6 +839,11 @@ impl ReleaseVerifier {
         budget: &mut FdBudget,
         limits: &EffectiveLimits,
     ) -> Result<StageFive, VerifierError> {
+        let payload_registry = if self.require_canonical_wire {
+            Some(self.load_payload_registry()?)
+        } else {
+            None
+        };
         let descriptors = self.check_artifact_declarations_streaming(manifest, limits)?;
         let artifacts_dir = open_dir_at(release_dir, "artifacts", budget)?;
         let observed = enumerate_names(&artifacts_dir)?;
@@ -831,11 +876,14 @@ impl ReleaseVerifier {
             }
             let (file, facts) = open_regular_file(&artifacts_dir, &component, budget)?;
             let profiles = self.canonical_profiles.borrow();
-            let event_types = self.canonical_event_types.borrow();
+            let declared_schemas = self.canonical_payload_schemas.borrow();
             let mode = if self.require_canonical_wire {
                 RecordMode::Canonical {
                     profiles: &profiles,
-                    event_types: &event_types,
+                    declared_schemas: &declared_schemas,
+                    registry: payload_registry
+                        .as_ref()
+                        .ok_or_else(|| PayloadRegistryError::NotInstalled.into_verifier_error())?,
                 }
             } else {
                 RecordMode::Internal
@@ -1495,7 +1543,8 @@ fn verify_canonical_record_stream(
     bytes: &[u8],
     descriptor: &ArtifactDescriptor,
     profiles: &HashMap<String, ArtifactRecordOrderProfile>,
-    event_types: &HashSet<String>,
+    declared_schemas: &HashMap<String, DeclaredPayloadSchema>,
+    registry: &PayloadSchemaRegistry,
     policy: &VerifierResourcePolicy,
 ) -> Result<Vec<ReleaseRecord>, VerifierError> {
     if bytes.is_empty() || bytes.last() != Some(&b'\n') {
@@ -1539,11 +1588,21 @@ fn verify_canonical_record_stream(
         check_depth(&value, policy.max_json_nesting)?;
         let record = canonical_wire::parse_record(&value)
             .map_err(canonical_wire::CanonicalError::into_record_error)?;
-        if !event_types.contains(record.event_type.as_str()) {
-            return Err(VerifierError::RecordStream {
-                detail: "record event type is absent from the payload registry".to_owned(),
-            });
-        }
+        let declared = declared_schemas
+            .get(record.event_type.as_str())
+            .ok_or_else(|| {
+                PayloadRegistryError::UnknownEvent {
+                    event_type: record.event_type.as_str().to_owned(),
+                }
+                .into_verifier_error()
+            })?;
+        crate::payload_registry::validate_record(
+            registry,
+            record.event_type.as_str(),
+            declared,
+            &record.payload,
+        )
+        .map_err(PayloadRegistryError::into_verifier_error)?;
         keys.push(key);
         records.push(canonical_wire::into_internal_record(&record));
     }

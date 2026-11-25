@@ -11,6 +11,21 @@ use ed25519_dalek::Signer;
 use ed25519_dalek::SigningKey;
 use flate2::Compression;
 use flate2::write::GzEncoder;
+use release_verifier::AdmissionReceipt;
+use release_verifier::AdmissionRequest;
+use release_verifier::CleanupDisposition;
+use release_verifier::Decision;
+use release_verifier::KeyState;
+use release_verifier::LocalSchemaInput;
+use release_verifier::PayloadRegistryInput;
+use release_verifier::RefusalDiagnostic;
+use release_verifier::ReleaseLocator;
+use release_verifier::ReleaseManifest;
+use release_verifier::ReleaseVerifier;
+use release_verifier::TrustedKeyEntry;
+use release_verifier::TrustedKeyRegistry;
+use release_verifier::VerifierConfig;
+use release_verifier::VerifierResourcePolicy;
 use release_verifier::canonical_wire;
 use release_verifier::canonical_wire::ArtifactRecordOrderProfile;
 use release_verifier::canonical_wire::CanonicalError;
@@ -18,6 +33,13 @@ use release_verifier::canonical_wire::DerivedOrderKey;
 use release_verifier::canonical_wire::SequencedArtifactProfile;
 use release_verifier::canonical_wire::SequencedKind;
 use release_verifier::jcs::canonical_bytes;
+use release_verifier::payload_registry::structural_schema_bytes;
+use release_verifier::schema::CoverageDecision;
+use release_verifier::schema::CoverageEvaluator;
+use release_verifier::schema::LineageResolver;
+use release_verifier::schema::PredecessorEvidence;
+use release_verifier::schema::RightsDecision;
+use release_verifier::schema::RightsEvaluator;
 use serde_json::Value;
 use serde_json::json;
 use std::error::Error;
@@ -151,6 +173,165 @@ impl Fixture {
             .output()?;
         Ok((output, out, tmpdir))
     }
+
+    /// Run the public verifier API against this fixture with a chosen local registry.
+    fn verify(
+        &self,
+        registry: Option<PayloadRegistryInput>,
+    ) -> Result<Result<AdmissionReceipt, RefusalDiagnostic>, Box<dyn Error>> {
+        let parsed = canonical_wire::parse_manifest(&self.manifest)?;
+        let digest = hex(&sha256(&canonical_bytes(&self.manifest)));
+        let request = canonical_wire::into_internal_request(&parsed, &digest)?;
+        let root = self
+            .release
+            .parent()
+            .and_then(|path| path.parent())
+            .and_then(|path| path.parent())
+            .ok_or("release path has no trusted root")?
+            .to_path_buf();
+        let locator = ReleaseLocator {
+            publisher_id: "conformance-publisher".to_owned(),
+            dataset_id: "ds-canonical".to_owned(),
+            release_id: "rel-canonical".to_owned(),
+        };
+        let staging = self.temp.path().join("api-private-staging");
+        fs::create_dir_all(&staging)?;
+        let mut verifier = ReleaseVerifier::new(VerifierConfig {
+            root,
+            private_staging: staging,
+            registry: api_key_registry()?,
+            rights: Box::new(FreezeUnknownRights),
+            coverage: Box::new(NoPromotionCoverage),
+            lineage: Box::new(NoTrustedPredecessor),
+            policy: api_policy(),
+            verifier_commit: "test-only-no-commit".to_owned(),
+        })
+        .with_canonical_wire();
+        if let Some(input) = registry {
+            verifier = verifier.with_payload_schema_registry(input);
+        }
+        Ok(verifier.verify_release_with_diagnostics(&locator, &request))
+    }
+}
+
+/// Locally installed TEST_ONLY payload registry matching the fixture declaration.
+fn local_registry() -> Result<PayloadRegistryInput, Box<dyn Error>> {
+    let bytes = structural_schema_bytes(EVENT_TYPE, &[("abstract-field", "string")])?;
+    let schema = LocalSchemaInput::seal(
+        EVENT_TYPE.to_owned(),
+        "payload-example".to_owned(),
+        "1".to_owned(),
+        "structural-v1".to_owned(),
+        bytes,
+    );
+    Ok(PayloadRegistryInput::seal(
+        "test-only-payload-registry".to_owned(),
+        "nirnay-payload-registry-v1".to_owned(),
+        vec![schema],
+    ))
+}
+
+struct FreezeUnknownRights;
+
+impl RightsEvaluator for FreezeUnknownRights {
+    fn evaluate(&self, _: &ReleaseManifest, _: &AdmissionRequest) -> RightsDecision {
+        RightsDecision {
+            decision: Decision::Unknown,
+            matching_grant_ids: Vec::new(),
+        }
+    }
+}
+
+struct NoPromotionCoverage;
+
+impl CoverageEvaluator for NoPromotionCoverage {
+    fn evaluate(&self, _: &ReleaseManifest, _: &AdmissionRequest) -> CoverageDecision {
+        CoverageDecision {
+            approved_dimensions: Vec::new(),
+            used_implicit_all: false,
+        }
+    }
+}
+
+struct NoTrustedPredecessor;
+
+impl LineageResolver for NoTrustedPredecessor {
+    fn predecessor(&self, _: &str) -> Option<PredecessorEvidence> {
+        None
+    }
+}
+
+const TEST_PUBLIC_KEY: [u8; 32] = [
+    0xd0, 0x4a, 0xb2, 0x32, 0x74, 0x2b, 0xb4, 0xab, 0x3a, 0x13, 0x68, 0xbd, 0x46, 0x15, 0xe4, 0xe6,
+    0xd0, 0x22, 0x4a, 0xb7, 0x1a, 0x01, 0x6b, 0xaf, 0x85, 0x20, 0xa3, 0x32, 0xc9, 0x77, 0x87, 0x37,
+];
+
+fn api_key_registry() -> Result<TrustedKeyRegistry, Box<dyn Error>> {
+    Ok(TrustedKeyRegistry::new(
+        vec![TrustedKeyEntry {
+            publisher_id: "conformance-publisher".to_owned(),
+            key_id: "conformance-key-1".to_owned(),
+            public_key_bytes: TEST_PUBLIC_KEY,
+            algorithm: "Ed25519".to_owned(),
+            purpose: release_verifier::trust::KeyPurpose::ReleaseSigning,
+            valid_from_ns: 1,
+            valid_until_ns: u64::MAX,
+            state: KeyState::Active,
+            evidence_reference: None,
+        }],
+        "test-only-registry-rev".to_owned(),
+    )?)
+}
+
+fn api_policy() -> VerifierResourcePolicy {
+    VerifierResourcePolicy {
+        max_manifest_bytes: 1_000_000,
+        max_sidecar_bytes: 4_096,
+        max_artifact_count: 16,
+        max_stored_bytes: 1_000_000,
+        max_expanded_bytes: 1_000_000,
+        max_total_expanded_bytes: 1_000_000,
+        max_record_bytes: 4_096,
+        max_record_count: 1_000,
+        max_json_nesting: 16,
+        max_decompression_budget: 1_000_000,
+        max_temp_disk_bytes: 1_000_000,
+        max_open_file_descriptors: 64,
+    }
+}
+
+fn assert_stage_five_refusal(
+    result: &Result<AdmissionReceipt, RefusalDiagnostic>,
+    expected_detail: &str,
+) -> Result<(), Box<dyn Error>> {
+    let diagnostic = match result {
+        Ok(_) => return Err("a payload registry fault must never issue a receipt".into()),
+        Err(diagnostic) => diagnostic,
+    };
+    assert_eq!(
+        diagnostic.refusal.stage(),
+        5,
+        "refusal belongs to stage five"
+    );
+    assert_eq!(
+        diagnostic.refusal.code(),
+        "REJECT_PAYLOAD_REGISTRY",
+        "refusal carries the typed D6 code"
+    );
+    assert!(
+        diagnostic.refusal.to_string().contains(expected_detail),
+        "refusal detail names the failing class"
+    );
+    let cleanup = diagnostic
+        .cleanup
+        .as_deref()
+        .ok_or("stage-five refusal records a cleanup outcome")?;
+    assert!(
+        matches!(cleanup, CleanupDisposition::Completed(_) if cleanup.is_complete())
+            || cleanup.is_pending(),
+        "cleanup is verified complete or reports pending"
+    );
+    Ok(())
 }
 
 fn sha256(bytes: &[u8]) -> [u8; 32] {
@@ -306,6 +487,16 @@ fn dimension(index: usize) -> Value {
     })
 }
 
+/// Digest declared for the locally installed TEST_ONLY payload schema.
+fn payload_schema_digest() -> String {
+    let schema = json!({
+        "format": "nirnay-structural-payload-v1",
+        "event_type": EVENT_TYPE,
+        "required_fields": [{"field_name": "abstract-field", "kind": "string"}],
+    });
+    hex(&sha256(&canonical_bytes(&schema)))
+}
+
 fn manifest_json(compression: &str) -> Value {
     let (compression_token, version_token) = if compression == "gzip" {
         ("gzip", "gzip-deflate/flate2-1")
@@ -406,7 +597,7 @@ fn manifest_json(compression: &str) -> Value {
                 "event_type": EVENT_TYPE,
                 "schema_id": "payload-example",
                 "schema_version": "1",
-                "digest_sha256": DIGEST,
+                "digest_sha256": payload_schema_digest(),
             }],
         },
         "digests": {
@@ -920,5 +1111,192 @@ fn executable_refuses_reordered_record_bytes() -> Result<(), Box<dyn Error>> {
         report["refusal"]["code"], "REJECT_ARTIFACT_DIGESTS",
         "ordering refusal code"
     );
+    Ok(())
+}
+
+fn record_with(event_type: &str, field: &str, kind: &str, value: &str) -> Value {
+    json!({
+        "envelope_schema_version": "envelope-1",
+        "event_type": event_type,
+        "ordering": {
+            "kind": "sequenced",
+            "sequence_domain_id": DOMAIN,
+            "sequence_epoch": EPOCH,
+            "sequence_number": "1",
+        },
+        "payload": {
+            "fields": [
+                {"field_name": field, "kind": kind, "value": value}
+            ]
+        }
+    })
+}
+
+#[test]
+fn registered_valid_payload_reaches_the_rights_stage() -> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new("none")?;
+    let result = fixture.verify(Some(local_registry()?))?;
+    let diagnostic = match result {
+        Ok(_) => return Err("rights remain unknown, so no receipt is expected".into()),
+        Err(diagnostic) => diagnostic,
+    };
+    assert_eq!(
+        diagnostic.refusal.stage(),
+        6,
+        "stage five accepted the record"
+    );
+    assert_eq!(
+        diagnostic.refusal.code(),
+        "REJECT_RIGHTS_EVIDENCE",
+        "first refusal stays at rights admission"
+    );
+    let staging = fixture.temp.path().join("api-private-staging");
+    assert_eq!(fs::read_dir(&staging)?.count(), 0, "no snapshot survives");
+    Ok(())
+}
+
+#[test]
+fn unknown_event_is_refused_at_stage_five() -> Result<(), Box<dyn Error>> {
+    let mut fixture = Fixture::new("none")?;
+    fixture.set_records(
+        &[record_with(
+            "unregistered-event",
+            "abstract-field",
+            "string",
+            "abstract-value",
+        )],
+        "none",
+    )?;
+    let result = fixture.verify(Some(local_registry()?))?;
+    assert_stage_five_refusal(&result, "no entry for event")?;
+    Ok(())
+}
+
+#[test]
+fn wrong_schema_id_is_refused_at_stage_five() -> Result<(), Box<dyn Error>> {
+    let mut fixture = Fixture::new("none")?;
+    fixture.mutate_manifest(|manifest| {
+        manifest["schema_versions"]["payload_schemas"][0]["schema_id"] =
+            Value::String("not-installed".to_owned());
+    })?;
+    let result = fixture.verify(Some(local_registry()?))?;
+    assert_stage_five_refusal(&result, "schema identity differs")?;
+    Ok(())
+}
+
+#[test]
+fn wrong_schema_version_is_refused_at_stage_five() -> Result<(), Box<dyn Error>> {
+    let mut fixture = Fixture::new("none")?;
+    fixture.mutate_manifest(|manifest| {
+        manifest["schema_versions"]["payload_schemas"][0]["schema_version"] =
+            Value::String("2".to_owned());
+    })?;
+    let result = fixture.verify(Some(local_registry()?))?;
+    assert_stage_five_refusal(&result, "schema version differs")?;
+    Ok(())
+}
+
+#[test]
+fn wrong_declared_digest_is_refused_at_stage_five() -> Result<(), Box<dyn Error>> {
+    let mut fixture = Fixture::new("none")?;
+    fixture.mutate_manifest(|manifest| {
+        manifest["schema_versions"]["payload_schemas"][0]["digest_sha256"] =
+            Value::String("0".repeat(64));
+    })?;
+    let result = fixture.verify(Some(local_registry()?))?;
+    assert_stage_five_refusal(&result, "schema digest differs")?;
+    Ok(())
+}
+
+#[test]
+fn correct_declaration_with_invalid_payload_is_refused_at_stage_five() -> Result<(), Box<dyn Error>>
+{
+    let mut fixture = Fixture::new("none")?;
+    fixture.set_records(
+        &[record_with(EVENT_TYPE, "abstract-field", "boolean", "true")],
+        "none",
+    )?;
+    let result = fixture.verify(Some(local_registry()?))?;
+    assert_stage_five_refusal(&result, "does not match the installed schema")?;
+    Ok(())
+}
+
+#[test]
+fn unregistered_payload_field_is_refused_at_stage_five() -> Result<(), Box<dyn Error>> {
+    let mut fixture = Fixture::new("none")?;
+    fixture.set_records(
+        &[record_with(
+            EVENT_TYPE,
+            "unregistered-field",
+            "string",
+            "abstract-value",
+        )],
+        "none",
+    )?;
+    let result = fixture.verify(Some(local_registry()?))?;
+    assert_stage_five_refusal(&result, "does not match the installed schema")?;
+    Ok(())
+}
+
+#[test]
+fn unknown_registry_version_is_refused_at_stage_five() -> Result<(), Box<dyn Error>> {
+    let mut registry = local_registry()?;
+    registry.registry_version = "nirnay-payload-registry-v2".to_owned();
+    let fixture = Fixture::new("none")?;
+    let result = fixture.verify(Some(registry))?;
+    assert_stage_five_refusal(&result, "version is unknown")?;
+    Ok(())
+}
+
+#[test]
+fn corrupted_local_registry_is_refused_at_stage_five() -> Result<(), Box<dyn Error>> {
+    let schema = LocalSchemaInput::seal(
+        EVENT_TYPE.to_owned(),
+        "payload-example".to_owned(),
+        "1".to_owned(),
+        "structural-v1".to_owned(),
+        b"{invalid".to_vec(),
+    );
+    let registry = PayloadRegistryInput::seal(
+        "test-only-payload-registry".to_owned(),
+        "nirnay-payload-registry-v1".to_owned(),
+        vec![schema],
+    );
+    let fixture = Fixture::new("none")?;
+    let result = fixture.verify(Some(registry))?;
+    assert_stage_five_refusal(&result, "schema bytes are corrupted")?;
+    Ok(())
+}
+
+#[test]
+fn registry_digest_mismatch_is_refused_at_stage_five() -> Result<(), Box<dyn Error>> {
+    let mut registry = local_registry()?;
+    registry.registry_digest = "0".repeat(64);
+    let fixture = Fixture::new("none")?;
+    let result = fixture.verify(Some(registry))?;
+    assert_stage_five_refusal(&result, "digest mismatch")?;
+    Ok(())
+}
+
+#[test]
+fn local_schema_digest_mismatch_is_refused_at_stage_five() -> Result<(), Box<dyn Error>> {
+    let mut registry = local_registry()?;
+    registry.schemas[0].schema_bytes_digest = "0".repeat(64);
+    registry = PayloadRegistryInput::seal(
+        registry.registry_id,
+        registry.registry_version,
+        registry.schemas,
+    );
+    let fixture = Fixture::new("none")?;
+    let result = fixture.verify(Some(registry))?;
+    assert_stage_five_refusal(&result, "schema digest mismatch for event")?;
+    Ok(())
+}
+
+#[test]
+fn absent_local_registry_is_refused_at_stage_five() -> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new("none")?;
+    let result = fixture.verify(None)?;
+    assert_stage_five_refusal(&result, "no locally installed payload schema registry")?;
     Ok(())
 }

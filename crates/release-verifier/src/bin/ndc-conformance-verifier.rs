@@ -18,6 +18,8 @@ use release_verifier::AdmissionRequest;
 use release_verifier::CleanupDisposition;
 use release_verifier::Decision;
 use release_verifier::KeyState;
+use release_verifier::LocalSchemaInput;
+use release_verifier::PayloadRegistryInput;
 use release_verifier::RefusalDiagnostic;
 use release_verifier::ReleaseLocator;
 use release_verifier::ReleaseManifest;
@@ -58,6 +60,12 @@ const CONFORMANCE_KEY_ID: &str = "conformance-key-1";
 
 /// Test-only registry revision injected by this executable.
 const CONFORMANCE_REGISTRY_REVISION: &str = "conformance-registry-rev-1";
+
+/// Event type bound by the bundled TEST_ONLY local payload registry fixture.
+const CONFORMANCE_EVENT_TYPE: &str = "event-type-example";
+
+/// Required payload field bound by the bundled TEST_ONLY schema fixture.
+const CONFORMANCE_PAYLOAD_FIELD: &str = "abstract-field";
 
 /// Public key bytes derived independently from the fixed seed `[0x11; 32]`.
 ///
@@ -248,6 +256,29 @@ fn conformance_registry(publisher_id: &str) -> Result<TrustedKeyRegistry, Box<dy
     .map_err(|error| error.into())
 }
 
+/// Locally supplied TEST_ONLY payload registry for the conformance fixture.
+///
+/// No schema byte is read from the release. The digest is computed over this
+/// local binding; the fixture manifest declares the identical schema digest.
+fn conformance_payload_registry() -> Result<PayloadRegistryInput, Box<dyn Error>> {
+    let schema_bytes = release_verifier::payload_registry::structural_schema_bytes(
+        CONFORMANCE_EVENT_TYPE,
+        &[(CONFORMANCE_PAYLOAD_FIELD, "string")],
+    )?;
+    let schema = LocalSchemaInput::seal(
+        CONFORMANCE_EVENT_TYPE.to_owned(),
+        "payload-example".to_owned(),
+        "1".to_owned(),
+        "structural-v1".to_owned(),
+        schema_bytes,
+    );
+    Ok(PayloadRegistryInput::seal(
+        "conformance-payload-registry".to_owned(),
+        "nirnay-payload-registry-v1".to_owned(),
+        vec![schema],
+    ))
+}
+
 fn conformance_policy() -> VerifierResourcePolicy {
     VerifierResourcePolicy {
         max_manifest_bytes: 1_000_000,
@@ -396,6 +427,7 @@ fn run(arguments: &Arguments) -> Result<Value, Box<dyn Error>> {
         verifier_commit: "conformance-verifier-no-commit".to_owned(),
     })
     .with_canonical_wire()
+    .with_payload_schema_registry(conformance_payload_registry()?)
     .with_stage_observer({
         let passed = Rc::clone(&passed);
         move |stage| passed.borrow_mut().push(stage)
