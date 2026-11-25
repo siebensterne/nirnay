@@ -173,14 +173,20 @@ impl<'a> StoredStream<'a> {
                     detail: "stored stream ended before the declared byte count".to_owned(),
                 });
             }
-            if *total + read as u64 > *maximum {
+            let next =
+                total
+                    .checked_add(read as u64)
+                    .ok_or_else(|| VerifierError::ResourceLimit {
+                        limit: "max_stored_bytes_per_artifact".to_owned(),
+                    })?;
+            if next > *maximum {
                 return Err(VerifierError::ResourceLimit {
                     limit: "max_stored_bytes_per_artifact".to_owned(),
                 });
             }
             hasher.update(&chunk[..read]);
             emit(&chunk[..read])?;
-            *total += read as u64;
+            *total = next;
         }
         let after = crate::files::file_facts(file)?;
         if &after != *facts {
@@ -205,13 +211,17 @@ struct ExpandedSink<'a, 'b> {
 impl Write for ExpandedSink<'_, '_> {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         let added = buf.len() as u64;
-        if self.total.saturating_add(added) > self.cap {
-            return Err(reject(
+        let exceeded = || {
+            reject(
                 self.failure,
                 VerifierError::ResourceLimit {
                     limit: "max_decompression_budget_bytes".to_owned(),
                 },
-            ));
+            )
+        };
+        let next = self.total.checked_add(added).ok_or_else(exceeded)?;
+        if next > self.cap {
+            return Err(exceeded());
         }
         self.expanded.update(buf);
         self.dataset.update(buf);
@@ -221,7 +231,7 @@ impl Write for ExpandedSink<'_, '_> {
             .push(buf)
             .map_err(|error| reject(failure, error));
         outcome?;
-        self.total += added;
+        self.total = next;
         Ok(buf.len())
     }
 
@@ -277,7 +287,12 @@ impl<'a> RecordFramer<'a> {
                     });
                 }
                 self.first = false;
-                self.count += 1;
+                self.count =
+                    self.count
+                        .checked_add(1)
+                        .ok_or_else(|| VerifierError::ResourceLimit {
+                            limit: "max_records_per_artifact".to_owned(),
+                        })?;
                 if self.count > self.max_records {
                     return Err(VerifierError::ResourceLimit {
                         limit: "max_records_per_artifact".to_owned(),
@@ -314,6 +329,41 @@ impl<'a> RecordFramer<'a> {
 struct BoundFrame {
     kind: u8,
     members: u32,
+    has_element: bool,
+}
+
+fn frame_limit(frame: &BoundFrame, limits: &EffectiveLimits) -> (&'static str, u32) {
+    if frame.kind == b'{' {
+        ("max_object_members", limits.max_object_members())
+    } else {
+        ("max_array_elements", limits.max_array_elements())
+    }
+}
+
+fn count_member(stack: &mut [BoundFrame], limits: &EffectiveLimits) -> Result<(), VerifierError> {
+    if let Some(frame) = stack.last_mut() {
+        let (limit, bound) = frame_limit(frame, limits);
+        frame.members =
+            frame
+                .members
+                .checked_add(1)
+                .ok_or_else(|| VerifierError::ResourceLimit {
+                    limit: limit.to_owned(),
+                })?;
+        if frame.members > bound {
+            return Err(VerifierError::ResourceLimit {
+                limit: limit.to_owned(),
+            });
+        }
+        frame.has_element = false;
+    }
+    Ok(())
+}
+
+fn mark_element(stack: &mut [BoundFrame]) {
+    if let Some(frame) = stack.last_mut() {
+        frame.has_element = true;
+    }
 }
 
 fn check_line_bounds(line: &[u8], limits: &EffectiveLimits) -> Result<(), VerifierError> {
@@ -338,13 +388,19 @@ fn check_line_bounds(line: &[u8], limits: &EffectiveLimits) -> Result<(), Verifi
                 string_bytes = 0;
                 continue;
             }
-            string_bytes += 1;
+            string_bytes =
+                string_bytes
+                    .checked_add(1)
+                    .ok_or_else(|| VerifierError::ResourceLimit {
+                        limit: "max_string_bytes".to_owned(),
+                    })?;
             continue;
         }
         match byte {
             b'"' => {
                 in_string = true;
                 string_bytes = 0;
+                mark_element(&mut stack);
             }
             b'{' | b'[' => {
                 token_bytes = 0;
@@ -353,44 +409,39 @@ fn check_line_bounds(line: &[u8], limits: &EffectiveLimits) -> Result<(), Verifi
                         limit: "max_nesting_depth".to_owned(),
                     });
                 }
+                mark_element(&mut stack);
                 stack.push(BoundFrame {
                     kind: byte,
                     members: 0,
+                    has_element: false,
                 });
             }
             b'}' | b']' => {
                 token_bytes = 0;
+                if stack.last().is_some_and(|frame| frame.has_element) {
+                    count_member(&mut stack, limits)?;
+                }
                 stack.pop();
+                mark_element(&mut stack);
             }
             b',' => {
                 token_bytes = 0;
-                if let Some(frame) = stack.last_mut() {
-                    frame.members += 1;
-                    let bound = if frame.kind == b'{' {
-                        limits.max_object_members()
-                    } else {
-                        limits.max_array_elements()
-                    };
-                    if frame.members > bound {
-                        return Err(VerifierError::ResourceLimit {
-                            limit: if frame.kind == b'{' {
-                                "max_object_members"
-                            } else {
-                                "max_array_elements"
-                            }
-                            .to_owned(),
-                        });
-                    }
-                }
+                count_member(&mut stack, limits)?;
             }
             b' ' | b'\t' | b'\n' | b':' => token_bytes = 0,
             _ => {
-                token_bytes += 1;
+                token_bytes =
+                    token_bytes
+                        .checked_add(1)
+                        .ok_or_else(|| VerifierError::ResourceLimit {
+                            limit: "max_token_bytes".to_owned(),
+                        })?;
                 if token_bytes > limits.max_token_bytes() {
                     return Err(VerifierError::ResourceLimit {
                         limit: "max_token_bytes".to_owned(),
                     });
                 }
+                mark_element(&mut stack);
             }
         }
     }
@@ -496,7 +547,13 @@ impl RecordSink for OneRecordParser<'_> {
             });
         }
         self.state.previous_key = Some(key);
-        self.state.record_count += 1;
+        self.state.record_count =
+            self.state
+                .record_count
+                .checked_add(1)
+                .ok_or_else(|| VerifierError::ResourceLimit {
+                    limit: "max_records_per_artifact".to_owned(),
+                })?;
         self.state.envelope_agrees = true;
         Ok(())
     }
@@ -738,20 +795,52 @@ mod tests {
         }
     }
 
-    fn effective() -> Result<EffectiveLimits, crate::resource_profile::ProfileError> {
-        let input = test_input();
+    fn effective_with<F>(
+        change: F,
+    ) -> Result<EffectiveLimits, crate::resource_profile::ProfileError>
+    where
+        F: FnOnce(&mut LimitsInput),
+    {
+        let mut input = test_input();
+        change(&mut input);
         let verifier = ResourceProfile::new(
-            ResourceProfileId::new("TEST_ONLY_VERIFIER_FRAMER_V1", 1)?,
+            ResourceProfileId::new("TEST_ONLY_VERIFIER_BOUNDS_V1", 1)?,
             ProcessingRole::Verifier,
             input,
         )?;
         let snapshot = ResourceProfile::new(
-            ResourceProfileId::new("TEST_ONLY_SNAPSHOT_FRAMER_V1", 1)?,
+            ResourceProfileId::new("TEST_ONLY_SNAPSHOT_BOUNDS_V1", 1)?,
             ProcessingRole::Snapshot,
             input,
         )?;
         StreamingResourcePolicy::new(ProfileLimits::validate(input)?, verifier, snapshot)?
             .verifier_limits()
+    }
+
+    fn effective() -> Result<EffectiveLimits, crate::resource_profile::ProfileError> {
+        effective_with(|_| {})
+    }
+
+    fn object_with_members(members: usize) -> Vec<u8> {
+        let body = (0..members)
+            .map(|index| format!("\"k{index}\":{index}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        format!("{{{body}}}").into_bytes()
+    }
+
+    fn array_with_elements(elements: usize) -> Vec<u8> {
+        let body = (0..elements)
+            .map(|index| index.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        format!("[{body}]").into_bytes()
+    }
+
+    fn resource_limit(limit: &str) -> VerifierError {
+        VerifierError::ResourceLimit {
+            limit: limit.to_owned(),
+        }
     }
 
     #[test]
@@ -1089,6 +1178,303 @@ mod tests {
         assert!(
             check_line_bounds(br#"{"a":"b"}"#, &limits).is_ok(),
             "a short canonical object passes the structural scan"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn empty_object_and_array_have_zero_members() -> Result<(), Box<dyn std::error::Error>> {
+        let limits = effective_with(|input| {
+            input.max_object_members = 1;
+            input.max_array_elements = 1;
+        })?;
+        assert!(
+            check_line_bounds(b"{}", &limits).is_ok(),
+            "an empty object has no members"
+        );
+        assert!(
+            check_line_bounds(b"[]", &limits).is_ok(),
+            "an empty array has no elements"
+        );
+        assert!(
+            check_line_bounds(br#"{"a":{}}"#, &limits).is_ok(),
+            "an empty nested object has no members"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn object_at_member_bound_is_accepted() -> Result<(), Box<dyn std::error::Error>> {
+        let limits = effective()?;
+        let bound = limits.max_object_members() as usize;
+        assert!(
+            check_line_bounds(&object_with_members(bound), &limits).is_ok(),
+            "exactly the bound object members are accepted"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn object_one_member_past_bound_is_refused() -> Result<(), Box<dyn std::error::Error>> {
+        let limits = effective()?;
+        let line = object_with_members(limits.max_object_members() as usize + 1);
+        assert_eq!(
+            check_line_bounds(&line, &limits),
+            Err(resource_limit("max_object_members")),
+            "the final member is counted, so max plus one is refused"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn array_at_element_bound_is_accepted() -> Result<(), Box<dyn std::error::Error>> {
+        let limits = effective()?;
+        let bound = limits.max_array_elements() as usize;
+        assert!(
+            check_line_bounds(&array_with_elements(bound), &limits).is_ok(),
+            "exactly the bound array elements are accepted"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn array_one_element_past_bound_is_refused() -> Result<(), Box<dyn std::error::Error>> {
+        let limits = effective()?;
+        let line = array_with_elements(limits.max_array_elements() as usize + 1);
+        assert_eq!(
+            check_line_bounds(&line, &limits),
+            Err(resource_limit("max_array_elements")),
+            "the final element is counted, so max plus one is refused"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn nested_objects_count_each_frame_independently() -> Result<(), Box<dyn std::error::Error>> {
+        let limits = effective_with(|input| {
+            input.max_object_members = 2;
+        })?;
+        assert!(
+            check_line_bounds(br#"{"a":{"b":1},"c":2}"#, &limits).is_ok(),
+            "each object frame has members within its own bound"
+        );
+        assert_eq!(
+            check_line_bounds(br#"{"a":{"b":1,"c":2,"d":3},"e":4}"#, &limits),
+            Err(resource_limit("max_object_members")),
+            "the inner object counts its final member"
+        );
+        assert_eq!(
+            check_line_bounds(br#"{"a":{"b":1,"c":2},"d":3,"e":4}"#, &limits),
+            Err(resource_limit("max_object_members")),
+            "the outer object counts its final member"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn nested_arrays_count_each_frame_independently() -> Result<(), Box<dyn std::error::Error>> {
+        let limits = effective_with(|input| {
+            input.max_array_elements = 2;
+        })?;
+        assert!(
+            check_line_bounds(b"[[1,2],[3]]", &limits).is_ok(),
+            "each array frame has elements within its own bound"
+        );
+        assert_eq!(
+            check_line_bounds(b"[[1,2,3],[4]]", &limits),
+            Err(resource_limit("max_array_elements")),
+            "the inner array counts its final element"
+        );
+        assert_eq!(
+            check_line_bounds(b"[[1],[2],[3]]", &limits),
+            Err(resource_limit("max_array_elements")),
+            "the outer array counts its final element"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn array_of_objects_counts_both_levels() -> Result<(), Box<dyn std::error::Error>> {
+        let limits = effective_with(|input| {
+            input.max_object_members = 2;
+            input.max_array_elements = 2;
+        })?;
+        assert!(
+            check_line_bounds(br#"[{"a":1,"b":2},{"c":3}]"#, &limits).is_ok(),
+            "an array of objects within both bounds is accepted"
+        );
+        assert_eq!(
+            check_line_bounds(br#"[{"a":1,"b":2},{"c":3,"d":4,"e":5}]"#, &limits),
+            Err(resource_limit("max_object_members")),
+            "a member in a later object is counted"
+        );
+        assert_eq!(
+            check_line_bounds(br#"[{"a":1},{"b":2},{"c":3}]"#, &limits),
+            Err(resource_limit("max_array_elements")),
+            "a later object is counted as an array element"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn object_of_arrays_counts_both_levels() -> Result<(), Box<dyn std::error::Error>> {
+        let limits = effective_with(|input| {
+            input.max_object_members = 2;
+            input.max_array_elements = 2;
+        })?;
+        assert!(
+            check_line_bounds(br#"{"a":[1,2],"b":[3]}"#, &limits).is_ok(),
+            "an object of arrays within both bounds is accepted"
+        );
+        assert_eq!(
+            check_line_bounds(br#"{"a":[1,2,3],"b":[4]}"#, &limits),
+            Err(resource_limit("max_array_elements")),
+            "a later element in a nested array is counted"
+        );
+        assert_eq!(
+            check_line_bounds(br#"{"a":[1],"b":[2],"c":[3]}"#, &limits),
+            Err(resource_limit("max_object_members")),
+            "a later array is counted as an object member"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn escaped_strings_ignore_punctuation_when_counting() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let limits = effective_with(|input| {
+            input.max_object_members = 2;
+            input.max_array_elements = 2;
+        })?;
+        let object = br#"{"a":"x,y}z{[\"q\",]","b":"p\\q"}"#;
+        assert!(
+            check_line_bounds(object, &limits).is_ok(),
+            "commas and brackets inside escaped strings are not members"
+        );
+        let object_over = br#"{"a":"x,y}z{[\"q\",]","b":"p\\q","c":0}"#;
+        assert_eq!(
+            check_line_bounds(object_over, &limits),
+            Err(resource_limit("max_object_members")),
+            "only the real third member exceeds the object bound"
+        );
+        let array = br#"["a,b","c]d"]"#;
+        assert!(
+            check_line_bounds(array, &limits).is_ok(),
+            "punctuation inside array strings is not an element"
+        );
+        let array_over = br#"["a,b","c]d","e"]"#;
+        assert_eq!(
+            check_line_bounds(array_over, &limits),
+            Err(resource_limit("max_array_elements")),
+            "only the real third element exceeds the array bound"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn member_counter_overflow_is_a_typed_resource_refusal()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let limits = effective()?;
+        let mut stack = vec![BoundFrame {
+            kind: b'{',
+            members: u32::MAX,
+            has_element: true,
+        }];
+        assert_eq!(
+            count_member(&mut stack, &limits),
+            Err(resource_limit("max_object_members")),
+            "u32 overflow in a member counter refuses with its own bound"
+        );
+        stack[0].kind = b'[';
+        assert_eq!(
+            count_member(&mut stack, &limits),
+            Err(resource_limit("max_array_elements")),
+            "u32 overflow in an element counter refuses with its own bound"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn framer_record_counter_overflow_is_a_typed_resource_refusal()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let limits = effective()?;
+        let mut sink = CapturingSink { lines: Vec::new() };
+        let mut framer = RecordFramer::new(&limits, u64::MAX, &mut sink);
+        framer.count = u64::MAX;
+        assert_eq!(
+            framer.push(b"a\n"),
+            Err(resource_limit("max_records_per_artifact")),
+            "u64 overflow in the framer record counter is typed"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn parser_record_counter_overflow_is_a_typed_resource_refusal()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let limits = effective()?;
+        let registry = canonical_registry()?;
+        let declared = canonical_declarations(&registry);
+        let profiles = canonical_profiles()?;
+        let mode = RecordMode::Canonical {
+            profiles: &profiles,
+            declared_schemas: &declared,
+            registry: &registry,
+        };
+        let mut state = ArtifactState {
+            stored_digest: [0_u8; 32],
+            expanded_digest: [0_u8; 32],
+            stored_bytes: 0,
+            expanded_bytes: 0,
+            record_count: u64::MAX,
+            previous_key: None,
+            envelope_agrees: false,
+        };
+        let mut parser = OneRecordParser {
+            mode: &mode,
+            limits: &limits,
+            artifact_path: "artifacts/records.jsonl",
+            order_profile: "sequence-domain-strict",
+            expected_envelope: "envelope-1",
+            state: &mut state,
+        };
+        let line = canonical_line("registered-event")?;
+        assert_eq!(
+            parser.accept(&line, 1),
+            Err(resource_limit("max_records_per_artifact")),
+            "u64 overflow in the parser record counter is typed"
+        );
+        assert!(
+            !state.envelope_agrees,
+            "an overflowing record does not set the envelope agreement flag"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn expanded_byte_counter_overflow_is_a_typed_resource_refusal()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let slot = new_failure_slot();
+        let mut expanded_hasher = Sha256::new();
+        let mut dataset_hasher = Sha256::new();
+        let mut sink = CapturingSink { lines: Vec::new() };
+        let mut framer = RecordFramer::new(&effective()?, 1, &mut sink);
+        let mut wrapper = ExpandedSink {
+            expanded: &mut expanded_hasher,
+            dataset: &mut dataset_hasher,
+            framer: &mut framer,
+            cap: u64::MAX,
+            total: u64::MAX,
+            failure: &slot,
+        };
+        assert!(
+            wrapper.write_all(b"a").is_err(),
+            "an overflowing expanded byte counter refuses the write"
+        );
+        assert_eq!(
+            slot.borrow_mut().take(),
+            Some(resource_limit("max_decompression_budget_bytes")),
+            "the expanded byte overflow keeps the typed first refusal"
         );
         Ok(())
     }
