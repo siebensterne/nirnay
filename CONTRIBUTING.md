@@ -44,6 +44,14 @@ Everything else is dated evidence under `evidence/` or `BUILD-RESULTS.md`.
   under `evidence/` and link it from the README document map.
 - Do not add another root-level status, brief or inventory file. If a new
   document is necessary, state why an existing canonical file cannot hold it.
+- Do not add a Markdown file for a work package or PR. Source comments, tests,
+  the PR description and CI are the record for routine changes.
+- A new Markdown file needs a stable public contract, an architecture decision
+  affecting several modules or repositories, an operator procedure not
+  derivable from source, a durable rights or security decision, or formal
+  evidence not preserved by CI or Git. State the justification in the PR.
+- Keep the root `README.md` at 100 lines or fewer and `AGENTS.md` at 2 KB or
+  fewer. Do not duplicate current status, capability matrices or CI output.
 - Do not modify owner work: `.github/workflows/release.yml`,
   `BUILD-RESULTS.md`, `engineering/supply-chain.md` and
   `scripts/make_bundle.py`, without an explicit owner task.
