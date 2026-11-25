@@ -20,12 +20,19 @@ pub mod canonical_wire;
 pub mod error;
 pub mod files;
 pub mod jcs;
+pub mod profile_resolver;
 pub mod receipt;
 pub mod resource_profile;
 pub mod schema;
 pub mod streaming;
 pub mod trust;
 pub mod verifier;
+
+#[cfg(test)]
+extern crate self as release_verifier;
+#[cfg(test)]
+#[path = "../tests/b16_streaming.rs"]
+mod b16_streaming_tests;
 
 pub use canonical_wire::CanonicalError;
 pub use canonical_wire::CanonicalManifest;
@@ -40,6 +47,9 @@ pub use files::PrivateSnapshot;
 pub use files::SnapshotBuilder;
 pub use files::SnapshotEntry;
 pub use files::StagingLimits;
+pub use profile_resolver::ApprovedProfile;
+pub use profile_resolver::ApprovedProfileRegistry;
+pub use profile_resolver::ProfileResolver;
 pub use receipt::AdmissionReceipt;
 pub use receipt::AdmissionResult;
 pub use receipt::ArtifactBinding;

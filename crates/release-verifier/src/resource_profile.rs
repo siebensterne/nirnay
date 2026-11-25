@@ -6,9 +6,11 @@
 //! section 3. It defines a contract, not an approved instance: no production
 //! digest, numeric maximum, codec identifier or capability state is registered
 //! here. Every field of [`ResourceProfile`] and [`ProfileLimits`] is private and
-//! populated by a validating constructor. Finite `TEST_ONLY profiles` are
-//! available to test harnesses through [`LimitsInput`] and carry no production
-//! authority.
+//! populated by a crate-private validating constructor. The two profile handles
+//! are opaque to external callers; selection runs through the trusted local
+//! resolver in [`crate::profile_resolver`], which holds the approved registry.
+//! Finite `TEST_ONLY` profiles exist only inside `cfg(test)` builds and carry no
+//! production authority.
 //!
 //! Effective limits are the stricter-of combination of a trusted local ceiling,
 //! the selected role profile and a producer declaration when one is present.
@@ -46,13 +48,28 @@ pub enum ProfileError {
         /// Role-level detail.
         detail: String,
     },
+    /// No profile is approved for the requested role in the trusted registry.
+    #[error("no approved resource profile for role {role}")]
+    NoApprovedProfile {
+        /// Role with no approved binding.
+        role: String,
+    },
+    /// The bound version differs from the approved declaration version.
+    #[error("resource profile version mismatch: {detail}")]
+    Version {
+        /// Version-level detail.
+        detail: String,
+    },
 }
 
 impl ProfileError {
     /// Map a validation failure to the fail-closed verifier refusal.
     pub fn into_verifier_error(self) -> VerifierError {
-        VerifierError::ResourceProfile {
-            detail: self.to_string(),
+        match self {
+            Self::NoApprovedProfile { role } => VerifierError::NoApprovedProfile { role },
+            other => VerifierError::ResourceProfile {
+                detail: other.to_string(),
+            },
         }
     }
 }
@@ -575,7 +592,7 @@ fn canonical_limits(out: &mut Vec<u8>, l: &ProfileLimits) {
     canonical_u64(out, l.max_artifacts);
 }
 
-fn profile_digest(
+pub(crate) fn profile_digest(
     id: &ResourceProfileId,
     role: ProcessingRole,
     limits: &ProfileLimits,
@@ -592,7 +609,15 @@ fn profile_digest(
     out
 }
 
-/// Immutable, versioned, role-specific resource profile.
+/// Opaque handle to an immutable, versioned, role-specific resource profile.
+///
+/// Construction is crate-private. An external caller can read an approved
+/// handle but cannot build one, so no caller-supplied limit reaches enforcement.
+///
+/// ```compile_fail
+/// use release_verifier::ResourceProfile;
+/// let _ = ResourceProfile::new(todo!(), todo!(), todo!());
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResourceProfile {
     id: ResourceProfileId,
@@ -603,7 +628,8 @@ pub struct ResourceProfile {
 
 impl ResourceProfile {
     /// Validate a declaration and derive the canonical profile digest.
-    pub fn new(
+    #[cfg(test)]
+    pub(crate) fn new(
         id: ResourceProfileId,
         role: ProcessingRole,
         input: LimitsInput,
@@ -619,7 +645,8 @@ impl ResourceProfile {
     }
 
     /// Build a profile and fail closed when a declared digest disagrees.
-    pub fn from_declared(
+    #[cfg(test)]
+    pub(crate) fn from_declared(
         id: ResourceProfileId,
         role: ProcessingRole,
         input: LimitsInput,
@@ -721,6 +748,11 @@ impl EffectiveLimits {
             max_artifacts: min64(|l| l.max_artifacts),
         };
         Ok(Self::from_limits(ProfileLimits::validate(input)?))
+    }
+
+    /// Return the combined limits so a trusted resolver can bind them as a ceiling.
+    pub(crate) fn into_limits(self) -> ProfileLimits {
+        self.limits
     }
 
     /// Return the effective maximum bytes in one record line.
@@ -859,8 +891,16 @@ impl EffectiveLimits {
     }
 }
 
-/// Trusted local selection of role profiles and an optional producer evidence
+/// Opaque trusted selection of role profiles and an optional producer evidence
 /// declaration used by the streaming verifier entry point.
+///
+/// Only the trusted local resolver constructs this selection. External callers
+/// hold no constructor and cannot substitute a policy at enforcement time.
+///
+/// ```compile_fail
+/// use release_verifier::StreamingResourcePolicy;
+/// let _ = StreamingResourcePolicy::new(todo!(), todo!(), todo!());
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StreamingResourcePolicy {
     ceiling: ProfileLimits,
@@ -874,8 +914,8 @@ impl StreamingResourcePolicy {
     ///
     /// The caller supplies no raw maximum at enforcement time: every limit is
     /// read from a validated profile in this selection.
-    pub fn new(
-        ceiling: LimitsInput,
+    pub(crate) fn new(
+        ceiling: ProfileLimits,
         verifier: ResourceProfile,
         snapshot: ResourceProfile,
     ) -> Result<Self, ProfileError> {
@@ -890,7 +930,7 @@ impl StreamingResourcePolicy {
             });
         }
         Ok(Self {
-            ceiling: ProfileLimits::validate(ceiling)?,
+            ceiling,
             verifier,
             snapshot,
             producer: None,
@@ -901,7 +941,13 @@ impl StreamingResourcePolicy {
     ///
     /// The declaration lowers allowances; it never raises the consumer's
     /// local ceiling or role profile limit.
-    pub fn with_producer_declaration(
+    ///
+    /// ```compile_fail
+    /// use release_verifier::StreamingResourcePolicy;
+    /// let policy: StreamingResourcePolicy = todo!();
+    /// let _ = policy.with_producer_declaration(todo!());
+    /// ```
+    pub(crate) fn with_producer_declaration(
         mut self,
         producer: ResourceProfile,
     ) -> Result<Self, ProfileError> {
@@ -1119,7 +1165,7 @@ mod tests {
         assert!(
             matches!(
                 StreamingResourcePolicy::new(
-                    test_limits(),
+                    ProfileLimits::validate(test_limits())?,
                     snapshot_profile()?,
                     snapshot_profile()?
                 ),
@@ -1139,9 +1185,12 @@ mod tests {
             ProcessingRole::Producer,
             generous,
         )?;
-        let policy =
-            StreamingResourcePolicy::new(test_limits(), verifier_profile()?, snapshot_profile()?)?
-                .with_producer_declaration(producer)?;
+        let policy = StreamingResourcePolicy::new(
+            ProfileLimits::validate(test_limits())?,
+            verifier_profile()?,
+            snapshot_profile()?,
+        )?
+        .with_producer_declaration(producer)?;
         assert_eq!(
             policy.verifier_limits()?.max_record_bytes(),
             test_limits().max_record_bytes,
@@ -1162,9 +1211,12 @@ mod tests {
             ProcessingRole::Producer,
             strict,
         )?;
-        let policy =
-            StreamingResourcePolicy::new(test_limits(), verifier_profile()?, snapshot_profile()?)?
-                .with_producer_declaration(producer)?;
+        let policy = StreamingResourcePolicy::new(
+            ProfileLimits::validate(test_limits())?,
+            verifier_profile()?,
+            snapshot_profile()?,
+        )?
+        .with_producer_declaration(producer)?;
         assert_eq!(
             policy.verifier_limits()?.max_record_bytes(),
             256,
