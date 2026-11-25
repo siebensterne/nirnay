@@ -141,6 +141,99 @@ fn with_cleanup(
     (refusal, Some(disposition))
 }
 
+/// Refusal from a checked in-flight artifact slot transition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum InFlightSlotError {
+    /// No slot is free while the count equals the in-flight limit.
+    #[error("artifact in-flight limit reached")]
+    LimitReached,
+    /// The checked increment would wrap the counter type.
+    #[error("artifact in-flight count overflowed")]
+    Overflow,
+    /// A release was requested with no artifact in flight.
+    #[error("artifact in-flight count underflowed")]
+    Underflow,
+}
+
+impl From<InFlightSlotError> for VerifierError {
+    fn from(error: InFlightSlotError) -> Self {
+        match error {
+            InFlightSlotError::LimitReached
+            | InFlightSlotError::Overflow
+            | InFlightSlotError::Underflow => Self::ResourceLimit {
+                limit: "max_concurrent_artifacts".to_owned(),
+            },
+        }
+    }
+}
+
+/// Checked count of artifacts being verified at one instant.
+///
+/// The delivered pipeline is sequential: one slot is acquired, one artifact is
+/// verified and the slot is released before the next descriptor opens. A future
+/// scheduler may verify artifacts together, but it must acquire a slot through
+/// [`Self::try_acquire`] before an artifact starts and release it through
+/// [`Self::try_release`] after verification ends. The two transitions refuse
+/// overflow and underflow instead of wrapping the counter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InFlightArtifacts {
+    count: u32,
+    limit: u32,
+}
+
+impl InFlightArtifacts {
+    /// Create an empty counter with the configured in-flight limit.
+    pub fn new(limit: u32) -> Self {
+        Self { count: 0, limit }
+    }
+
+    /// Return the number of artifacts currently in flight.
+    pub fn in_flight(&self) -> u32 {
+        self.count
+    }
+
+    /// Return the configured in-flight limit.
+    pub fn limit(&self) -> u32 {
+        self.limit
+    }
+
+    /// Acquire one slot before an artifact starts verification.
+    ///
+    /// A request made while every slot is occupied is refused. The increment
+    /// is checked before the capacity test so a wrapped count is not stored.
+    pub fn try_acquire(self) -> Result<Self, InFlightSlotError> {
+        let next = self
+            .count
+            .checked_add(1)
+            .ok_or(InFlightSlotError::Overflow)?;
+        if next > self.limit {
+            return Err(InFlightSlotError::LimitReached);
+        }
+        Ok(Self {
+            count: next,
+            limit: self.limit,
+        })
+    }
+
+    /// Release one slot after artifact verification ends.
+    pub fn try_release(self) -> Result<Self, InFlightSlotError> {
+        let next = self
+            .count
+            .checked_sub(1)
+            .ok_or(InFlightSlotError::Underflow)?;
+        Ok(Self {
+            count: next,
+            limit: self.limit,
+        })
+    }
+
+    /// Construct a counter state for checked-transition tests.
+    #[cfg(test)]
+    pub(crate) fn with_count(limit: u32, count: u32) -> Self {
+        Self { count, limit }
+    }
+}
+
 /// Locator for one immutable release under the configured trusted root.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReleaseLocator {
@@ -867,6 +960,7 @@ impl ReleaseVerifier {
         let mut total_expanded = 0_u64;
         let mut total_stored = 0_u64;
         let mut total_records = 0_u64;
+        let mut in_flight = InFlightArtifacts::new(limits.max_concurrent_artifacts());
         let started = std::time::Instant::now();
         for (descriptor, component) in descriptors.iter().zip(components) {
             if started.elapsed().as_millis() > u128::from(limits.max_processing_duration_ms()) {
@@ -888,6 +982,17 @@ impl ReleaseVerifier {
             } else {
                 RecordMode::Internal
             };
+            assert_eq!(
+                in_flight.in_flight(),
+                0,
+                "no slot may remain in flight between artifacts"
+            );
+            in_flight = in_flight.try_acquire()?;
+            assert_eq!(
+                in_flight.in_flight(),
+                1,
+                "the delivered pipeline verifies one artifact at a time"
+            );
             let state = streaming::ArtifactStream {
                 file: &file,
                 facts: &facts,
@@ -899,7 +1004,9 @@ impl ReleaseVerifier {
                 mode,
                 expected_envelope: &manifest.schema_versions.envelope_version,
             }
-            .verify()?;
+            .verify();
+            in_flight = in_flight.try_release()?;
+            let state = state?;
             drop(file);
             total_expanded = total_expanded
                 .checked_add(state.expanded_bytes())
@@ -939,6 +1046,11 @@ impl ReleaseVerifier {
                 record_count: descriptor.record_count,
             });
         }
+        assert_eq!(
+            in_flight.in_flight(),
+            0,
+            "every acquired slot is released before stage five completes"
+        );
         let dataset_bytes = dataset_hasher.finalize();
         let mut raw_digest = [0_u8; 32];
         raw_digest.copy_from_slice(&dataset_bytes);
@@ -956,22 +1068,30 @@ impl ReleaseVerifier {
         })
     }
 
+    /// Check the declared artifact total against the total artifact bound.
+    ///
+    /// The in-flight limit is a separate dimension. A sequential verifier may
+    /// declare more artifacts than can be verified at one instant.
+    fn check_artifact_count(count: usize, max_artifacts: u64) -> Result<(), VerifierError> {
+        let refusal = || VerifierError::ResourceLimit {
+            limit: "max_artifacts".to_owned(),
+        };
+        if count == 0 {
+            return Err(refusal());
+        }
+        let total = u64::try_from(count).map_err(|_| refusal())?;
+        if total > max_artifacts {
+            return Err(refusal());
+        }
+        Ok(())
+    }
+
     fn check_artifact_declarations_streaming<'a>(
         &self,
         manifest: &'a ReleaseManifest,
         limits: &EffectiveLimits,
     ) -> Result<Vec<&'a ArtifactDescriptor>, VerifierError> {
-        if manifest.artifacts.is_empty() || manifest.artifacts.len() as u64 > limits.max_artifacts()
-        {
-            return Err(VerifierError::ResourceLimit {
-                limit: "max_artifacts".to_owned(),
-            });
-        }
-        if manifest.artifacts.len() as u32 > limits.max_concurrent_artifacts() {
-            return Err(VerifierError::ResourceLimit {
-                limit: "max_concurrent_artifacts".to_owned(),
-            });
-        }
+        Self::check_artifact_count(manifest.artifacts.len(), limits.max_artifacts())?;
         let mut descriptors: Vec<&ArtifactDescriptor> = manifest.artifacts.iter().collect();
         descriptors.sort_by(|left, right| {
             left.logical_partition_id
@@ -1814,4 +1934,165 @@ fn check_record_order(
     }
     *previous_sequence = Some(key);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::InFlightArtifacts;
+    use super::InFlightSlotError;
+    use super::ReleaseVerifier;
+    use crate::error::VerifierError;
+
+    fn resource_limit(limit: &str) -> VerifierError {
+        VerifierError::ResourceLimit {
+            limit: limit.to_owned(),
+        }
+    }
+
+    #[test]
+    fn total_count_gate_admits_four_artifacts() {
+        assert_eq!(
+            ReleaseVerifier::check_artifact_count(4, 4),
+            Ok(()),
+            "four declared artifacts fit the total bound"
+        );
+    }
+
+    #[test]
+    fn total_count_gate_is_independent_of_the_in_flight_limit() {
+        assert!(
+            ReleaseVerifier::check_artifact_count(4, 4).is_ok(),
+            "the total gate does not read the concurrency dimension"
+        );
+        let slots = InFlightArtifacts::new(1);
+        assert_eq!(slots.limit(), 1, "one flight slot stays configured");
+    }
+
+    #[test]
+    fn total_count_gate_refuses_one_artifact_beyond_the_bound() {
+        assert_eq!(
+            ReleaseVerifier::check_artifact_count(5, 4),
+            Err(resource_limit("max_artifacts")),
+            "the fifth artifact is refused by the total bound"
+        );
+    }
+
+    #[test]
+    fn total_count_gate_refuses_an_empty_inventory() {
+        assert_eq!(
+            ReleaseVerifier::check_artifact_count(0, 4),
+            Err(resource_limit("max_artifacts")),
+            "an empty artifact inventory is refused"
+        );
+    }
+
+    #[test]
+    fn acquire_adds_one_slot() {
+        let slots = InFlightArtifacts::new(2)
+            .try_acquire()
+            .expect("a free slot is available");
+        assert_eq!(slots.in_flight(), 1, "one artifact is in flight");
+    }
+
+    #[test]
+    fn release_removes_one_slot() {
+        let acquired = InFlightArtifacts::new(2)
+            .try_acquire()
+            .expect("a free slot is available");
+        let released = acquired.try_release().expect("an acquired slot exists");
+        assert_eq!(released.in_flight(), 0, "no artifact remains in flight");
+    }
+
+    #[test]
+    fn acquire_at_the_limit_is_refused() {
+        let occupied = InFlightArtifacts::new(1)
+            .try_acquire()
+            .expect("the first slot is free");
+        assert_eq!(
+            occupied.try_acquire(),
+            Err(InFlightSlotError::LimitReached),
+            "no artifact starts while the count equals the limit"
+        );
+    }
+
+    #[test]
+    fn zero_in_flight_limit_refuses_the_first_artifact() {
+        assert_eq!(
+            InFlightArtifacts::new(0).try_acquire(),
+            Err(InFlightSlotError::LimitReached),
+            "a zero limit admits no artifact"
+        );
+    }
+
+    #[test]
+    fn release_at_zero_is_a_typed_underflow() {
+        assert_eq!(
+            InFlightArtifacts::new(1).try_release(),
+            Err(InFlightSlotError::Underflow),
+            "a release without an acquire is refused"
+        );
+    }
+
+    #[test]
+    fn checked_increment_is_a_typed_overflow() {
+        let saturated = InFlightArtifacts::with_count(u32::MAX, u32::MAX);
+        assert_eq!(
+            saturated.try_acquire(),
+            Err(InFlightSlotError::Overflow),
+            "a wrapped count is never stored"
+        );
+    }
+
+    #[test]
+    fn sequential_four_artifact_run_never_exceeds_one_slot() {
+        let mut slots = InFlightArtifacts::new(1);
+        let mut peak = 0;
+        for _ in 0..4 {
+            assert_eq!(
+                slots.in_flight(),
+                0,
+                "the previous slot is released before the next artifact"
+            );
+            slots = slots.try_acquire().expect("one slot is free");
+            peak = peak.max(slots.in_flight());
+            slots = slots.try_release().expect("an acquired slot exists");
+        }
+        assert_eq!(peak, 1, "the in-flight count reaches one and stops");
+        assert_eq!(slots.in_flight(), 0, "all slots are released at the end");
+    }
+
+    #[test]
+    fn slot_errors_map_to_stage_five_resource_limit() {
+        for error in [
+            InFlightSlotError::LimitReached,
+            InFlightSlotError::Overflow,
+            InFlightSlotError::Underflow,
+        ] {
+            let refusal = VerifierError::from(error);
+            assert_eq!(
+                refusal,
+                resource_limit("max_concurrent_artifacts"),
+                "slot errors name the in-flight limit"
+            );
+            assert_eq!(refusal.stage(), 5, "the refusal belongs to stage five");
+            assert_eq!(
+                refusal.code(),
+                "REJECT_RESOURCE_LIMIT",
+                "the stable code is unchanged"
+            );
+        }
+    }
+
+    #[test]
+    fn transitions_leave_the_configured_limit_unchanged() {
+        let acquired = InFlightArtifacts::new(3)
+            .try_acquire()
+            .expect("one slot is free");
+        let released = acquired.try_release().expect("an acquired slot exists");
+        assert_eq!(
+            released.limit(),
+            3,
+            "the limit is immutable under transitions"
+        );
+    }
 }
