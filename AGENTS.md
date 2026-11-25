@@ -1,39 +1,35 @@
 # Agent instructions
 
-Nirnay owns independent NDC consumption and verification, accepted research datasets, research,
-simulation, portfolio, risk and OMS. Fieldbook owns source acquisition, raw storage,
-normalization, reference authority and NDC publication.
+Nirnay owns NDC consumption and verification, accepted research datasets,
+research, simulation, portfolio, risk and OMS. Fieldbook owns acquisition,
+raw storage, normalization, reference authority and NDC publication.
 
-- Use `README.md` and `engineering/README.md` to locate the owning documents. Read only the relevant
-  ADR, contract, implementation and tests.
-- Read `engineering/verification-policy.md` for claim states. Read `engineering/data-governance.md`
-  for data, rights, acceptance or retention work.
-- Read `engineering/capabilities.json` and `claims/ledger.json` before changing capability or claim
-  records. Preserve their canonical/superseded relationship.
-- Check Workspace `CURRENT-STATE.json` before actions involving rights, datasets, experiments, paper
-  operation, budget or execution. A valid signature or successful verifier result does not grant
+- Use `README.md` and `engineering/README.md` to locate owning documents.
+  Read only the relevant ADR, contract, implementation and tests.
+- Read `engineering/verification-policy.md` for claims and
+  `engineering/data-governance.md` for rights, data and retention.
+- Read `claims/ledger.json`; `engineering/capabilities.json` is superseded.
+  Check workspace `CURRENT-STATE.json` before rights, dataset, experiment,
+  paper-operation, budget or execution actions. A verifier result grants no
   rights.
-- Keep domain and application logic independent of infrastructure and external SDKs. Ports belong to
-  the consuming inner layer; adapters implement them at outer boundaries.
-- Keep money, prices, fees, quantities and P&L in exact domain representations. Do not use binary
-  floating point for authoritative financial state.
-- Strategies emit intents. They do not access broker SDKs, OMS internals, risk permits, cash or
-  positions. Risk and OMS remain independent authorities.
-- Preserve source identity, event ordering, clock domains, point-in-time and knowledge-time
+- Keep domain logic independent of infrastructure and SDKs. Ports belong to
+  the inner layer; adapters implement them at boundaries.
+- Keep money, prices, fees, quantities and P&L exact; no binary floating
+  point for authoritative state.
+- Strategies emit intents only; risk and OMS remain independent authorities.
+- Preserve source identity, event ordering, clock domains, point-in-time
   semantics, lineage and deterministic replay.
-- Bound every parser, buffer, queue, decompressor, retry and worker. Use immutable, versioned
-  resource profiles selected by trusted local policy. Producer declarations never raise the
-  verifier's local ceiling.
-- For research, define the hypothesis, null, falsifier, data specification, costs and validation
-  design before parameter search. Preserve failed trials. Keep the M4 holdout untouched and follow
-  D11: no synthetic market-shaped research evidence.
-- Inspect the base commit, affected callers and tests. Implement one coherent change; add
-  regression, negative, boundary, replay and recovery tests as applicable.
-- Run targeted tests, then the required `make check` and `make assure` gates. Report exact commands,
-  exits, counts, ignored tests and environment.
-- Keep live routing and unapproved data activity disabled. A passing build, test or CI run does not
-  authorize them.
-- Preserve dated evidence and owner-maintained artifacts. Update capabilities and claims only when
-  source and evidence support the change.
-- Proceed autonomously within the task and current authority. Report exact commits, commands, CI
-  head, evidence and unresolved gaps.
+- Bound parsers, buffers, queues, decompressors, retries and workers. Profiles
+  are immutable, versioned and locally selected; producer declarations never
+  raise the verifier ceiling.
+- For research, fix hypothesis, null, falsifier, data, costs and validation
+  before parameter search. Preserve failed trials. Keep the M4 holdout
+  untouched; D11 forbids synthetic market-shaped evidence.
+- Inspect base commit, callers and tests. Make one coherent change with
+  regression, negative, boundary, replay and recovery tests. Run targeted
+  tests, then `make check` and `make assure`; report commands and exits.
+- Keep live routing and unapproved data activity disabled; a green gate does
+  not authorize them.
+- Preserve dated evidence. Update claims only with source and evidence
+  support. Proceed within current authority; report commits, CI head and
+  gaps.
