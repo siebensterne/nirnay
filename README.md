@@ -7,12 +7,13 @@ complementary platform under `engineering/architecture/decisions/ADR-0001-data-o
 
 **Release status:** research/paper engineering candidate. This repository is not a certified broker-connected trading system, not a SEBI/exchange-approved algo product, and not evidence of profitable alpha. Live order routing is hard-disabled. Every capability statement below distinguishes code present from external verification still required.
 
-<!-- CURRENT-STATE
-code_commit: 40c9666e420c2ad85ecbfc65fa3608337410e8f1
-verified_on: 2026-11-26
-ci_run: none
-scope: local static gates and dual-compiler CMake workflow; hosted CI pending on PR head
--->
+## Status authority
+
+Cross-repository state, freezes and authorizations are recorded in the workspace
+`CURRENT-STATE.json`. Repository capability claims and their falsifiers are
+recorded in [claims/ledger.json](claims/ledger.json). This README does not keep a
+local status snapshot: a snapshot cannot bind a CI run to the exact commit it
+tested, and a nonempty run identifier is not evidence.
 
 **Active regression scope:** under owner directive D11, synthetic market-data generators,
 fake sessions, mock feeds, synthetic benchmarks and the demo CLI route were removed from the

@@ -28,15 +28,18 @@
 
 ## Documentation and evidence
 
-The documentation set is small. `README.md` is the single
-current-state entry point; `AGENTS.md`, `CONTRIBUTING.md` and `SECURITY.md`
-are canonical policy files. Everything else is dated evidence under
-`evidence/` or `BUILD-RESULTS.md`.
+The documentation set is small. The workspace `CURRENT-STATE.json` owns
+cross-repository status and freezes; `claims/ledger.json` owns capability
+claims. `README.md` is an entry point, not a second status database;
+`AGENTS.md`, `CONTRIBUTING.md` and `SECURITY.md` are canonical policy files.
+Everything else is dated evidence under `evidence/` or `BUILD-RESULTS.md`.
 
 - Update canonical files in the same PR as the behavior they describe. Do not
   leave a current-state claim pointing at an older commit.
-- Keep the README current-state block accurate: commit, environment, CI run
-  and scope. `scripts/check_docs.py` verifies it on every `make check`.
+- Do not add a local current-state block to the README. A nonempty CI number
+  cannot bind a run to the commit it tested; record CI evidence as a dated
+  machine-readable artifact with run ID, exact head SHA, date and scope.
+  `scripts/check_docs.py` rejects reintroduced status snapshots.
 - Never edit a dated evidence file to make it current. Add a new dated file
   under `evidence/` and link it from the README document map.
 - Do not add another root-level status, brief or inventory file. If a new
