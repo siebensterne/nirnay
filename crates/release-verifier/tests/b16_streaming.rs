@@ -11,6 +11,7 @@ use base64::Engine;
 use ed25519_dalek::Signer;
 use ed25519_dalek::SigningKey;
 use flate2::Compression;
+use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
 use release_verifier::AdmissionReceipt;
 use release_verifier::AdmissionRequest;
@@ -29,6 +30,7 @@ use release_verifier::ReleaseVerifier;
 use release_verifier::ResourceProfileId;
 use release_verifier::TrustedKeyEntry;
 use release_verifier::TrustedKeyRegistry;
+use release_verifier::VerifierConfig;
 use release_verifier::VerifierResourcePolicy;
 use release_verifier::jcs::canonical_bytes;
 use release_verifier::schema::ArtifactDescriptor;
@@ -56,10 +58,13 @@ use serde_json::Value;
 use std::cell::RefCell;
 use std::error::Error;
 use std::fs;
+use std::io::Read as IoRead;
 use std::io::Write as IoWrite;
 use std::mem::size_of;
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::Mutex;
 use tempfile::TempDir;
 
 const SECRET_SEED: [u8; 32] = [
@@ -1222,4 +1227,30 @@ fn four_artifacts_with_one_slot_complete_all_twelve_stages() -> Result<(), Box<d
         "all four bindings reached the receipt"
     );
     Ok(())
+}
+
+fn bare_verifier_with(fixture: &Fixture, rights: Box<dyn RightsEvaluator>) -> ReleaseVerifier {
+    ReleaseVerifier::new(VerifierConfig {
+        root: fixture.root.clone(),
+        private_staging: fixture.staging.clone(),
+        registry: fixture.registry.clone(),
+        rights,
+        coverage: Box::new(PassCoverage),
+        lineage: Box::new(EmptyLineage),
+        policy: VerifierResourcePolicy {
+            max_manifest_bytes: 1_000_000,
+            max_sidecar_bytes: 4_096,
+            max_artifact_count: 16,
+            max_stored_bytes: 2_000_000,
+            max_expanded_bytes: 2_000_000,
+            max_total_expanded_bytes: 8_000_000,
+            max_record_bytes: 512,
+            max_record_count: 64,
+            max_json_nesting: 8,
+            max_decompression_budget: 2_000_000,
+            max_temp_disk_bytes: 8_000_000,
+            max_open_file_descriptors: 16,
+        },
+        verifier_commit: "nz-api001-legacy-test".to_owned(),
+    })
 }

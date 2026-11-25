@@ -15,6 +15,12 @@
 //! configured trusted root, hashed from the opened descriptor, copied into a
 //! caller-provided private staging directory and sealed before any downstream
 //! stage runs. A receipt records checks performed and is not a right.
+//!
+//! Entry-point classification: `verify_release_streaming` is the bounded
+//! streaming path. `verify_release` and `verify_release_with_diagnostics` are
+//! LEGACY_BUFFERED, keep their caller-owned policy and remain for existing
+//! callers. A streaming refusal returns to its caller; the buffered verifiers
+//! are not fallback paths and a rejection is not retried through them.
 
 pub mod canonical_wire;
 pub mod error;
@@ -34,6 +40,9 @@ extern crate self as release_verifier;
 #[cfg(test)]
 #[path = "../tests/b16_streaming.rs"]
 mod b16_streaming_tests;
+#[cfg(test)]
+#[path = "../tests/nz_api001_cross_execution.rs"]
+mod nz_api001_cross_execution_tests;
 
 pub use canonical_wire::CanonicalError;
 pub use canonical_wire::CanonicalManifest;
