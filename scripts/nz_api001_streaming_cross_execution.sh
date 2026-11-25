@@ -14,7 +14,8 @@ set -euo pipefail
 binary="${NIRNAY_B15_PRODUCER_BIN:-}"
 
 if [[ -z "$binary" ]]; then
-  printf 'SKIP NZ-API-001 cross-execution: NIRNAY_B15_PRODUCER_BIN is unset; no Fieldbook B15 producer binary was supplied.\n'
+  printf 'SKIP NZ-API-001 cross-execution: NIRNAY_B15_PRODUCER_BIN is unset;\n'
+  printf 'no Fieldbook B15 producer binary was supplied.\n'
 elif [[ ! -x "$binary" ]]; then
   printf 'SKIP NZ-API-001 cross-execution: %s is not executable.\n' "$binary"
 else
@@ -26,7 +27,9 @@ else
   else
     printf 'SKIP NZ-API-001 binary digest: no SHA-256 command is installed.\n'
   fi
-  printf 'NZ-API-001 producer commit: %s\n' "${NIRNAY_B15_PRODUCER_COMMIT:-not-supplied}"
+  commit="${NIRNAY_B15_PRODUCER_COMMIT:-not-supplied}"
+  printf 'NZ-API-001 producer commit: %s\n' "$commit"
 fi
 
-cargo test -p release-verifier --lib --locked nz_api001_cross_execution_tests -- --nocapture
+cargo test -p release-verifier --lib --locked \
+  nz_api001_cross_execution_tests -- --nocapture

@@ -115,7 +115,8 @@ Commands run in the Nirnay worktree with no commit:
 ## 5. Actual cross-execution status: NOT_RUN
 
 Skip reason, emitted by the driver and by each producer test:
-`NIRNAY_B15_PRODUCER_BIN is unset or does not name an executable Fieldbook B15 streaming producer; no producer output was fabricated`.
+`NIRNAY_B15_PRODUCER_BIN is unset or does not name an executable Fieldbook B15`
+streaming producer; no producer output was fabricated.
 
 No Fieldbook B15 streaming producer binary is installed in either local clone.
 The Fieldbook `InvocationContext::TestHarness` variant and
