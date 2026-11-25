@@ -53,11 +53,13 @@ use release_verifier::verifier::RECORD_ENCODING;
 use release_verifier::verifier::SIGNING_DOMAIN;
 use serde_json::Map;
 use serde_json::Value;
+use std::cell::RefCell;
 use std::error::Error;
 use std::fs;
 use std::io::Write as IoWrite;
 use std::mem::size_of;
 use std::path::PathBuf;
+use std::rc::Rc;
 use tempfile::TempDir;
 
 const SECRET_SEED: [u8; 32] = [
@@ -385,6 +387,83 @@ impl Fixture {
         .with_test_profile_resolver(resolver)
         .verify_release_streaming(&self.locator(), &self.request)
     }
+
+    fn verify_observing<F>(&self, observer: F) -> Result<AdmissionReceipt, RefusalDiagnostic>
+    where
+        F: Fn(u8) + 'static,
+    {
+        self.clean_staging().ok();
+        ReleaseVerifier::new(release_verifier::VerifierConfig {
+            root: self.root.clone(),
+            private_staging: self.staging.clone(),
+            registry: self.registry.clone(),
+            rights: Box::new(PermitRights),
+            coverage: Box::new(PassCoverage),
+            lineage: Box::new(EmptyLineage),
+            policy: VerifierResourcePolicy {
+                max_manifest_bytes: 1_000_000,
+                max_sidecar_bytes: 4_096,
+                max_artifact_count: 16,
+                max_stored_bytes: 2_000_000,
+                max_expanded_bytes: 2_000_000,
+                max_total_expanded_bytes: 8_000_000,
+                max_record_bytes: 512,
+                max_record_count: 64,
+                max_json_nesting: 8,
+                max_decompression_budget: 2_000_000,
+                max_temp_disk_bytes: 8_000_000,
+                max_open_file_descriptors: 16,
+            },
+            verifier_commit: "b16-test-commit".to_owned(),
+        })
+        .with_test_profile_resolver(self.resolver.clone())
+        .with_stage_observer(observer)
+        .verify_release_streaming(&self.locator(), &self.request)
+    }
+}
+
+fn multi_artifact_fixture(
+    artifacts: usize,
+    records_each: usize,
+    max_artifacts: u64,
+    max_concurrent_artifacts: u32,
+) -> Result<Fixture, Box<dyn Error>> {
+    let mut fixture = Fixture::new("none", records_each)?;
+    let mut ordered = Vec::new();
+    ordered.extend_from_slice(&fixture.expanded);
+    let first = fixture.manifest.artifacts[0].clone();
+    let mut descriptors = vec![first];
+    for shard in 1..artifacts {
+        let records = abstract_records(records_each);
+        let expanded = encode_records(&records)?;
+        let stored = compress(&expanded, "none")?;
+        let component = format!("records-{shard}.jsonl");
+        fs::write(
+            fixture.release_dir().join("artifacts").join(&component),
+            &stored,
+        )?;
+        let mut descriptor = fixture.manifest.artifacts[0].clone();
+        descriptor.shard_ordinal = shard as u32;
+        descriptor.path = format!("artifacts/{component}");
+        descriptor.stored_bytes = stored.len() as u64;
+        descriptor.stored_sha256 = hex_digest(&sha256_bytes(&stored));
+        descriptor.uncompressed_bytes = expanded.len() as u64;
+        descriptor.uncompressed_sha256 = hex_digest(&sha256_bytes(&expanded));
+        descriptor.record_count = records.len() as u64;
+        descriptors.push(descriptor);
+        ordered.extend_from_slice(&expanded);
+    }
+    fixture.manifest.artifacts = descriptors;
+    fixture.manifest.digests.data_sha256 = hex_digest(&sha256_bytes(&ordered));
+    fixture.request.data_sha256 = fixture.manifest.digests.data_sha256.clone();
+    fixture.resign()?;
+    fixture.write_all()?;
+    let mut limits = test_limits();
+    limits.max_artifacts = max_artifacts;
+    limits.max_concurrent_artifacts = max_concurrent_artifacts;
+    limits.max_open_file_descriptors = 64;
+    fixture.resolver = resolver_with_limits(limits)?;
+    Ok(fixture)
 }
 
 fn manifest(compression: &str, stored: &[u8], expanded: &[u8], count: u64) -> ReleaseManifest {
@@ -1053,6 +1132,94 @@ fn first_refusal_wins_over_rights_refusal() -> Result<(), Box<dyn Error>> {
         refusal.refusal.code(),
         "REJECT_ARTIFACT_DIGESTS",
         "stage five refusal precedes stage six"
+    );
+    Ok(())
+}
+
+#[test]
+fn four_artifacts_pass_the_count_gate_with_one_flight_slot() -> Result<(), Box<dyn Error>> {
+    let fixture = multi_artifact_fixture(4, 3, 4, 1)?;
+    let receipt = fixture.verify()?;
+    assert_eq!(
+        receipt.artifact_set().len(),
+        4,
+        "four declared artifacts were verified sequentially"
+    );
+    assert_eq!(
+        receipt.data_sha256(),
+        fixture.manifest.digests.data_sha256,
+        "the ordered dataset digest binds all four streams"
+    );
+    assert_eq!(
+        fs::read_dir(&fixture.staging)?.count(),
+        6,
+        "four artifact files and two metadata files are staged"
+    );
+    Ok(())
+}
+
+#[test]
+fn a_fifth_artifact_is_refused_by_the_total_count_bound() -> Result<(), Box<dyn Error>> {
+    let fixture = multi_artifact_fixture(5, 3, 4, 4)?;
+    let refusal = fixture.verify().unwrap_err();
+    assert!(
+        matches!(
+            &refusal.refusal,
+            release_verifier::VerifierError::ResourceLimit { limit } if limit == "max_artifacts"
+        ),
+        "the refusal names the total artifact bound"
+    );
+    assert_eq!(
+        refusal.refusal.stage(),
+        5,
+        "the total count refusal stays at stage five"
+    );
+    assert_eq!(
+        fs::read_dir(&fixture.staging)?.count(),
+        0,
+        "cleanup removes the partial snapshot"
+    );
+    Ok(())
+}
+
+#[test]
+fn four_artifacts_with_one_slot_keep_the_stage_six_rights_refusal() -> Result<(), Box<dyn Error>> {
+    let fixture = multi_artifact_fixture(4, 3, 4, 1)?;
+    let refusal = fixture
+        .verify_with(Box::new(UnknownRights), fixture.resolver.clone())
+        .unwrap_err();
+    assert_eq!(
+        refusal.refusal.stage(),
+        6,
+        "rights still refuses at stage six after four artifacts"
+    );
+    assert!(
+        matches!(&refusal.cleanup, Some(box_report) if matches!(&**box_report, CleanupDisposition::Completed(report) if report.is_complete())),
+        "cleanup completed after the multi-artifact rights refusal"
+    );
+    assert_eq!(
+        fs::read_dir(&fixture.staging)?.count(),
+        0,
+        "no snapshot survives the rights refusal"
+    );
+    Ok(())
+}
+
+#[test]
+fn four_artifacts_with_one_slot_complete_all_twelve_stages() -> Result<(), Box<dyn Error>> {
+    let fixture = multi_artifact_fixture(4, 3, 4, 1)?;
+    let observed = Rc::new(RefCell::new(Vec::new()));
+    let sink = Rc::clone(&observed);
+    let receipt = fixture.verify_observing(move |stage| sink.borrow_mut().push(stage))?;
+    assert_eq!(
+        *observed.borrow(),
+        (1_u8..=12).collect::<Vec<u8>>(),
+        "twelve stages completed in order with one flight slot"
+    );
+    assert_eq!(
+        receipt.artifact_set().len(),
+        4,
+        "all four bindings reached the receipt"
     );
     Ok(())
 }

@@ -83,6 +83,8 @@ pub use trust::TrustedKeyEntry;
 pub use trust::TrustedKeyRegistry;
 pub use trust::VerifierResourcePolicy;
 pub use verifier::CleanupDisposition;
+pub use verifier::InFlightArtifacts;
+pub use verifier::InFlightSlotError;
 pub use verifier::RefusalDiagnostic;
 pub use verifier::ReleaseLocator;
 pub use verifier::ReleaseVerifier;
