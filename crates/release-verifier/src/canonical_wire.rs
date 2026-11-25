@@ -1399,8 +1399,12 @@ pub struct ParsedManifest {
     pub manifest: CanonicalManifest,
     /// Artifact order profiles keyed by declared artifact path.
     pub profiles: HashMap<String, ArtifactRecordOrderProfile>,
-    /// Registered event types keyed from the payload schema registry.
-    pub event_types: HashSet<String>,
+    /// Publisher-declared payload schemas keyed by event type.
+    ///
+    /// These are untrusted declarations from the manifest. Stage five compares
+    /// each declaration with the locally installed registry before it accepts a
+    /// record; membership alone does not satisfy D6.
+    pub declared_payload_schemas: HashMap<String, crate::payload_registry::DeclaredPayloadSchema>,
 }
 
 fn classify_json_error(error: serde_json::Error) -> CanonicalError {
@@ -1424,16 +1428,21 @@ pub fn parse_manifest(value: &Value) -> Result<ParsedManifest, CanonicalError> {
             descriptor.record_order_profile.clone(),
         );
     }
-    let event_types = manifest
+    let declared_payload_schemas = manifest
         .schema_versions
         .payload_schemas
         .iter()
-        .map(|entry| entry.event_type.as_str().to_owned())
+        .map(|entry| {
+            (
+                entry.event_type.as_str().to_owned(),
+                crate::payload_registry::DeclaredPayloadSchema::from_wire(entry),
+            )
+        })
         .collect();
     Ok(ParsedManifest {
         manifest,
         profiles,
-        event_types,
+        declared_payload_schemas,
     })
 }
 

@@ -19,6 +19,9 @@ use crate::files::parse_hex_lower;
 use crate::jcs::canonical_bytes;
 use crate::jcs::json_depth;
 use crate::jcs::parse_strict;
+use crate::payload_registry::DeclaredPayloadSchema;
+use crate::payload_registry::PayloadRegistryError;
+use crate::payload_registry::PayloadSchemaRegistry;
 use crate::resource_profile::EffectiveLimits;
 use crate::schema::ArtifactDescriptor;
 use crate::schema::ReleaseRecord;
@@ -27,7 +30,6 @@ use sha2::Digest;
 use sha2::Sha256;
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::collections::HashSet;
 use std::io::Read;
 use std::io::Write;
 use std::rc::Rc;
@@ -401,8 +403,10 @@ pub(crate) enum RecordMode<'a> {
     Canonical {
         /// Artifact order profiles keyed by declared artifact path.
         profiles: &'a HashMap<String, ArtifactRecordOrderProfile>,
-        /// Registered event type tokens.
-        event_types: &'a HashSet<String>,
+        /// Untrusted per-event declarations carried by the manifest.
+        declared_schemas: &'a HashMap<String, DeclaredPayloadSchema>,
+        /// Locally installed registry verified before this artifact is read.
+        registry: &'a PayloadSchemaRegistry,
     },
     /// Internal record shape retained for the compatibility adapter.
     Internal,
@@ -436,7 +440,8 @@ impl RecordSink for OneRecordParser<'_> {
         let key = match self.mode {
             RecordMode::Canonical {
                 profiles,
-                event_types,
+                declared_schemas,
+                registry,
             } => {
                 let profile =
                     profiles
@@ -453,11 +458,21 @@ impl RecordSink for OneRecordParser<'_> {
                         detail: "record envelope version differs from the manifest".to_owned(),
                     });
                 }
-                if !event_types.contains(record.event_type.as_str()) {
-                    return Err(VerifierError::PayloadRegistry {
-                        detail: "record event type is absent from the payload registry".to_owned(),
-                    });
-                }
+                let declared = declared_schemas
+                    .get(record.event_type.as_str())
+                    .ok_or_else(|| {
+                        PayloadRegistryError::UnknownEvent {
+                            event_type: record.event_type.as_str().to_owned(),
+                        }
+                        .into_verifier_error()
+                    })?;
+                crate::payload_registry::validate_record(
+                    registry,
+                    record.event_type.as_str(),
+                    declared,
+                    &record.payload,
+                )
+                .map_err(PayloadRegistryError::into_verifier_error)?;
                 key
             }
             RecordMode::Internal => {
@@ -794,6 +809,15 @@ mod tests {
     }
 
     fn canonical_line(event_type: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        canonical_line_with(event_type, "abstract-field", "string", "abstract-value")
+    }
+
+    fn canonical_line_with(
+        event_type: &str,
+        field_name: &str,
+        kind: &str,
+        value: &str,
+    ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
         let value = json!({
             "envelope_schema_version": "envelope-1",
             "event_type": event_type,
@@ -805,11 +829,84 @@ mod tests {
             },
             "payload": {
                 "fields": [
-                    {"field_name": "abstract-field", "kind": "string", "value": "abstract-value"}
+                    {"field_name": field_name, "kind": kind, "value": value}
                 ]
             }
         });
         Ok(canonical_bytes(&value))
+    }
+
+    fn canonical_registry() -> Result<PayloadSchemaRegistry, Box<dyn std::error::Error>> {
+        let bytes = crate::payload_registry::structural_schema_bytes(
+            "registered-event",
+            &[("abstract-field", "string")],
+        )?;
+        let schema = crate::payload_registry::LocalSchemaInput::seal(
+            "registered-event".to_owned(),
+            "payload-example".to_owned(),
+            "1".to_owned(),
+            "structural-v1".to_owned(),
+            bytes,
+        );
+        let input = crate::payload_registry::PayloadRegistryInput::seal(
+            "test-only-payload-registry".to_owned(),
+            "nirnay-payload-registry-v1".to_owned(),
+            vec![schema],
+        );
+        Ok(PayloadSchemaRegistry::load(&input)?)
+    }
+
+    fn canonical_declarations(
+        registry: &PayloadSchemaRegistry,
+    ) -> HashMap<String, DeclaredPayloadSchema> {
+        registry
+            .schemas()
+            .iter()
+            .map(|schema| {
+                (
+                    schema.event_type().to_owned(),
+                    DeclaredPayloadSchema {
+                        event_type: schema.event_type().to_owned(),
+                        schema_id: schema.schema_id().to_owned(),
+                        schema_version: schema.schema_version().to_owned(),
+                        schema_bytes_digest: schema.schema_bytes_digest().to_owned(),
+                    },
+                )
+            })
+            .collect()
+    }
+
+    fn accept_canonical_line(
+        line: &[u8],
+        registry: &PayloadSchemaRegistry,
+        declared: &HashMap<String, DeclaredPayloadSchema>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let limits = effective()?;
+        let profiles = canonical_profiles()?;
+        let mode = RecordMode::Canonical {
+            profiles: &profiles,
+            declared_schemas: declared,
+            registry,
+        };
+        let mut state = ArtifactState {
+            stored_digest: [0_u8; 32],
+            expanded_digest: [0_u8; 32],
+            stored_bytes: 0,
+            expanded_bytes: 0,
+            record_count: 0,
+            previous_key: None,
+            envelope_agrees: false,
+        };
+        let mut parser = OneRecordParser {
+            mode: &mode,
+            limits: &limits,
+            artifact_path: "artifacts/records.jsonl",
+            order_profile: "sequence-domain-strict",
+            expected_envelope: "envelope-1",
+            state: &mut state,
+        };
+        parser.accept(line, 1)?;
+        Ok(())
     }
 
     fn canonical_profiles()
@@ -829,32 +926,13 @@ mod tests {
     #[test]
     fn canonical_registry_miss_is_a_stage_five_typed_refusal()
     -> Result<(), Box<dyn std::error::Error>> {
-        let limits = effective()?;
-        let profiles = canonical_profiles()?;
-        let event_types = HashSet::new();
-        let mode = RecordMode::Canonical {
-            profiles: &profiles,
-            event_types: &event_types,
-        };
-        let mut state = ArtifactState {
-            stored_digest: [0_u8; 32],
-            expanded_digest: [0_u8; 32],
-            stored_bytes: 0,
-            expanded_bytes: 0,
-            record_count: 0,
-            previous_key: None,
-            envelope_agrees: false,
-        };
-        let mut parser = OneRecordParser {
-            mode: &mode,
-            limits: &limits,
-            artifact_path: "artifacts/records.jsonl",
-            order_profile: "sequence-domain-strict",
-            expected_envelope: "envelope-1",
-            state: &mut state,
-        };
+        let registry = canonical_registry()?;
+        let declared = canonical_declarations(&registry);
         let line = canonical_line("unregistered-event")?;
-        let refusal = parser.accept(&line, 1).unwrap_err();
+        let refusal = accept_canonical_line(&line, &registry, &declared).unwrap_err();
+        let refusal = refusal
+            .downcast_ref::<VerifierError>()
+            .ok_or("registry miss must surface as a verifier refusal")?;
         assert_eq!(
             refusal.code(),
             "REJECT_PAYLOAD_REGISTRY",
@@ -870,36 +948,105 @@ mod tests {
 
     #[test]
     fn canonical_registry_hit_is_accepted() -> Result<(), Box<dyn std::error::Error>> {
-        let limits = effective()?;
-        let profiles = canonical_profiles()?;
-        let event_types: HashSet<String> = ["registered-event".to_owned()].into_iter().collect();
-        let mode = RecordMode::Canonical {
-            profiles: &profiles,
-            event_types: &event_types,
-        };
-        let mut state = ArtifactState {
-            stored_digest: [0_u8; 32],
-            expanded_digest: [0_u8; 32],
-            stored_bytes: 0,
-            expanded_bytes: 0,
-            record_count: 0,
-            previous_key: None,
-            envelope_agrees: false,
-        };
-        let mut parser = OneRecordParser {
-            mode: &mode,
-            limits: &limits,
-            artifact_path: "artifacts/records.jsonl",
-            order_profile: "sequence-domain-strict",
-            expected_envelope: "envelope-1",
-            state: &mut state,
-        };
+        let registry = canonical_registry()?;
+        let declared = canonical_declarations(&registry);
         let line = canonical_line("registered-event")?;
-        parser.accept(&line, 1)?;
-        assert!(
-            state.envelope_agrees,
-            "a registry hit updates the aggregate flag"
+        accept_canonical_line(&line, &registry, &declared)?;
+        Ok(())
+    }
+
+    fn declared_mutation<F>(
+        registry: &PayloadSchemaRegistry,
+        change: F,
+    ) -> HashMap<String, DeclaredPayloadSchema>
+    where
+        F: FnOnce(&mut DeclaredPayloadSchema),
+    {
+        let mut declared = canonical_declarations(registry);
+        if let Some(entry) = declared.get_mut("registered-event") {
+            change(entry);
+        }
+        declared
+    }
+
+    #[test]
+    fn wrong_declared_schema_id_is_a_stage_five_refusal() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let registry = canonical_registry()?;
+        let declared = declared_mutation(&registry, |entry| {
+            entry.schema_id = "not-installed".to_owned();
+        });
+        let line = canonical_line("registered-event")?;
+        let refusal = accept_canonical_line(&line, &registry, &declared).unwrap_err();
+        let refusal = refusal
+            .downcast_ref::<VerifierError>()
+            .ok_or("schema identity mismatch must surface as a verifier refusal")?;
+        assert_eq!(
+            refusal.code(),
+            "REJECT_PAYLOAD_REGISTRY",
+            "typed refusal code is stable"
         );
+        assert_eq!(refusal.stage(), 5, "refusal is raised at stage five");
+        Ok(())
+    }
+
+    #[test]
+    fn wrong_declared_schema_version_is_a_stage_five_refusal()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let registry = canonical_registry()?;
+        let declared = declared_mutation(&registry, |entry| {
+            entry.schema_version = "2".to_owned();
+        });
+        let line = canonical_line("registered-event")?;
+        let refusal = accept_canonical_line(&line, &registry, &declared).unwrap_err();
+        let refusal = refusal
+            .downcast_ref::<VerifierError>()
+            .ok_or("schema version mismatch must surface as a verifier refusal")?;
+        assert_eq!(
+            refusal.code(),
+            "REJECT_PAYLOAD_REGISTRY",
+            "typed refusal code is stable"
+        );
+        assert_eq!(refusal.stage(), 5, "refusal is raised at stage five");
+        Ok(())
+    }
+
+    #[test]
+    fn wrong_declared_digest_is_a_stage_five_refusal() -> Result<(), Box<dyn std::error::Error>> {
+        let registry = canonical_registry()?;
+        let declared = declared_mutation(&registry, |entry| {
+            entry.schema_bytes_digest = "0".repeat(64);
+        });
+        let line = canonical_line("registered-event")?;
+        let refusal = accept_canonical_line(&line, &registry, &declared).unwrap_err();
+        let refusal = refusal
+            .downcast_ref::<VerifierError>()
+            .ok_or("schema digest mismatch must surface as a verifier refusal")?;
+        assert_eq!(
+            refusal.code(),
+            "REJECT_PAYLOAD_REGISTRY",
+            "typed refusal code is stable"
+        );
+        assert_eq!(refusal.stage(), 5, "refusal is raised at stage five");
+        Ok(())
+    }
+
+    #[test]
+    fn valid_declaration_with_invalid_payload_is_a_stage_five_refusal()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let registry = canonical_registry()?;
+        let declared = canonical_declarations(&registry);
+        let line = canonical_line_with("registered-event", "abstract-field", "boolean", "true")?;
+        let refusal = accept_canonical_line(&line, &registry, &declared).unwrap_err();
+        let refusal = refusal
+            .downcast_ref::<VerifierError>()
+            .ok_or("payload mismatch must surface as a verifier refusal")?;
+        assert_eq!(
+            refusal.code(),
+            "REJECT_PAYLOAD_REGISTRY",
+            "typed refusal code is stable"
+        );
+        assert_eq!(refusal.stage(), 5, "refusal is raised at stage five");
         Ok(())
     }
 
