@@ -8,7 +8,7 @@ complementary platform under `engineering/architecture/decisions/ADR-0001-data-o
 **Release status:** research/paper engineering candidate. This repository is not a certified broker-connected trading system, not a SEBI/exchange-approved algo product, and not evidence of profitable alpha. Live order routing is hard-disabled. Every capability statement below distinguishes code present from external verification still required.
 
 <!-- CURRENT-STATE
-code_commit: acd47ddf6123be04c24d9006c5edca0e096d6d3e
+code_commit: 8a9cdcf1026ba3fd052cd76138277a573512eb59
 verified_on: 2026-11-21
 ci_run: 45062286601
 scope: make check + hosted CI 45062286601 on f250fee (12/12); active suite 352 passed, 90 market-shaped-fixture tests deselected under owner directive
