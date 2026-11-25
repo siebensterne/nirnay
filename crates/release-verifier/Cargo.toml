@@ -6,6 +6,17 @@ license.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 description = "Independent Nirnay verifier for immutable NDC v2 release packages"
+# The B16 acceptance harness runs inside the crate so it can use crate-private
+# test profiles. It is included from `src/lib.rs` under `cfg(test)`.
+autotests = false
+
+[[test]]
+name = "verifier"
+path = "tests/verifier.rs"
+
+[[test]]
+name = "canonical_wire"
+path = "tests/canonical_wire.rs"
 
 [dependencies]
 base64.workspace = true

@@ -176,6 +176,12 @@ pub enum VerifierError {
         /// Profile-level detail without raw limits or caller declarations.
         detail: String,
     },
+    /// The trusted local registry approved no profile for the required role.
+    #[error("REJECT_RESOURCE_LIMIT: no approved resource profile for role {role}")]
+    NoApprovedProfile {
+        /// Role with no approved binding.
+        role: String,
+    },
     /// A record envelope version differs from the manifest at detection.
     #[error("REJECT_SCHEMA_ENVELOPE: stage 5 record envelope version mismatch: {detail}")]
     EnvelopeVersion {
@@ -295,7 +301,9 @@ impl VerifierError {
             | Self::RecordCount
             | Self::RecordOrder { .. }
             | Self::Decompression { .. } => "REJECT_ARTIFACT_DIGESTS",
-            Self::ResourceLimit { .. } | Self::ResourceProfile { .. } => "REJECT_RESOURCE_LIMIT",
+            Self::ResourceLimit { .. }
+            | Self::ResourceProfile { .. }
+            | Self::NoApprovedProfile { .. } => "REJECT_RESOURCE_LIMIT",
             Self::Io { .. } => "REJECT_IO",
             Self::CleanupPending(..) => "CLEANUP_PENDING",
             Self::RightsNotPermitted | Self::ProducerActivity { .. } => "REJECT_RIGHTS_EVIDENCE",
@@ -344,6 +352,7 @@ impl VerifierError {
             | Self::Io { .. }
             | Self::ResourceLimit { .. }
             | Self::ResourceProfile { .. }
+            | Self::NoApprovedProfile { .. }
             | Self::EnvelopeVersion { .. }
             | Self::PayloadRegistry { .. }
             | Self::CleanupPending(..) => 5,

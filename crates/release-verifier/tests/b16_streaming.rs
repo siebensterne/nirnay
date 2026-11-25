@@ -14,19 +14,19 @@ use flate2::Compression;
 use flate2::write::GzEncoder;
 use release_verifier::AdmissionReceipt;
 use release_verifier::AdmissionRequest;
+use release_verifier::ApprovedProfileRegistry;
 use release_verifier::CleanupDisposition;
 use release_verifier::Decision;
 use release_verifier::KeyState;
 use release_verifier::LimitsInput;
 use release_verifier::LineageResolver;
 use release_verifier::ProcessingRole;
+use release_verifier::ProfileResolver;
 use release_verifier::RefusalDiagnostic;
 use release_verifier::ReleaseLocator;
 use release_verifier::ReleaseManifest;
 use release_verifier::ReleaseVerifier;
-use release_verifier::ResourceProfile;
 use release_verifier::ResourceProfileId;
-use release_verifier::StreamingResourcePolicy;
 use release_verifier::TrustedKeyEntry;
 use release_verifier::TrustedKeyRegistry;
 use release_verifier::VerifierResourcePolicy;
@@ -105,19 +105,23 @@ fn test_limits() -> LimitsInput {
     }
 }
 
-fn profiles() -> Result<StreamingResourcePolicy, Box<dyn Error>> {
-    let input = test_limits();
-    let verifier = ResourceProfile::new(
+fn profiles() -> Result<ProfileResolver, Box<dyn Error>> {
+    resolver_with_limits(test_limits())
+}
+
+fn resolver_with_limits(input: LimitsInput) -> Result<ProfileResolver, Box<dyn Error>> {
+    let mut registry = ApprovedProfileRegistry::new();
+    registry.register_test_profile(
         ResourceProfileId::new("TEST_ONLY_B16_VERIFIER_V1", 1)?,
         ProcessingRole::Verifier,
         input,
     )?;
-    let snapshot = ResourceProfile::new(
+    registry.register_test_profile(
         ResourceProfileId::new("TEST_ONLY_B16_SNAPSHOT_V1", 1)?,
         ProcessingRole::Snapshot,
         input,
     )?;
-    Ok(StreamingResourcePolicy::new(input, verifier, snapshot)?)
+    Ok(ProfileResolver::new(registry))
 }
 
 fn abstract_records(count: usize) -> Vec<ReleaseRecord> {
@@ -198,7 +202,7 @@ struct Fixture {
     sidecar_bytes: Vec<u8>,
     stored: Vec<u8>,
     expanded: Vec<u8>,
-    policy: StreamingResourcePolicy,
+    resolver: ProfileResolver,
 }
 
 impl Fixture {
@@ -236,7 +240,7 @@ impl Fixture {
             sidecar_bytes: Vec::new(),
             stored,
             expanded,
-            policy: profiles()?,
+            resolver: profiles()?,
         };
         fixture.resign()?;
         fixture.write_all()?;
@@ -319,7 +323,7 @@ impl Fixture {
     }
 
     fn verify(&self) -> Result<AdmissionReceipt, RefusalDiagnostic> {
-        self.verify_with(Box::new(PermitRights), &self.policy)
+        self.verify_with(Box::new(PermitRights), self.resolver.clone())
     }
     fn verify_production(&self) -> Result<AdmissionReceipt, RefusalDiagnostic> {
         self.clean_staging().ok();
@@ -346,13 +350,13 @@ impl Fixture {
             },
             verifier_commit: "b16-test-commit".to_owned(),
         })
-        .verify_release_streaming(&self.locator(), &self.request, &self.policy)
+        .verify_release_streaming(&self.locator(), &self.request)
     }
 
     fn verify_with(
         &self,
         rights: Box<dyn RightsEvaluator>,
-        policy: &StreamingResourcePolicy,
+        resolver: ProfileResolver,
     ) -> Result<AdmissionReceipt, RefusalDiagnostic> {
         self.clean_staging().ok();
         ReleaseVerifier::new(release_verifier::VerifierConfig {
@@ -378,8 +382,8 @@ impl Fixture {
             },
             verifier_commit: "b16-test-commit".to_owned(),
         })
-        .with_test_only_profiles()
-        .verify_release_streaming(&self.locator(), &self.request, policy)
+        .with_test_profile_resolver(resolver)
+        .verify_release_streaming(&self.locator(), &self.request)
     }
 }
 
@@ -654,19 +658,19 @@ fn high_expansion_is_refused_during_decode() -> Result<(), Box<dyn Error>> {
     strict.max_expanded_bytes_per_artifact = 64;
     strict.codec_window_bytes = 32;
     strict.io_chunk_bytes = 8;
-    let verifier = ResourceProfile::new(
+    let mut registry = ApprovedProfileRegistry::new();
+    registry.register_test_profile(
         ResourceProfileId::new("TEST_ONLY_B16_VERIFIER_TIGHT", 1)?,
         ProcessingRole::Verifier,
         strict,
     )?;
-    let snapshot = ResourceProfile::new(
+    registry.register_test_profile(
         ResourceProfileId::new("TEST_ONLY_B16_SNAPSHOT_TIGHT", 1)?,
         ProcessingRole::Snapshot,
         strict,
     )?;
-    let policy = StreamingResourcePolicy::new(strict, verifier, snapshot)?;
     let refusal = fixture
-        .verify_with(Box::new(PermitRights), &policy)
+        .verify_with(Box::new(PermitRights), ProfileResolver::new(registry))
         .unwrap_err();
     assert_eq!(
         refusal.refusal.code(),
@@ -809,7 +813,7 @@ fn extra_artifact_is_refused_by_exact_inventory() -> Result<(), Box<dyn Error>> 
 fn rights_refusal_keeps_stage_six_and_has_no_receipt() -> Result<(), Box<dyn Error>> {
     let fixture = Fixture::new("gzip", 3)?;
     let refusal = fixture
-        .verify_with(Box::new(UnknownRights), &fixture.policy)
+        .verify_with(Box::new(UnknownRights), fixture.resolver.clone())
         .unwrap_err();
     assert_eq!(
         refusal.refusal.code(),
@@ -897,13 +901,23 @@ fn producer_declaration_cannot_raise_the_local_ceiling() -> Result<(), Box<dyn E
     generous.max_record_bytes = 65_536;
     generous.max_records_per_artifact = 1_024;
     generous.max_records_per_release = 2_048;
-    let producer = ResourceProfile::new(
+    let mut registry = ApprovedProfileRegistry::new();
+    registry.register_test_profile(
+        ResourceProfileId::new("TEST_ONLY_B16_VERIFIER_V1", 1)?,
+        ProcessingRole::Verifier,
+        test_limits(),
+    )?;
+    registry.register_test_profile(
+        ResourceProfileId::new("TEST_ONLY_B16_SNAPSHOT_V1", 1)?,
+        ProcessingRole::Snapshot,
+        test_limits(),
+    )?;
+    registry.register_test_profile(
         ResourceProfileId::new("TEST_ONLY_B16_PRODUCER_V1", 1)?,
         ProcessingRole::Producer,
         generous,
     )?;
-    let policy = profiles()?.with_producer_declaration(producer)?;
-    let receipt = fixture.verify_with(Box::new(PermitRights), &policy)?;
+    let receipt = fixture.verify_with(Box::new(PermitRights), ProfileResolver::new(registry))?;
     assert_eq!(
         receipt.artifact_set().len(),
         1,
@@ -915,19 +929,20 @@ fn producer_declaration_cannot_raise_the_local_ceiling() -> Result<(), Box<dyn E
 #[test]
 fn role_mismatch_is_refused_before_the_source_opens() -> Result<(), Box<dyn Error>> {
     let fixture = Fixture::new("none", 3)?;
-    let input = test_limits();
-    let selected = profiles()?;
-    let wrong_role = ResourceProfile::new(
+    let mut registry = ApprovedProfileRegistry::new();
+    registry.register_test_binding(
+        ProcessingRole::Producer,
         ResourceProfileId::new("TEST_ONLY_B16_SNAPSHOT_DECL_V1", 1)?,
         ProcessingRole::Snapshot,
-        input,
+        test_limits(),
     )?;
+    let resolver = ProfileResolver::new(registry);
     assert!(
         matches!(
-            selected.clone().with_producer_declaration(wrong_role),
+            resolver.resolve(ProcessingRole::Producer),
             Err(release_verifier::ProfileError::Role { .. })
         ),
-        "a non-producer declaration is refused before any source opens"
+        "a non-producer binding is refused before any source opens"
     );
     assert_eq!(
         fs::read_dir(&fixture.staging)?.count(),
@@ -961,18 +976,64 @@ fn streaming_state_is_constant_across_one_two_four_x() -> Result<(), Box<dyn Err
 }
 
 #[test]
-fn test_only_profiles_are_refused_without_harness_opt_in() -> Result<(), Box<dyn Error>> {
+fn empty_registry_refuses_before_any_filesystem_open() -> Result<(), Box<dyn Error>> {
     let fixture = Fixture::new("none", 3)?;
     let refusal = fixture.verify_production().unwrap_err();
+    assert!(
+        matches!(
+            refusal.refusal,
+            release_verifier::VerifierError::NoApprovedProfile { ref role } if role == "VERIFIER"
+        ),
+        "an empty approved registry returns a typed role refusal"
+    );
     assert_eq!(
         refusal.refusal.code(),
         "REJECT_RESOURCE_LIMIT",
-        "a production invocation fails closed on a test-only profile"
+        "stable code"
     );
     assert_eq!(
         fs::read_dir(&fixture.staging)?.count(),
         0,
         "no source was opened"
+    );
+    Ok(())
+}
+
+#[test]
+fn empty_registry_refuses_even_with_a_missing_release_root() -> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new("none", 3)?;
+    let missing = fixture.root.join("absent-trusted-root");
+    let refusal = ReleaseVerifier::new(release_verifier::VerifierConfig {
+        root: missing,
+        private_staging: fixture.staging.clone(),
+        registry: fixture.registry.clone(),
+        rights: Box::new(PermitRights),
+        coverage: Box::new(PassCoverage),
+        lineage: Box::new(EmptyLineage),
+        policy: VerifierResourcePolicy {
+            max_manifest_bytes: 1_000_000,
+            max_sidecar_bytes: 4_096,
+            max_artifact_count: 16,
+            max_stored_bytes: 2_000_000,
+            max_expanded_bytes: 2_000_000,
+            max_total_expanded_bytes: 8_000_000,
+            max_record_bytes: 512,
+            max_record_count: 64,
+            max_json_nesting: 8,
+            max_decompression_budget: 2_000_000,
+            max_temp_disk_bytes: 8_000_000,
+            max_open_file_descriptors: 16,
+        },
+        verifier_commit: "b16-test-commit".to_owned(),
+    })
+    .verify_release_streaming(&fixture.locator(), &fixture.request)
+    .unwrap_err();
+    assert!(
+        matches!(
+            refusal.refusal,
+            release_verifier::VerifierError::NoApprovedProfile { .. }
+        ),
+        "profile selection precedes the release directory open"
     );
     Ok(())
 }
@@ -986,7 +1047,7 @@ fn first_refusal_wins_over_rights_refusal() -> Result<(), Box<dyn Error>> {
     let stored = compress(&expanded, "none")?;
     fixture.set_stored(stored, expanded, 3)?;
     let refusal = fixture
-        .verify_with(Box::new(UnknownRights), &fixture.policy)
+        .verify_with(Box::new(UnknownRights), fixture.resolver.clone())
         .unwrap_err();
     assert_eq!(
         refusal.refusal.code(),

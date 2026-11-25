@@ -672,6 +672,7 @@ mod tests {
     use crate::canonical_wire::SequencedKind;
     use crate::resource_profile::LimitsInput;
     use crate::resource_profile::ProcessingRole;
+    use crate::resource_profile::ProfileLimits;
     use crate::resource_profile::ResourceProfile;
     use crate::resource_profile::ResourceProfileId;
     use crate::resource_profile::StreamingResourcePolicy;
@@ -734,7 +735,8 @@ mod tests {
             ProcessingRole::Snapshot,
             input,
         )?;
-        StreamingResourcePolicy::new(input, verifier, snapshot)?.verifier_limits()
+        StreamingResourcePolicy::new(ProfileLimits::validate(input)?, verifier, snapshot)?
+            .verifier_limits()
     }
 
     #[test]

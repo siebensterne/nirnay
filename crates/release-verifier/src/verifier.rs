@@ -26,11 +26,12 @@ use crate::files::sha256;
 use crate::jcs::canonical_bytes;
 use crate::jcs::json_depth;
 use crate::jcs::parse_strict;
+use crate::profile_resolver::ApprovedProfileRegistry;
+use crate::profile_resolver::ProfileResolver;
 use crate::receipt::AdmissionReceipt;
 use crate::receipt::ArtifactBinding;
 use crate::resource_profile::EffectiveLimits;
 use crate::resource_profile::ProfileError;
-use crate::resource_profile::StreamingResourcePolicy;
 use crate::schema::AdmissionRequest;
 use crate::schema::ArtifactDescriptor;
 use crate::schema::CoverageEvaluator;
@@ -168,6 +169,15 @@ pub struct VerifierConfig {
 }
 
 /// An independent verifier for NDC v2 release packages.
+///
+/// Profile selection is resolved locally inside the bounded streaming path. The
+/// removed test-only opt-in cannot be reached from a production API:
+///
+/// ```compile_fail
+/// use release_verifier::ReleaseVerifier;
+/// let verifier: ReleaseVerifier = todo!();
+/// let _ = verifier.with_test_only_profiles();
+/// ```
 pub struct ReleaseVerifier {
     root: PathBuf,
     private_staging: PathBuf,
@@ -177,8 +187,8 @@ pub struct ReleaseVerifier {
     lineage: Box<dyn LineageResolver>,
     policy: VerifierResourcePolicy,
     verifier_commit: String,
+    profile_resolver: ProfileResolver,
     require_canonical_wire: bool,
-    allow_test_only_profiles: bool,
     stage_observer: Option<Box<dyn Fn(u8)>>,
     canonical_profiles: RefCell<HashMap<String, ArtifactRecordOrderProfile>>,
     canonical_event_types: RefCell<HashSet<String>>,
@@ -196,8 +206,8 @@ impl ReleaseVerifier {
             lineage: config.lineage,
             policy: config.policy,
             verifier_commit: config.verifier_commit,
+            profile_resolver: ProfileResolver::new(ApprovedProfileRegistry::new()),
             require_canonical_wire: false,
-            allow_test_only_profiles: false,
             stage_observer: None,
             canonical_profiles: RefCell::new(HashMap::new()),
             canonical_event_types: RefCell::new(HashSet::new()),
@@ -214,13 +224,13 @@ impl ReleaseVerifier {
         self
     }
 
-    /// Permit finite `TEST_ONLY` profiles in a streaming test harness.
+    /// Bind a resolver with finite `TEST_ONLY` profiles for a test harness.
     ///
-    /// A test-only profile carries no production authority and satisfies no
-    /// capability gate. Production invocations leave this option unset and
-    /// fail closed when a selected identifier is marked `TEST_ONLY`.
-    pub fn with_test_only_profiles(mut self) -> Self {
-        self.allow_test_only_profiles = true;
+    /// This builder exists only in `cfg(test)` builds. A production verifier
+    /// keeps its empty local registry and fails closed before opening a source.
+    #[cfg(test)]
+    pub(crate) fn with_test_profile_resolver(mut self, resolver: ProfileResolver) -> Self {
+        self.profile_resolver = resolver;
         self
     }
 
@@ -274,20 +284,20 @@ impl ReleaseVerifier {
 
     /// Verify a release through the ratified bounded streaming path.
     ///
-    /// The profile selection is supplied by trusted local policy. No producer
-    /// declaration can raise a local allowance. The twelve stages, first
-    /// refusal and cleanup contract are unchanged. This entry point is the only
-    /// streaming path; the two existing public verifiers keep their signatures
-    /// and their caller-policy behavior.
+    /// The trusted local resolver supplies the profile selection before any
+    /// source is opened. An empty approved registry returns a typed
+    /// `NoApprovedProfile` refusal. No producer declaration can raise a local
+    /// allowance. The twelve stages, first refusal and cleanup contract are
+    /// unchanged. This entry point is the only streaming path; the two existing
+    /// public verifiers keep their signatures and their caller-policy behavior.
     pub fn verify_release_streaming(
         &self,
         locator: &ReleaseLocator,
         request: &AdmissionRequest,
-        policy: &StreamingResourcePolicy,
     ) -> Result<AdmissionReceipt, RefusalDiagnostic> {
         self.canonical_profiles.borrow_mut().clear();
         self.canonical_event_types.borrow_mut().clear();
-        self.run_stages_streaming(locator, request, policy)
+        self.run_stages_streaming(locator, request)
             .map_err(|failure| {
                 let (refusal, cleanup) = *failure;
                 RefusalDiagnostic {
@@ -301,19 +311,12 @@ impl ReleaseVerifier {
         &self,
         locator: &ReleaseLocator,
         request: &AdmissionRequest,
-        policy: &StreamingResourcePolicy,
     ) -> PipelineResult<AdmissionReceipt> {
-        if !self.allow_test_only_profiles
-            && (policy.verifier_profile().id().is_test_only()
-                || policy.snapshot_profile().id().is_test_only())
-        {
-            return Err(Box::new((
-                VerifierError::ResourceProfile {
-                    detail: "test-only profile in a production invocation".to_owned(),
-                },
-                None,
-            )));
-        }
+        let policy = no_cleanup(
+            self.profile_resolver
+                .streaming_policy()
+                .map_err(ProfileError::into_verifier_error),
+        )?;
         let verifier_limits = no_cleanup(
             policy
                 .verifier_limits()
