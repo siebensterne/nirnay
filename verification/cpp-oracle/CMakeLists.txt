@@ -27,15 +27,15 @@ add_library(nirnay_numeric_oracle STATIC
     src/numeric.cpp
 )
 target_include_directories(nirnay_numeric_oracle PUBLIC src)
-target_compile_options(nirnay_numeric_oracle PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(nirnay_numeric_oracle PRIVATE siebensterne_strict_flags)
 
 enable_testing()
 add_executable(nirnay_numeric_oracle_test tests/numeric_orderbook_test.cpp)
 target_link_libraries(nirnay_numeric_oracle_test PRIVATE nirnay_numeric_oracle)
-target_compile_options(nirnay_numeric_oracle_test PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(nirnay_numeric_oracle_test PRIVATE siebensterne_strict_flags)
 add_test(NAME numeric_orderbook_oracle COMMAND nirnay_numeric_oracle_test)
 
 # Pure numeric differential driver; no market-state corpus is consumed.
 add_executable(nirnay_numeric_driver src/numeric_driver.cpp)
 target_link_libraries(nirnay_numeric_driver PRIVATE nirnay_numeric_oracle)
-target_compile_options(nirnay_numeric_driver PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(nirnay_numeric_driver PRIVATE siebensterne_strict_flags)

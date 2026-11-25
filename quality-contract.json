@@ -6,7 +6,12 @@
     "pyink": "26.5.1",
     "shellcheck": "0.11.0.1",
     "rust": "1.99.1",
-    "clang_format": "21.1.8"
+    "clang_format": "21.1.8",
+    "cmake": "3.25",
+    "ninja": "1.11",
+    "clang_tidy": "21.1.8",
+    "pre_commit": "4.0.0",
+    "pre_commit_hooks": "v6.0.0"
   },
   "shared_files": [
     ".clang-format",
@@ -16,7 +21,12 @@
     ".shellcheckrc",
     "ruff.toml",
     "quality-contract.json",
-    "scripts/check_prose_unified.py"
+    "scripts/check_prose_unified.py",
+    ".clang-tidy",
+    ".pre-commit-config.yaml",
+    "CMakeLists.txt",
+    "CMakePresets.json",
+    "q-style.json"
   ],
   "repo_local_files": [
     {
