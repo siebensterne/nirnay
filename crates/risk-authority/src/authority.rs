@@ -310,7 +310,14 @@ pub struct DailyPnlSnapshot {
     pub fx_paise: i64,
     pub reconciliation_status: ReconciliationStatus,
     pub as_of_ns: i64,
+    /// Evidence value for the newest mark only. Freshness at evaluation is
+    /// enforced per instrument through `valuation_as_of_ns_by_instrument`.
     pub valuations_as_of_ns: i64,
+    /// Timestamp of every valuation mark used to derive this snapshot, keyed by
+    /// instrument. Every entry is re-checked for freshness before the snapshot
+    /// may feed the daily-loss limit; no single newest mark can mask a stale
+    /// one.
+    pub valuation_as_of_ns_by_instrument: BTreeMap<InstrumentId, i64>,
 }
 
 impl DailyPnlSnapshot {
@@ -363,6 +370,10 @@ pub struct DailyPnlRecord {
     pub fx_paise: i64,
     pub reconciliation_status: ReconciliationStatus,
     pub as_of_ns: i64,
+    /// Digest of the verified account-journal prefix that precedes this
+    /// business date. It binds the opening state so the daily result cannot
+    /// silently absorb an earlier business date's effects.
+    pub opening_checkpoint_digest: String,
 }
 
 impl DailyPnlRecord {
@@ -399,7 +410,16 @@ impl DailyPnlRecord {
             fx_paise: 0,
             reconciliation_status: ReconciliationStatus::Matched,
             as_of_ns,
+            opening_checkpoint_digest: GENESIS_DIGEST.to_owned(),
         }
+    }
+
+    /// Bind this record to the verified journal prefix that opens its business
+    /// date. A genesis checkpoint means the period is the first in its journal.
+    #[must_use]
+    pub fn with_opening_checkpoint(mut self, digest: String) -> Self {
+        self.opening_checkpoint_digest = digest;
+        self
     }
 
     #[must_use]
@@ -485,6 +505,7 @@ impl ChainedRecord for DailyPnlRecord {
             "fx_paise": self.fx_paise,
             "reconciliation_status": self.reconciliation_status,
             "as_of_ns": self.as_of_ns,
+            "opening_checkpoint_digest": self.opening_checkpoint_digest,
         })
         .to_string()
     }
@@ -614,19 +635,27 @@ struct AccountPnl {
     fx: Paise,
 }
 
-/// Sum the signed money effects carried by the sealed account journal. No
-/// figure is read from an owner summary: every component is a record field
-/// covered by the journal's sequence and digest chain.
+/// Sum only the declared business period's signed money effects from the
+/// continuous, chain-verified account journal, and return the digest of the
+/// verified opening prefix that precedes that period. No figure is read from
+/// an owner summary: every component and every event timestamp is covered by
+/// the journal's sequence and digest chain. Business-date assignment uses the
+/// owner's half-open calendar window, never the authority's wall clock.
 fn derive_account_pnl(
     records: &[AccountRecoveryRecord],
     expected_account: AccountId,
-) -> Result<AccountPnl, DailyPnlError> {
+    calendar: &DailyPnlCalendar,
+) -> Result<(AccountPnl, String), DailyPnlError> {
     let mut pnl = AccountPnl {
         realized: Paise(0),
         fees: Paise(0),
         funding: Paise(0),
         fx: Paise(0),
     };
+    let mut opening_checkpoint = GENESIS_DIGEST.to_owned();
+    // 0 = before the period, 1 = inside it, 2 = after it. A later record may
+    // never be dated into an earlier phase, so the checkpoint is a true prefix.
+    let mut phase = 0_u8;
     for record in records {
         if record.schema_version != 1 {
             return Err(DailyPnlError::UnsupportedSchema(record.schema_version));
@@ -638,6 +667,26 @@ fn derive_account_pnl(
             return Err(DailyPnlError::Contradictory(
                 "account journal fees must be non-negative".to_owned(),
             ));
+        }
+        let record_phase = if record.event_at_ns < calendar.day_start_ns {
+            0
+        } else if record.event_at_ns < calendar.next_day_start_ns {
+            1
+        } else {
+            2
+        };
+        if record_phase < phase {
+            return Err(DailyPnlError::Contradictory(
+                "account journal events are not ordered by business date".to_owned(),
+            ));
+        }
+        phase = record_phase;
+        if record_phase == 0 {
+            opening_checkpoint = record.digest.clone();
+            continue;
+        }
+        if record_phase == 2 {
+            continue;
         }
         pnl.realized = pnl
             .realized
@@ -656,7 +705,7 @@ fn derive_account_pnl(
             .checked_add(Paise(record.fx_paise))
             .map_err(|_| DailyPnlError::Overflow)?;
     }
-    Ok(pnl)
+    Ok((pnl, opening_checkpoint))
 }
 
 fn check_pnl_freshness(
@@ -675,20 +724,27 @@ fn check_pnl_freshness(
     Ok(())
 }
 
-/// Recompute unrealized P&L from sealed marks and per-unit cost bases. Each
-/// valuation must match the authoritative position exactly; duplicate inputs
-/// and future-dated marks fail closed.
+/// Recompute unrealized P&L from sealed marks and per-unit cost bases. The
+/// valuation set must cover exactly the non-zero authoritative positions:
+/// missing, duplicate, foreign and contradictory marks all fail closed. Every
+/// mark's timestamp is retained so later evaluation can recheck each one.
 fn derive_valuations(
     records: &[ValuationRecord],
     expected_account: AccountId,
     positions: &BTreeMap<InstrumentId, i64>,
     now: LogicalNanos,
     max_age_ns: u64,
-) -> Result<(Paise, String, i64), DailyPnlError> {
+) -> Result<(Paise, String, i64, BTreeMap<InstrumentId, i64>), DailyPnlError> {
     let head = chain_head(records)?;
+    let expected: BTreeSet<InstrumentId> = positions
+        .iter()
+        .filter(|(_, quantity)| **quantity != 0)
+        .map(|(instrument, _)| instrument.clone())
+        .collect();
+    let mut actual = BTreeSet::new();
     let mut unrealized = Paise(0);
     let mut latest_as_of = 0_i64;
-    let mut seen = BTreeSet::new();
+    let mut as_of_by_instrument = BTreeMap::new();
     for record in records {
         if record.schema_version != 1 {
             return Err(DailyPnlError::UnsupportedSchema(record.schema_version));
@@ -696,7 +752,7 @@ fn derive_valuations(
         if record.account_id != expected_account {
             return Err(DailyPnlError::WrongAccount);
         }
-        if !seen.insert(record.instrument_id.clone()) {
+        if !actual.insert(record.instrument_id.clone()) {
             return Err(DailyPnlError::WrongValuation(
                 "duplicate valuation instrument".to_owned(),
             ));
@@ -714,6 +770,7 @@ fn derive_valuations(
             ));
         }
         check_pnl_freshness(record.as_of_ns, now, max_age_ns)?;
+        as_of_by_instrument.insert(record.instrument_id.clone(), record.as_of_ns);
         latest_as_of = latest_as_of.max(record.as_of_ns);
         let per_unit = Paise(record.mark_paise)
             .checked_sub(Paise(record.cost_basis_paise))
@@ -726,7 +783,22 @@ fn derive_valuations(
             )
             .map_err(|_| DailyPnlError::Overflow)?;
     }
-    Ok((unrealized, head, latest_as_of))
+    if actual != expected {
+        let missing: Vec<String> = expected
+            .difference(&actual)
+            .map(ToString::to_string)
+            .collect();
+        let foreign: Vec<String> = actual
+            .difference(&expected)
+            .map(ToString::to_string)
+            .collect();
+        return Err(DailyPnlError::WrongValuation(format!(
+            "valuation coverage is not exact: missing [{}], foreign [{}]",
+            missing.join(", "),
+            foreign.join(", ")
+        )));
+    }
+    Ok((unrealized, head, latest_as_of, as_of_by_instrument))
 }
 
 /// Build the only authoritative daily P&L snapshot: every money component and
@@ -755,10 +827,13 @@ fn derive_daily_pnl_snapshot(
     if record.calculation_version != DAILY_PNL_CALCULATION_VERSION {
         return Err(DailyPnlError::UnsupportedCalculationVersion);
     }
-    if record.base_currency.trim().is_empty() {
-        return Err(DailyPnlError::Contradictory(
-            "base currency is not declared".to_owned(),
-        ));
+    // Money in this authority is Paise. Until a neutral financial unit exists,
+    // any currency other than INR is uninterpretable and denies risk.
+    if record.base_currency != "INR" {
+        return Err(DailyPnlError::Contradictory(format!(
+            "unsupported base currency {} (only INR Paise is admitted)",
+            record.base_currency
+        )));
     }
     if calendar.time_zone.trim().is_empty() {
         return Err(DailyPnlError::InvalidCalendar(
@@ -794,8 +869,14 @@ fn derive_daily_pnl_snapshot(
             "account journal sequence or digest disagrees".to_owned(),
         ));
     }
-    let account_pnl = derive_account_pnl(accounts, expected_account)?;
-    let (unrealized, valuation_head, valuations_as_of) =
+    let (account_pnl, opening_checkpoint) =
+        derive_account_pnl(accounts, expected_account, calendar)?;
+    if record.opening_checkpoint_digest != opening_checkpoint {
+        return Err(DailyPnlError::WrongJournal(
+            "opening checkpoint digest disagrees with the verified journal prefix".to_owned(),
+        ));
+    }
+    let (unrealized, valuation_head, valuations_as_of, as_of_by_instrument) =
         derive_valuations(valuations, expected_account, positions, now, max_age_ns)?;
     if record.positions_digest != daily_pnl_positions_digest(positions) {
         return Err(DailyPnlError::WrongPositions);
@@ -844,6 +925,7 @@ fn derive_daily_pnl_snapshot(
         reconciliation_status: record.reconciliation_status,
         as_of_ns: record.as_of_ns,
         valuations_as_of_ns: valuations_as_of,
+        valuation_as_of_ns_by_instrument: as_of_by_instrument,
     })
 }
 
@@ -1530,6 +1612,13 @@ impl RiskAuthority {
         }
         let max_age_ns = self.observation_policy.max_account_journal_age_ns;
         check_pnl_freshness(snapshot.as_of_ns, state.now, max_age_ns)?;
+        // The newest mark is only an evidence value. Every retained per-
+        // instrument timestamp must be current, so a stale older mark cannot
+        // hide behind a fresh one.
+        for (instrument, &as_of_ns) in &snapshot.valuation_as_of_ns_by_instrument {
+            check_pnl_freshness(as_of_ns, state.now, max_age_ns)
+                .map_err(|error| DailyPnlError::WrongValuation(format!("{instrument}: {error}")))?;
+        }
         check_pnl_freshness(snapshot.valuations_as_of_ns, state.now, max_age_ns)?;
         snapshot.daily_limit_pnl_paise()
     }
@@ -2944,6 +3033,10 @@ pub struct AccountRecoveryRecord {
     pub funding_paise: i64,
     /// FX effect of this event (signed paise).
     pub fx_paise: i64,
+    /// Logical instant at which this event was booked. The authority assigns
+    /// it to a business date with the owner's declared calendar and sums only
+    /// that period's effects.
+    pub event_at_ns: i64,
 }
 
 impl AccountRecoveryRecord {
@@ -2967,7 +3060,15 @@ impl AccountRecoveryRecord {
             fees_paise: 0,
             funding_paise: 0,
             fx_paise: 0,
+            event_at_ns: 0,
         }
+    }
+
+    /// Bind the event to the logical instant used for business-day assignment.
+    #[must_use]
+    pub fn with_event_at_ns(mut self, event_at_ns: i64) -> Self {
+        self.event_at_ns = event_at_ns;
+        self
     }
 
     /// Attach the account-journal money effects that the daily P&L snapshot
@@ -3024,6 +3125,7 @@ impl ChainedRecord for AccountRecoveryRecord {
             "fees_paise": self.fees_paise,
             "funding_paise": self.funding_paise,
             "fx_paise": self.fx_paise,
+            "event_at_ns": self.event_at_ns,
         })
         .to_string()
     }

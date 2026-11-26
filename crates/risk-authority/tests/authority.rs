@@ -351,7 +351,23 @@ fn daily_recovery_for_accounts(
             .ok_or("account fixture quantity overflow")?;
     }
     positions.retain(|_, quantity| *quantity != 0);
-    let valuations = daily_valuations();
+    // Every non-zero position needs a sealed mark with zero unrealized P&L;
+    // an unmarked position must never establish a daily snapshot (H2).
+    let mut valuations = Vec::new();
+    let mut valuation_previous = genesis_digest().to_owned();
+    for (index, (instrument, quantity)) in positions.iter().enumerate() {
+        let mut valuation = ValuationRecord::new(
+            AccountId::new(ACCOUNT)?,
+            instrument.clone(),
+            *quantity,
+            1_000,
+            1_000,
+            0,
+        );
+        valuation.seal(u64::try_from(index)? + 1, &valuation_previous);
+        valuation_previous = valuation.digest.clone();
+        valuations.push(valuation);
+    }
     let account_head = journal.last().map_or_else(
         || genesis_digest().to_owned(),
         |record| record.digest.clone(),
@@ -4485,4 +4501,468 @@ fn no_unauthenticated_daily_pnl_setter() {
         !source.contains("pub fn set_daily_pnl"),
         "a caller cannot assert a P&L figure directly"
     );
+}
+
+// ---------------------------------------------------------------------------
+// P&L hardening fixtures: two business dates, exact valuation coverage,
+// per-instrument mark freshness and an explicitly neutral currency unit.
+// ---------------------------------------------------------------------------
+
+const SECOND_ID: &str = "nse.cash.synth2";
+const NEXT_DAY_START: i64 = 86_400_000_000_000;
+
+fn second_instrument_id() -> Result<InstrumentId, Box<dyn std::error::Error>> {
+    Ok(InstrumentId::new(SECOND_ID)?)
+}
+
+fn second_instrument() -> Result<Instrument, Box<dyn std::error::Error>> {
+    let mut value = instrument()?;
+    value.instrument_id = second_instrument_id()?;
+    if let Some(listing) = value.listings.first_mut() {
+        listing.venue_symbol = "SYN2".to_owned();
+    }
+    Ok(value)
+}
+
+fn policy_for(
+    ids: BTreeSet<InstrumentId>,
+) -> Result<ValidatedRiskPolicy, Box<dyn std::error::Error>> {
+    let raw = RiskPolicy {
+        version: "risk-v1-pnl-scope".to_owned(),
+        allowed_accounts: BTreeSet::from([AccountId::new(ACCOUNT)?]),
+        allowed_strategies: BTreeSet::from([StrategyId::new(STRATEGY)?]),
+        allowed_algos: BTreeSet::from([AlgoId::new(ALGO)?]),
+        allowed_instruments: ids,
+        max_order_quantity: Quantity::new(10)?,
+        max_order_notional_paise: Paise(10_000),
+        max_position_quantity: Quantity::new(100)?,
+        max_gross_exposure_paise: Paise(MAX_GROSS),
+        max_daily_loss_paise: Paise(5_000),
+        max_open_orders: 5,
+        max_orders_per_second: 5,
+        max_price_deviation_ppm: 100_000,
+        max_quote_age_ns: 1_000,
+        allow_short: false,
+        max_strategy_exposure_paise: Paise(1_000_000),
+        max_sector_exposure_paise: None,
+        stress_scenario: None,
+        max_stress_loss_paise: None,
+        max_participation_ppm: None,
+        greek_limits: None,
+        max_borrow_quantity: None,
+        max_financing_cost_paise: None,
+    };
+    Ok(ValidatedRiskPolicy::from_policy(&raw)?)
+}
+
+fn two_instrument_authority() -> Result<RiskAuthority, Box<dyn std::error::Error>> {
+    let ids = BTreeSet::from([instrument_id()?, second_instrument_id()?]);
+    let authority = RiskAuthority::new(
+        AccountId::new(ACCOUNT)?,
+        policy_for(ids)?,
+        vec![instrument()?, second_instrument()?],
+        date()?,
+    );
+    authority.set_session_open(true)?;
+    authority.set_snapshot_available(true)?;
+    release_switch(&authority)?;
+    clear_reconciliation(&authority)?;
+    publish_zero_daily(&authority)?;
+    Ok(authority)
+}
+
+fn intent_for(
+    id: InstrumentId,
+    n: u64,
+    q: i64,
+    side: Side,
+) -> Result<OrderIntent, Box<dyn std::error::Error>> {
+    let mut value = intent(n, q, PRICE, side)?;
+    value.instrument_id = id;
+    Ok(value)
+}
+
+fn second_feed() -> Result<FeedObservation, Box<dyn std::error::Error>> {
+    let mut quote = quote()?;
+    quote.instrument_id = second_instrument_id()?;
+    Ok(FeedObservation {
+        quote: Some(quote),
+        ..feed()?
+    })
+}
+
+fn fill_two_positions(
+    authority: &RiskAuthority,
+) -> Result<BTreeMap<InstrumentId, i64>, Box<dyn std::error::Error>> {
+    let first = authority.evaluate_and_reserve(
+        intent(1, 2, PRICE, Side::Buy)?,
+        observation(authority)?,
+        None,
+    )?;
+    authority.apply_fill(first.intent_id)?;
+    let second = authority.evaluate_and_reserve(
+        intent_for(second_instrument_id()?, 2, 3, Side::Buy)?,
+        observations_for_feed(authority, second_feed()?)?,
+        None,
+    )?;
+    authority.apply_fill(second.intent_id)?;
+    Ok(authority.snapshot()?.positions)
+}
+
+fn next_day_calendar() -> Result<DailyPnlCalendar, Box<dyn std::error::Error>> {
+    Ok(DailyPnlCalendar::new(
+        "Asia/Kolkata".to_owned(),
+        TradeDate::new(2026, 10, 29)?,
+        NEXT_DAY_START,
+        172_800_000_000_000,
+    ))
+}
+
+/// One independent sealed money effect per business date in a continuous
+/// account journal.
+fn two_day_accounts() -> Result<Vec<AccountRecoveryRecord>, Box<dyn std::error::Error>> {
+    let mut day1 = AccountRecoveryRecord::new(
+        "day-one".to_owned(),
+        AccountId::new(ACCOUNT)?,
+        instrument_id()?,
+        0,
+    )
+    .with_event_at_ns(0)
+    .with_pnl_effects(1_000, 50, 10, 5);
+    day1.seal(1, genesis_digest());
+    let mut day2 = AccountRecoveryRecord::new(
+        "day-two".to_owned(),
+        AccountId::new(ACCOUNT)?,
+        instrument_id()?,
+        0,
+    )
+    .with_event_at_ns(NEXT_DAY_START)
+    .with_pnl_effects(2_000, 70, 20, 6);
+    day2.seal(2, &day1.digest);
+    Ok(vec![day1, day2])
+}
+
+/// H1: a daily result must contain only the declared business period's effects,
+/// even when a continuous journal already holds the next day's records.
+#[test]
+fn daily_pnl_depends_only_on_the_declared_business_period() -> TestResult {
+    let calendar = daily_calendar()?;
+    let next = next_day_calendar()?;
+    let accounts = two_day_accounts()?;
+    let empty_positions = BTreeMap::new();
+
+    let mut day1 = DailyPnlRecord::new(
+        AccountId::new(ACCOUNT)?,
+        date()?,
+        "INR".to_owned(),
+        DailyPnlBasis::RealizedPlusUnrealized,
+        &calendar,
+        0,
+    )
+    .with_journal(2, accounts[1].digest.clone())
+    .with_digests(
+        daily_pnl_positions_digest(&empty_positions),
+        genesis_digest().to_owned(),
+    )
+    .with_components(1_000, 0, 50, 10, 5);
+    day1.seal(1, genesis_digest());
+    let authority = bare_authority()?;
+    let first = authority.publish_daily_pnl(
+        authority.register_all_owners()?.account_journal,
+        day1.clone(),
+        &accounts,
+        &[],
+        &calendar,
+    )?;
+    assert_eq!(
+        (
+            first.realized_paise,
+            first.fees_paise,
+            first.funding_paise,
+            first.fx_paise
+        ),
+        (1_000, 50, 10, 5),
+        "day one uses only its own journal effects"
+    );
+
+    // Re-deriving day one from the same journal must be a pure function of the
+    // declared period and its opening checkpoint.
+    let scoped = bare_authority()?;
+    let first_again = scoped.publish_daily_pnl(
+        scoped.register_all_owners()?.account_journal,
+        day1,
+        &accounts,
+        &[],
+        &calendar,
+    )?;
+    assert_eq!(first, first_again, "later-day records do not move day one");
+
+    let next_authority = RiskAuthority::new(
+        AccountId::new(ACCOUNT)?,
+        policy()?,
+        vec![instrument()?],
+        next.business_date,
+    );
+    next_authority.set_now(LogicalNanos::new(u64::try_from(NEXT_DAY_START)?))?;
+    let mut day2 = DailyPnlRecord::new(
+        AccountId::new(ACCOUNT)?,
+        next.business_date,
+        "INR".to_owned(),
+        DailyPnlBasis::RealizedPlusUnrealized,
+        &next,
+        NEXT_DAY_START,
+    )
+    .with_journal(2, accounts[1].digest.clone())
+    .with_opening_checkpoint(accounts[0].digest.clone())
+    .with_digests(
+        daily_pnl_positions_digest(&empty_positions),
+        genesis_digest().to_owned(),
+    )
+    .with_components(2_000, 0, 70, 20, 6);
+    day2.seal(1, genesis_digest());
+    let second = next_authority.publish_daily_pnl(
+        next_authority.register_all_owners()?.account_journal,
+        day2,
+        &accounts,
+        &[],
+        &next,
+    )?;
+    assert_eq!(
+        (
+            second.realized_paise,
+            second.fees_paise,
+            second.funding_paise,
+            second.fx_paise
+        ),
+        (2_000, 70, 20, 6),
+        "day two uses only its own journal effects"
+    );
+    Ok(())
+}
+
+/// H2: a non-zero position with no valuation must fail closed at publication.
+#[test]
+fn non_zero_position_without_a_valuation_is_rejected() -> TestResult {
+    let authority = two_instrument_authority()?;
+    let reservation = authority.evaluate_and_reserve(
+        intent(1, 2, PRICE, Side::Buy)?,
+        observation(&authority)?,
+        None,
+    )?;
+    authority.apply_fill(reservation.intent_id)?;
+    let positions = authority.snapshot()?.positions;
+    let calendar = daily_calendar()?;
+    let accounts = daily_accounts(0, 0, 0, 0)?;
+    let record = sealed_daily_record_for_positions(
+        &positions,
+        &accounts,
+        &[],
+        &calendar,
+        DailyPnlBasis::RealizedPlusUnrealized,
+        0,
+        0,
+        0,
+        0,
+        0,
+    )?;
+    let error = authority
+        .publish_daily_pnl(
+            authority.register_all_owners()?.account_journal,
+            record,
+            &accounts,
+            &[],
+            &calendar,
+        )
+        .expect_err("an unmarked position cannot establish a daily P&L");
+    assert!(
+        matches!(error, DailyPnlError::WrongValuation(_)),
+        "the denial names the valuation coverage failure"
+    );
+    Ok(())
+}
+
+/// H2: exact valuation coverage across a multi-instrument account. A missing
+/// instrument and a foreign mark both fail closed.
+#[test]
+fn valuation_coverage_must_be_exact() -> TestResult {
+    let authority = two_instrument_authority()?;
+    let positions = fill_two_positions(&authority)?;
+    let calendar = daily_calendar()?;
+    let accounts = daily_accounts(0, 0, 0, 0)?;
+    let token = authority.register_all_owners()?.account_journal;
+
+    let mut first = ValuationRecord::new(
+        AccountId::new(ACCOUNT)?,
+        instrument_id()?,
+        2,
+        1_000,
+        1_000,
+        0,
+    );
+    first.seal(1, genesis_digest());
+
+    let missing = sealed_daily_record_for_positions(
+        &positions,
+        &accounts,
+        &[first.clone()],
+        &calendar,
+        DailyPnlBasis::RealizedPlusUnrealized,
+        0,
+        0,
+        0,
+        0,
+        0,
+    )?;
+    let error = authority
+        .publish_daily_pnl(token, missing, &accounts, &[first.clone()], &calendar)
+        .expect_err("a missing second instrument is not covered");
+    assert!(
+        matches!(error, DailyPnlError::WrongValuation(_)),
+        "the missing mark is a typed denial"
+    );
+
+    let mut second = ValuationRecord::new(
+        AccountId::new(ACCOUNT)?,
+        second_instrument_id()?,
+        3,
+        1_000,
+        1_000,
+        0,
+    );
+    second.seal(2, &first.digest);
+    let mut foreign = ValuationRecord::new(
+        AccountId::new(ACCOUNT)?,
+        InstrumentId::new("nse.cash.foreign")?,
+        0,
+        2_000,
+        1_000,
+        0,
+    );
+    foreign.seal(3, &second.digest);
+    let marked = [first.clone(), second, foreign.clone()];
+    let with_foreign = sealed_daily_record_for_positions(
+        &positions,
+        &accounts,
+        &marked,
+        &calendar,
+        DailyPnlBasis::RealizedPlusUnrealized,
+        0,
+        0,
+        0,
+        0,
+        0,
+    )?;
+    let error = authority
+        .publish_daily_pnl(token, with_foreign, &accounts, &marked, &calendar)
+        .expect_err("a mark for an instrument with no position is foreign");
+    assert!(
+        matches!(error, DailyPnlError::WrongValuation(_)),
+        "the foreign mark is a typed denial"
+    );
+    Ok(())
+}
+
+/// H3: every retained per-instrument mark must stay fresh, not only the newest.
+#[test]
+fn one_stale_valuation_denies_new_risk_while_another_is_fresh() -> TestResult {
+    let authority = two_instrument_authority()?;
+    let positions = fill_two_positions(&authority)?;
+    let calendar = daily_calendar()?;
+    let accounts = daily_accounts(0, 0, 0, 0)?;
+    let fresh_ns: i64 = 900_000_000;
+    authority.set_now(LogicalNanos::new(u64::try_from(fresh_ns)?))?;
+
+    let mut older = ValuationRecord::new(
+        AccountId::new(ACCOUNT)?,
+        instrument_id()?,
+        2,
+        1_000,
+        1_000,
+        0,
+    );
+    older.seal(1, genesis_digest());
+    let mut newer = ValuationRecord::new(
+        AccountId::new(ACCOUNT)?,
+        second_instrument_id()?,
+        3,
+        1_000,
+        1_000,
+        fresh_ns,
+    );
+    newer.seal(2, &older.digest);
+    let valuations = [older, newer];
+    let mut record = DailyPnlRecord::new(
+        AccountId::new(ACCOUNT)?,
+        date()?,
+        "INR".to_owned(),
+        DailyPnlBasis::RealizedPlusUnrealized,
+        &calendar,
+        fresh_ns,
+    )
+    .with_journal(
+        u64::try_from(accounts.len())?,
+        accounts.last().expect("account").digest.clone(),
+    )
+    .with_digests(
+        daily_pnl_positions_digest(&positions),
+        valuations.last().expect("valuation").digest.clone(),
+    );
+    record.seal(1, genesis_digest());
+    publish_daily(&authority, record, &accounts, &valuations, &calendar)?;
+
+    let now = LogicalNanos::new(1_500_000_000);
+    authority.set_now(now)?;
+    let error = authority
+        .evaluate_and_reserve(
+            intent(3, 1, PRICE, Side::Buy)?,
+            observations_for_feed(
+                &authority,
+                FeedObservation {
+                    received_at: now,
+                    ..feed()?
+                },
+            )?,
+            None,
+        )
+        .expect_err("an older stale mark denies risk even though the newest is fresh");
+    assert!(
+        matches!(&error, AuthorityError::ControlFailure(message) if message.contains("stale")),
+        "the denial names the stale valuation"
+    );
+    Ok(())
+}
+
+/// H4: money is Paise; no neutral unit exists, so only INR is admissible.
+#[test]
+fn unsupported_base_currency_is_rejected() -> TestResult {
+    let authority = authority()?;
+    let calendar = daily_calendar()?;
+    let accounts = daily_accounts(0, 0, 0, 0)?;
+    let mut record = sealed_daily_record(
+        &accounts,
+        &[],
+        &calendar,
+        DailyPnlBasis::RealizedPlusUnrealized,
+        0,
+        0,
+        0,
+        0,
+        0,
+    )?;
+    record.base_currency = "USD".to_owned();
+    record.seal(1, genesis_digest());
+    let error = authority
+        .publish_daily_pnl(
+            authority.register_all_owners()?.account_journal,
+            record,
+            &accounts,
+            &[],
+            &calendar,
+        )
+        .expect_err("a non-INR base currency cannot be interpreted as Paise");
+    assert!(
+        matches!(&error, DailyPnlError::Contradictory(message) if message.contains("currency")),
+        "the denial is explicit about the unsupported unit"
+    );
+    Ok(())
 }
