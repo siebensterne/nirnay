@@ -24,7 +24,7 @@ repos:
   - repo: local
     hooks:
       - id: q-style
-        name: q / kdb+ added-line style (q-style.json)
+        name: q / kdb+ added-line style (q.toml)
         entry: bash -c 'python3 scripts/check_q_style.py --self-test && python3 scripts/check_q_style.py' --
         language: system
         always_run: true

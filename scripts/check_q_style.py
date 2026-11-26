@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Check added q / kdb+ lines for mechanical style violations.
 
-The binding rule set is ``q-style.json`` at the repository root. This checker
-loads it at import time, so editing the JSON changes enforcement and editing
+The binding rule set is ``q.toml`` at the repository root. This checker
+loads it at import time, so editing the TOML changes enforcement and editing
 the checker's constants cannot silently diverge from the published contract.
 The rules cover whitespace hygiene, the silent loader-stop bare ``/`` line,
 the ``count x < n`` precedence bug, and dotted column access inside a lambda
@@ -20,33 +20,33 @@ Use --self-test for adversarial unit tests.
 
 from __future__ import annotations
 
-import json
 import os
 import re
 import subprocess
 import sys
+import tomllib
 import unittest
 from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
-CONFIG_PATH = ROOT / "q-style.json"
+CONFIG_PATH = ROOT / "q.toml"
 
 
 def validate_config(data: dict[str, Any]) -> dict[str, Any]:
     """Validate the machine-readable q style contract."""
     if data.get("schema_version") != 1:
-        raise ValueError("unsupported q-style.json schema_version")
+        raise ValueError("unsupported q.toml schema_version")
     if data.get("enforcement", {}).get("waivers") != "none":
-        raise ValueError("q-style.json must declare zero waivers")
+        raise ValueError("q.toml must declare zero waivers")
     if data.get("rules", {}).get("max_columns") != 100:
-        raise ValueError("q-style.json max_columns must remain 100")
+        raise ValueError("q.toml max_columns must remain 100")
     return data
 
 
 def load_config(path: Path = CONFIG_PATH) -> dict[str, Any]:
     """Load and validate the machine-readable q style contract."""
-    return validate_config(json.loads(path.read_text(encoding="utf-8")))
+    return validate_config(tomllib.loads(path.read_text(encoding="utf-8")))
 
 
 CONFIG = load_config()
@@ -163,13 +163,13 @@ class QStyleTests(unittest.TestCase):
     """Adversarial tests for the q style rules, config and diff parser."""
 
     def test_config_is_binding(self) -> None:
-        """The JSON contract drives the checker's live constants."""
+        """The TOML contract drives the checker's live constants."""
         self.assertEqual(MAX_COLUMNS, 100)
         self.assertEqual(CONFIG["enforcement"]["waivers"], "none")
 
     def test_config_rejects_waivers(self) -> None:
         """A contract with waivers is rejected at load time."""
-        data = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+        data = tomllib.loads(CONFIG_PATH.read_text(encoding="utf-8"))
         data["enforcement"]["waivers"] = "allowed"
         with self.assertRaises(ValueError):
             validate_config(data)
