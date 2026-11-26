@@ -40,6 +40,8 @@ jobs:
       # decision; the Python vector gate above still checks fact fixtures.
       - name: Clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Documentation
+        run: cargo xtask docs
   compile-budget:
     runs-on: ubuntu-latest
     steps:
@@ -94,7 +96,14 @@ jobs:
           python3 scripts/check_ruff_added_lines.py --self-test
           python3 scripts/check_ruff_added_lines.py
       - name: q / kdb+ style on added lines
-        run: python3 scripts/check_q_style.py
+        env:
+          # PRs diff against the PR base commit; push/workflow_call use a
+          # resolvable commit. Branch names and the all-zero "before" SHA are
+          # never used. The explicit step makes the q gate unskippable.
+          Q_STYLE_BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || (github.event.before != '0000000000000000000000000000000000000000' && github.event.before || github.sha) }}
+        run: |
+          python3 scripts/check_q_style.py --self-test
+          python3 scripts/check_q_style.py
       - name: ShellCheck and tool isolation
         run: |
           python3 scripts/check_shellcheck.py

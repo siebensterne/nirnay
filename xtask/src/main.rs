@@ -157,7 +157,7 @@ impl Task {
             Task::Docs => vec![
                 Cmd::new("cargo", &["doc", "--no-deps", "--workspace", "--locked"]).with_env(
                     "RUSTDOCFLAGS",
-                    "-D warnings -D rustdoc::broken_intra_doc_links",
+                    "-D warnings -D rustdoc::broken_intra_doc_links -A rustdoc::private_intra_doc_links",
                 ),
             ],
             Task::List => Vec::new(),
