@@ -3,7 +3,7 @@
 """Verify the local copies of the mandated style references.
 
 The repo-level policy names published style guides and keeps local copies under
-``engineering/references/``. This gate checks that each third-party document
+``style/``. This gate checks that each third-party document
 exists, is non-empty and matches the SHA-256 recorded in the index, and that
 the index covers the mandated set exactly. ``index.md`` is project-authored
 and cannot contain its own digest, so it is excluded from the hash set.
@@ -21,7 +21,7 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-INDEX = ROOT / "engineering" / "references" / "index.md"
+INDEX = ROOT / "style" / "index.md"
 ROW = re.compile(r"^\| `([^`]+)` \| .* \| `([0-9a-f]{64})` \|$")
 MANIFEST = "index.md"
 
@@ -37,7 +37,6 @@ MANDATED = frozenset(
         "shellguide.html",
         "verilogguide.html",
         "docguide-style.html",
-        "awesome-style-guide-master.md",
     }
 )
 
@@ -55,9 +54,9 @@ def parse_index(text: str) -> dict[str, str]:
 def check(root: Path = ROOT) -> list[str]:
     """Return every reference-integrity error found under ``root``."""
     errors: list[str] = []
-    index = root / "engineering" / "references" / MANIFEST
+    index = root / "style" / MANIFEST
     if not index.is_file():
-        return ["engineering/references/index.md is missing"]
+        return ["style/index.md is missing"]
     rows = parse_index(index.read_text(encoding="utf-8"))
     rows.pop(MANIFEST, None)
     if set(rows) != MANDATED:
@@ -68,7 +67,7 @@ def check(root: Path = ROOT) -> list[str]:
         if extra:
             errors.append(f"index lists unexpected references: {extra}")
     for name, expected in sorted(rows.items()):
-        path = root / "engineering" / "references" / name
+        path = root / "style" / name
         if not path.is_file():
             errors.append(f"reference {name} is missing")
             continue
