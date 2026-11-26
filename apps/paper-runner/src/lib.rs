@@ -58,7 +58,6 @@ use report::{
 use risk_authority::{
     AccountJournalObservation, //
     FeedObservation,
-    FileControlStore,
     MarketObservation,
     Observation,
     ObservationSource,
@@ -68,6 +67,7 @@ use risk_authority::{
     OpsObservation,
     OwnerTokens,
     ReconciliationObservation,
+    RecoveryConfig,
     RiskAuthority,
     SequenceGap,
 };
@@ -146,6 +146,154 @@ pub struct PaperInput {
     pub broker_behavior: String,
 }
 
+/// How the harness was started. This is chosen by the caller, never inferred
+/// from the presence of a control file or from synthetic state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PaperMode {
+    /// In-memory fixture: no durable state, no recovery claim, no live routing.
+    EphemeralSimulation,
+    /// Durable paper/shadow pass built exclusively from recovered owner state.
+    PersistentPaper,
+}
+
+impl PaperMode {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::EphemeralSimulation => "ephemeral-simulation",
+            Self::PersistentPaper => "persistent-paper",
+        }
+    }
+
+    pub const fn is_simulation(self) -> bool {
+        matches!(self, Self::EphemeralSimulation)
+    }
+}
+
+/// Explicit, non-production identity attached to a simulation startup.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PaperIdentity {
+    pub mode: PaperMode,
+    pub label: String,
+}
+
+impl PaperIdentity {
+    fn simulation() -> Self {
+        Self {
+            mode: PaperMode::EphemeralSimulation,
+            label: format!("simulation:{}", PaperMode::EphemeralSimulation.label()),
+        }
+    }
+
+    fn recovered() -> Self {
+        Self {
+            mode: PaperMode::PersistentPaper,
+            label: format!("recovered:{}", PaperMode::PersistentPaper.label()),
+        }
+    }
+}
+
+/// The recovery adapters persistent startup requires. `None` is never a
+/// fallback: it means the caller has no verified OMS/account journals and no
+/// durable decision store, so persistent startup must fail closed.
+pub struct PersistentStartup {
+    pub recovery: RecoveryConfig,
+}
+
+/// Authority under an explicit mode, before any observation is supplied.
+pub struct PaperStartup {
+    pub mode: PaperMode,
+    pub identity: PaperIdentity,
+    pub authority: RiskAuthority,
+}
+
+/// The single startup boundary. Ephemeral work gets only the explicit
+/// simulation constructor; persistent work gets only a recovered authority
+/// with real OMS/account adapters and a durable decision store.
+pub fn startup(
+    mode: PaperMode,
+    account_id: AccountId,
+    policy: ValidatedRiskPolicy,
+    instruments: Vec<Instrument>,
+    trade_date: TradeDate,
+    persistent: Option<PersistentStartup>,
+) -> Result<PaperStartup, String> {
+    match mode {
+        PaperMode::EphemeralSimulation => Ok(PaperStartup {
+            mode,
+            identity: PaperIdentity::simulation(),
+            authority: RiskAuthority::new_simulation(account_id, policy, instruments, trade_date),
+        }),
+        PaperMode::PersistentPaper => {
+            let adapters = persistent.ok_or_else(|| {
+                "persistent paper mode requires recovery adapters: verified OMS and account journals, a durable decision store and exclusive state ownership"
+                    .to_owned()
+            })?;
+            if !adapters.recovery.control.is_durable() || !adapters.recovery.decisions.is_durable()
+            {
+                return Err(
+                    "persistent paper mode requires durable control and decision stores".to_owned(),
+                );
+            }
+            let authority = RiskAuthority::recover(adapters.recovery).map_err(|e| e.to_string())?;
+            if authority.is_simulation() {
+                return Err("recovered authority reported a simulation identity".to_owned());
+            }
+            Ok(PaperStartup {
+                mode,
+                identity: PaperIdentity::recovered(),
+                authority,
+            })
+        }
+    }
+}
+
+/// Translate an authority verdict into report fields. A simulation verdict is
+/// fixture evidence only: it must never be reported as production-style
+/// "safe for new risk".
+fn readiness_for_mode(mode: PaperMode, verdict: Result<(), String>) -> (bool, Vec<String>) {
+    let mut reasons = Vec::new();
+    if mode.is_simulation() {
+        reasons.push(format!(
+            "{}: simulation only; no production readiness or recovery claim",
+            mode.label()
+        ));
+    }
+    reasons.extend(verdict.err());
+    (!mode.is_simulation() && reasons.is_empty(), reasons)
+}
+
+/// Fixture-only control release for an ephemeral simulation. Never used to
+/// authorize a persistent authority: the tokens are process-local and this
+/// release is labelled as synthetic, not as an operator decision.
+fn release_simulation_controls(
+    authority: &RiskAuthority,
+    tokens: OwnerTokens,
+    identity: &PaperIdentity,
+) -> Result<(), String> {
+    if !authority.is_simulation() {
+        return Err("synthetic control release requires simulation mode".to_owned());
+    }
+    let fixture = format!("{}:fixture-only", identity.label);
+    authority
+        .set_kill_switch(
+            tokens.operator,
+            false,
+            fixture.clone(),
+            format!("{fixture}: synthetic control release, not owner authorization"),
+            Some(format!("{fixture}:synthetic-release")),
+        )
+        .map_err(|e| e.to_string())?;
+    authority
+        .set_reconciliation_blocked(
+            tokens.reconciliation,
+            false,
+            format!("{fixture}: synthetic reconciliation resolution"),
+            Some(format!("{fixture}:synthetic-resolution")),
+        )
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 /// Outcome of one pipeline pass, including the report and the OMS store so
 /// tests can inspect persisted lifecycle state.
 pub struct PaperRun {
@@ -153,6 +301,8 @@ pub struct PaperRun {
     pub oms: OmsStore,
     pub ledger: Projector,
     pub reconciliation: ReconciliationOutcome,
+    pub mode: PaperMode,
+    pub identity: PaperIdentity,
 }
 
 fn instrument(input: &PaperInput) -> Result<Instrument, String> {
@@ -522,8 +672,9 @@ fn kernel_quote(bid: i64, ask: i64, instrument_id: &str) -> Result<QuoteSnapshot
     })
 }
 
-/// Execute one bounded paper pass over a synthetic session. All health facts
-/// are synthetic and labelled as such; the authority alone decides new risk.
+/// Execute one bounded paper pass over a synthetic session. This is always an
+/// ephemeral simulation: the authority has no durable control store, decision
+/// store or recovery ownership, and the report makes no production claim.
 pub fn run_paper(input: &PaperInput, oms_path: &Path) -> Result<PaperRun, String> {
     let session = synthetic_session(input)?;
     let events = project_session(&session).map_err(|e| e.to_string())?;
@@ -533,43 +684,24 @@ pub fn run_paper(input: &PaperInput, oms_path: &Path) -> Result<PaperRun, String
     let account_id = AccountId::new(input.account_id).map_err(|e| e.to_string())?;
     let policy = ValidatedRiskPolicy::from_policy(&input.policy).map_err(|e| e.to_string())?;
 
-    // Owner-local control file: no service, no database. A first synthetic run
-    // releases the fail-closed switch with an explicitly labelled fixture.
-    let control_path = oms_path.with_extension("control.jsonl");
-    let first_run = !control_path.exists();
-    let authority = RiskAuthority::new_with_control_store(
+    let boot = startup(
+        PaperMode::EphemeralSimulation,
         account_id,
         policy,
         vec![instrument],
         input.trade_date,
-        Box::new(FileControlStore::new(&control_path)),
-    )
-    .with_observation_policy(observation_policy());
+        None,
+    )?;
+    let mode = boot.mode;
+    let identity = boot.identity;
+    let authority = boot.authority.with_observation_policy(observation_policy());
     authority
         .set_now(LogicalNanos::new(input.feed_age_ns))
         .map_err(|e| e.to_string())?;
     let tokens = authority.register_all_owners().map_err(|e| e.to_string())?;
-    if first_run {
-        authority
-            .set_kill_switch(
-                tokens.operator,
-                false,
-                "paper-synthetic-operator".to_owned(),
-                "synthetic bounded paper run fixture".to_owned(),
-                Some("paper-synthetic-release".to_owned()),
-            )
-            .map_err(|e| e.to_string())?;
-    }
-    // Synthetic operator resolution at run start. There is no real operator
-    // in this harness; the reconciliation latch is otherwise sticky.
-    authority
-        .set_reconciliation_blocked(
-            tokens.reconciliation,
-            false,
-            "synthetic reconciliation resolution".to_owned(),
-            Some("paper-synthetic-resolution".to_owned()),
-        )
-        .map_err(|e| e.to_string())?;
+    // Fixture-only release under the explicit simulation identity. This is not
+    // an operator authorization and never persists beyond this process.
+    release_simulation_controls(&authority, tokens, &identity)?;
 
     let mut store = OmsStore::open(oms_path).map_err(|e| e.to_string())?;
     let mut projector = Projector::open(oms_path.with_extension("ledger"), account_id)
@@ -906,12 +1038,10 @@ pub fn run_paper(input: &PaperInput, oms_path: &Path) -> Result<PaperRun, String
         None,
         tokens,
     );
-    let final_verdict = authority.check_observations(&final_observations);
-    let final_safe = final_verdict.is_ok();
-    let final_reasons = final_verdict
-        .err()
-        .map(|error| vec![error.to_string()])
-        .unwrap_or_default();
+    let final_verdict = authority
+        .check_observations(&final_observations)
+        .map_err(|e| e.to_string());
+    let (final_safe, final_reasons) = readiness_for_mode(mode, final_verdict);
     let input_bytes = serde_json::to_vec(input).map_err(|e| e.to_string())?;
     let input_digest = Sha256::digest(&input_bytes)
         .iter()
@@ -931,6 +1061,8 @@ pub fn run_paper(input: &PaperInput, oms_path: &Path) -> Result<PaperRun, String
         oms: store,
         ledger: projector,
         reconciliation,
+        mode,
+        identity,
     })
 }
 
@@ -980,6 +1112,199 @@ mod kernel_payload_tests {
         assert!(
             kernel_top_of_book(&base).is_err(),
             "an event without a typed book fails closed"
+        );
+    }
+}
+
+#[cfg(test)]
+mod startup_mode_tests {
+    use std::collections::BTreeSet;
+
+    use super::*;
+
+    fn neutral_policy() -> ValidatedRiskPolicy {
+        let raw = RiskPolicy {
+            version: "paper-startup-neutral".to_owned(),
+            allowed_accounts: BTreeSet::from([AccountId::new(1).expect("account")]),
+            allowed_strategies: BTreeSet::from([StrategyId::new(2).expect("strategy")]),
+            allowed_algos: BTreeSet::from([AlgoId::new(3).expect("algo")]),
+            allowed_instruments: BTreeSet::from([InstrumentId::new("paper.neutral").expect("id")]),
+            max_order_quantity: Quantity::new(100).expect("quantity"),
+            max_order_notional_paise: Paise(1_000_000),
+            max_position_quantity: Quantity::new(100).expect("quantity"),
+            max_gross_exposure_paise: Paise(1_000_000),
+            max_daily_loss_paise: Paise(5_000),
+            max_open_orders: 100,
+            max_orders_per_second: 100,
+            max_price_deviation_ppm: 100_000,
+            max_quote_age_ns: 1_000,
+            allow_short: false,
+            max_strategy_exposure_paise: Paise(1_000_000),
+            max_sector_exposure_paise: None,
+            stress_scenario: None,
+            max_stress_loss_paise: None,
+            max_participation_ppm: None,
+            greek_limits: None,
+            max_borrow_quantity: None,
+            max_financing_cost_paise: None,
+        };
+        ValidatedRiskPolicy::from_policy(&raw).expect("neutral policy")
+    }
+
+    fn neutral_inputs() -> (AccountId, ValidatedRiskPolicy, Vec<Instrument>, TradeDate) {
+        (
+            AccountId::new(1).expect("account"),
+            neutral_policy(),
+            Vec::new(),
+            TradeDate::new(2026, 1, 1).expect("date"),
+        )
+    }
+
+    #[test]
+    fn simulation_startup_has_explicit_simulation_identity() {
+        let (account, policy, instruments, date) = neutral_inputs();
+        let startup = startup(
+            PaperMode::EphemeralSimulation,
+            account,
+            policy,
+            instruments,
+            date,
+            None,
+        )
+        .expect("simulation startup");
+        assert_eq!(
+            startup.mode,
+            PaperMode::EphemeralSimulation,
+            "startup selects the explicit simulation mode"
+        );
+        assert!(
+            startup.mode.is_simulation(),
+            "the mode reports itself as simulation"
+        );
+        assert!(
+            startup.identity.label.contains("simulation"),
+            "identity is visibly non-production"
+        );
+        assert!(
+            startup.authority.is_simulation(),
+            "only the simulation constructor builds the ephemeral authority"
+        );
+
+        let source = include_str!("lib.rs");
+        let production_constructor = concat!("RiskAuthority::", "new_with_control_store(");
+        assert!(
+            !source.contains(production_constructor),
+            "the ephemeral path must not use the control-store constructor"
+        );
+    }
+
+    #[test]
+    fn persistent_startup_refuses_missing_recovery_adapters() {
+        let (account, policy, instruments, date) = neutral_inputs();
+        let error = match startup(
+            PaperMode::PersistentPaper,
+            account,
+            policy,
+            instruments,
+            date,
+            None,
+        ) {
+            Ok(_) => panic!("persistent mode must fail closed without adapters"),
+            Err(error) => error,
+        };
+        assert!(
+            error.contains("recovery") && error.contains("adapter"),
+            "error names the missing recovery adapters: {error}"
+        );
+    }
+
+    #[test]
+    fn simulation_verdict_never_becomes_production_readiness() {
+        let (safe, reasons) = readiness_for_mode(PaperMode::EphemeralSimulation, Ok(()));
+        assert!(
+            !safe,
+            "even a clean simulation verdict cannot claim safe-for-new-risk"
+        );
+        assert!(
+            reasons
+                .iter()
+                .any(|reason| reason.contains("simulation") && reason.contains("readiness")),
+            "reasons carry the simulation-only caveat: {reasons:?}"
+        );
+    }
+
+    #[test]
+    fn simulation_has_no_external_execution_adapter() {
+        let source = include_str!("lib.rs");
+        for forbidden in [
+            concat!("dyn ", "BrokerAdapter"),
+            concat!("Live", "Broker"),
+            concat!("Upstox", "Broker"),
+            concat!("Fyers", "Broker"),
+            concat!("Kite", "Broker"),
+            concat!("req", "west"),
+        ] {
+            assert!(
+                !source.contains(forbidden),
+                "simulation source must not carry {forbidden}"
+            );
+        }
+        assert!(
+            source.contains("SimulatedBroker"),
+            "only the in-process simulator may be constructed"
+        );
+    }
+
+    #[test]
+    fn synthetic_control_release_is_not_another_authoritys_authorization() {
+        let (account, policy, instruments, date) = neutral_inputs();
+        let first = startup(
+            PaperMode::EphemeralSimulation,
+            account,
+            policy.clone(),
+            instruments.clone(),
+            date,
+            None,
+        )
+        .expect("first simulation");
+        let second = startup(
+            PaperMode::EphemeralSimulation,
+            account,
+            policy,
+            instruments,
+            date,
+            None,
+        )
+        .expect("second simulation");
+        let first_tokens = first.authority.register_all_owners().expect("owner tokens");
+        let foreign_release = second.authority.set_kill_switch(
+            first_tokens.operator,
+            false,
+            "paper-synthetic-operator".to_owned(),
+            "fixture".to_owned(),
+            Some("paper-synthetic-release".to_owned()),
+        );
+        assert!(
+            foreign_release.is_err(),
+            "a self-issued token from one simulation cannot authorize another authority"
+        );
+
+        release_simulation_controls(&first.authority, first_tokens, &first.identity)
+            .expect("labelled fixture release");
+        let decision = first
+            .authority
+            .reconciliation_decision()
+            .expect("fixture reconciliation decision");
+        assert!(
+            decision.reason.contains("simulation"),
+            "the fixture resolution is labelled, not an owner decision"
+        );
+        assert!(
+            decision
+                .evidence_ref
+                .as_deref()
+                .is_some_and(|reference| reference.contains("simulation")),
+            "the fixture evidence reference is labelled as simulation-only"
         );
     }
 }
