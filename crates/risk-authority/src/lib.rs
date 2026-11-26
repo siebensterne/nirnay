@@ -13,11 +13,15 @@ pub mod error;
 pub mod observation;
 
 pub use authority::{
-    ACCOUNT_JOURNAL_ID,    //
-    AccountRecoveryRecord, //
+    ACCOUNT_ANCHOR_FILE, //
+    ACCOUNT_JOURNAL_FILE,
+    ACCOUNT_JOURNAL_ID,
+    AccountRecoveryRecord,
     AuthorityOwnership,
     AuthoritySnapshot,
+    BINDING_SUFFIX,
     ChainedRecord,
+    DAILY_PNL_FILE,
     DecisionOutcome,
     DecisionStore,
     DecisionStoreError,
@@ -25,19 +29,28 @@ pub use authority::{
     GENESIS_DIGEST,
     InMemoryDecisionStore,
     JournalIdentity,
+    OMS_ANCHOR_FILE,
+    OMS_EXECUTIONS_FILE,
     OMS_JOURNAL_ID,
+    OMS_PERMITS_FILE,
     OmsPermitRecord,
     OmsPermitState,
+    OwnerSigningKey,
     RECOVERY_SNAPSHOT_VERSION,
+    RecoveryAnchor,
+    RecoveryAuthenticity,
+    RecoveryBindingRecord,
     RecoveryCheckpoint,
     RecoveryConfig,
     RecoveryError,
+    RecoveryJournalRoot,
     Reservation,
     RiskAuthority,
     RiskDecisionRecord,
     VerifiedAccountSnapshot,
     VerifiedOmsSnapshot,
     genesis_digest,
+    recovery_binding_record,
     verify_recovery_chain,
 };
 pub use control::{
