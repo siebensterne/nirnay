@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"enum":["PayloadRegistryError"],"fn":["structural_schema_bytes","validate_record"],"struct":["DeclaredPayloadSchema","InstalledPayloadSchema","LocalSchemaInput","PayloadRegistryInput","PayloadSchemaRegistry"]};

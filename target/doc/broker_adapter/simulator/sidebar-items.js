@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"enum":["CancelBehavior","SubmitBehavior"],"struct":["SimulatedBroker","SimulatorConfig"]};

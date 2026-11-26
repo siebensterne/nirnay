@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"mod":["account_projection","error","lifecycle","reconciliation","store"]};

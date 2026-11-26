@@ -1,5 +1,5 @@
 # Rust and Python build artefacts
-target/*
+target/
 **/__pycache__/
 *.py[cod]
 .pytest_cache/
@@ -30,10 +30,3 @@ build-*/
 # Editor and OS noise
 .DS_Store
 Thumbs.db
-
-# Generated rustdoc is a tracked deliverable, unlike the rest of target/.
-!target/doc/
-!target/doc/**
-
-# Generated Markdown from rustdoc is not project prose.
-target/doc/**/*.md

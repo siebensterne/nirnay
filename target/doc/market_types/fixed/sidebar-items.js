@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"constant":["DECIMALS","MAX_SCALE","SCALE"],"fn":["format_micros","format_scaled","from_sbe_micros","parse_micros","parse_price","parse_quantity","parse_quantity_scaled","parse_scaled","rescale_exact","scale_factor","to_sbe_micros"]};

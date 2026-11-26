@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"enum":["BrokerEvent","BrokerOrderStatus","SubmissionOutcome"],"struct":["BrokerOrderRequest","CancelRequest","SubmissionAck"],"trait":["BrokerAdapter"]};

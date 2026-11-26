@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"fn":["artifact_component","enumerate_names","hex_lower","open_dir_at","open_regular_file","parse_hex_lower","read_bounded","sha256","valid_component"],"struct":["CleanupReport","EntryProof","FdBudget","FileFacts","PrivateSnapshot","ReleaseRoot","SnapshotBuilder","SnapshotEntry","StagingLimits"]};

@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"constant":["KERNEL_SESSION_SCHEMA_VERSION"],"fn":["project_observation","project_session"],"struct":["ContinuityKey","KernelSession"]};

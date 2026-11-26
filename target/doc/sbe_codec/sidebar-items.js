@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"constant":["ENTRY_BYTES","GROUP_HEADER_BYTES","HEADER_BYTES","MIN_CHUNK_BYTES","SCHEMA_ID","SCHEMA_VERSION","SNAPSHOT_BLOCK_BYTES","SNAPSHOT_TEMPLATE","UPDATE_BLOCK_BYTES","UPDATE_TEMPLATE"],"enum":["SbeError"],"fn":["decode_capture","decode_message","encode_message","format_dump_line"],"struct":["DecodeResult","SbeLevel","SbeMessage"]};

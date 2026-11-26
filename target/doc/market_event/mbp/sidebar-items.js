@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"enum":["MarketDataEvent","MbpError","MbpSide"],"struct":["MarketByPriceDelta","MarketByPriceSnapshot","MbpLevel"]};

@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"constant":["COVERAGE_DIMENSIONS","DECLARED_PURPOSE","RECORD_ENCODING","SIGNING_DOMAIN","VERIFICATION_POLICY_VERSION"],"enum":["CleanupDisposition","InFlightSlotError"],"struct":["InFlightArtifacts","RefusalDiagnostic","ReleaseLocator","ReleaseVerifier","VerifierConfig"]};

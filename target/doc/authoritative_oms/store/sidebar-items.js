@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"enum":["ChargeStatus","CommitFault","Resolution"],"fn":["fill_content_digest"],"struct":["BrokerOrderId","ClientOrderId","DispatchClaim","FillEvent","OmsStore","OrderView","OutboxView","PermitRef"]};

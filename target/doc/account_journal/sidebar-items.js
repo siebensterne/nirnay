@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"enum":["CommitFault","JournalError"],"struct":["Hash32","Journal","StoredRecord","VerificationReport"]};

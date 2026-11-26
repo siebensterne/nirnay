@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"fn":["parse_nse_cash_master"],"struct":["NseCashRow"]};

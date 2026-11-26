@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"enum":["Task"],"fn":["exit_code_for","main","run","run_task","script","task_names","workspace_root"],"struct":["Cli","Cmd"]};

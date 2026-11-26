@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"fn":["decode_journal","feed_value","first_level_value","index_full_feed_value","ltpc_value","main","market_full_feed_value","quote_value","response_value"],"struct":["Args"]};
