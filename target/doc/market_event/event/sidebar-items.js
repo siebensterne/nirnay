@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["KERNEL_EVENT_SCHEMA_VERSION"],"struct":["KernelEvent","RecoveryEvidence"]};

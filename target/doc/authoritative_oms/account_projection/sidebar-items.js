@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["LEDGER_STREAM_ID"],"enum":["ProjectionError"],"struct":["CostLot","LedgerCursor","LedgerState","Projector","ReplayVerification"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["Side"],"mod":["fixed","model"],"struct":["InvalidSide"]};

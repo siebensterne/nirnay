@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["SUPPORTED_RULE"],"struct":["RationalEmaCross","RuntimeIntent","StrategyEvent"],"trait":["Strategy"]};

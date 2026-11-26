@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["run_paper"],"mod":["report"],"struct":["PaperInput","PaperRun"]};

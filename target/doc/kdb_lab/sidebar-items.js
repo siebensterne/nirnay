@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DEFAULT_Q_BIN","METRICS_HEADER","METRIC_NAMES","Q_BIN_ENV","REPORT_SCHEMA"],"fn":["analyze","build_report","find_q","parse_metrics_csv","parse_observations_csv","q_script_path","reference_metrics","to_json_value"],"struct":["Analysis","AnalysisReport","EngineInfo","MbpMetrics","MbpObservation"]};

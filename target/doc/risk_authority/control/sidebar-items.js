@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["ControlError"],"struct":["FileControlStore","KillSwitchState","NoopControlStore"],"trait":["ControlStore"]};

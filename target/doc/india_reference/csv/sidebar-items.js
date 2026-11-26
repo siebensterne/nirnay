@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["CsvError"],"fn":["column","optional_column","parse_document"],"struct":["CsvDocument","CsvRow","Limits"]};

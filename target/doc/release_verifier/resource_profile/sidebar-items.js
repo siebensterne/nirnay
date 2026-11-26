@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["ProcessingRole","ProfileError"],"fn":["profile_digest_hex"],"struct":["EffectiveLimits","LimitsInput","ProfileLimits","ResourceProfile","ResourceProfileId","StreamingResourcePolicy"]};

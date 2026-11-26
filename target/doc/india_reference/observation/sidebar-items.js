@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["RowOutcome","SnapshotScope"],"struct":["Exclusion","Rejection","SourceBatch"]};
