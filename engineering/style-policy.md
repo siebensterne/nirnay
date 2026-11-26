@@ -94,7 +94,7 @@ Official language documentation (canonical external references):
 - Python 3: https://docs.python.org/3/
 - Bash: https://www.gnu.org/software/bash/manual/
 
-`engineering/references/index.md` records local copies with digests for the
+`style/index.md` records local copies with digests for the
 mandated third-party style guides. The language documentation URLs above are
 canonical external links; no local copy or digest is created for them, and
 `scripts/check_style_references.py` continues to verify only the mandated
@@ -183,9 +183,7 @@ that are outside editable project prose. The bytes stay unchanged:
 - `BUILD-RESULTS.md:59` — PROSE-002; owner-maintained dated bundle record.
 - `BUILD-RESULTS.md:90` — PROSE-002; same record.
 - `BUILD-RESULTS.md:209` — PROSE-002; same record.
-- `engineering/references/awesome-style-guide-master.md:7` — PROSE-002;
   hash-pinned vendored third-party document.
-- `engineering/references/awesome-style-guide-master.md:96` — PROSE-001;
   same document.
 
 The `--all` prose sweeps are remediation reports; the binding gates check added

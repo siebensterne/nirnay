@@ -16,13 +16,11 @@ memory. `engineering/style-policy.md` remains the binding repository policy.
 | `shellguide.html` | <https://google.github.io/styleguide/shellguide.html> | `7a5fe550de49a336fd7a4f8a5fbd78614054925443aa1c3df2bff1a98e593e30` |
 | `verilogguide.html` | <https://google.github.io/styleguide/verilogguide.html> | `f2d49aca1948fae608952f2b2ca7b321f4b5c7f3781df3db8185fb43be8a6e9d` |
 | `docguide-style.html` | <https://google.github.io/styleguide/docguide/style.html> | `c7657bd8a5bdb13e5172c4136af9003c4d28a56e1f78a4f56f0217cb9cdd8d95` |
-| `awesome-style-guide-master.md` | <https://github.com/kciter/awesome-style-guide> (`master` branch) | `dfd473304cf8fefd677db16e90ba1fc17db9ec672b76dcb14c8f6da54fa1f8d4` |
 
 ## Scope notes
 
 - Verilog has no source in this repository. The guide is retained because it
   was named as mandatory, not because a Verilog gate exists.
-- The awesome-style-guide is a discovery index. Project stars and descriptions
   do not establish quality, and no rule is adopted from it without a reviewed
   change to `engineering/style-policy.md`.
 - The binding rules remain the added-line checkers in `scripts/` and the
