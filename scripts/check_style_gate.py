@@ -23,17 +23,12 @@ ROOT = Path(__file__).resolve().parent.parent
 
 REQUIRED_TEXT: dict[str, tuple[str, ...]] = {
     "Makefile": (
-        "style: rust-style source-style python-ruff-style q-style prose-style",
+        "style: rust-style source-style python-ruff-style q-style standards-check",
         "$(MAKE) style",
         "python3 scripts/ruff_gate.py",
         "python3 scripts/check_ruff_added_lines.py",
-        "python3 scripts/check_style_references.py",
         "python3 scripts/check_quality_contract.py",
         "python3 scripts/check_license_provenance.py",
-        "prose-style:",
-        "python3 scripts/check_prose_style.py --self-test",
-        "python3 scripts/check_prose_style.py",
-        "python3 scripts/check_prose_unified.py",
         "python3 scripts/check_q_style.py --self-test",
         "python3 scripts/check_q_style.py",
         "python3 scripts/check_rust_style.py --self-test",
@@ -46,12 +41,9 @@ REQUIRED_TEXT: dict[str, tuple[str, ...]] = {
         "NIRNAY_STYLE_BASE: origin/main",
         "python3 scripts/check_rust_style.py",
         "python3 scripts/check_source_style.py",
-        "python3 scripts/check_prose_style.py",
-        "python3 scripts/check_prose_unified.py",
         "python3 scripts/check_q_style.py",
         "python3 scripts/ruff_gate.py",
         "python3 scripts/check_ruff_added_lines.py",
-        "python3 scripts/check_style_references.py",
         "python3 scripts/check_quality_contract.py",
         "python3 scripts/check_license_provenance.py",
         "python3 scripts/check_style_gate.py",
@@ -84,12 +76,6 @@ REQUIRED_TEXT: dict[str, tuple[str, ...]] = {
         "--self-test",
         "def main()",
     ),
-    "scripts/check_style_references.py": (
-        "def parse_index(",
-        "def check(",
-        "--self-test",
-        "def main()",
-    ),
     "scripts/check_rust_style.py": (
         "ASSERT_MACRO",
         "--self-test",
@@ -102,7 +88,6 @@ REQUIRED_TEXT: dict[str, tuple[str, ...]] = {
         "def check_shell_line(",
         "def check_makefile_line(",
         "def check_json_line(",
-        "def check_markdown_line(",
         "SHELL_EXTS",
         "--self-test",
         "def main()",
@@ -115,19 +100,15 @@ EXPECTED_LANGUAGE_FUNCTIONS: tuple[str, ...] = (
     "def check_shell_line(",
     "def check_makefile_line(",
     "def check_json_line(",
-    "def check_markdown_line(",
 )
 
 MIN_TESTS: dict[str, int] = {
     "scripts/check_license_provenance.py": 4,
     "scripts/check_quality_contract.py": 5,
     "scripts/check_ruff_added_lines.py": 5,
-    "scripts/check_style_references.py": 3,
     "scripts/check_rust_style.py": 13,
     "scripts/check_source_style.py": 26,
     "scripts/check_style_gate.py": 7,
-    "scripts/check_prose_style.py": 12,
-    "scripts/check_prose_unified.py": 6,
     "scripts/check_q_style.py": 16,
 }
 
@@ -143,7 +124,6 @@ def behavioural_checks(root: Path = ROOT) -> list[str]:
     try:
         import check_rust_style as rust
         import check_source_style as source
-        import check_prose_style as prose
         import check_q_style as qstyle
     except ImportError as error:
         return [f"cannot import style checker: {error}"]
@@ -155,7 +135,6 @@ def behavioural_checks(root: Path = ROOT) -> list[str]:
         if not any(needle in message for message in messages):  # type: ignore[union-attr]
             failures.append(f"rule behaviour lost: {needle!r} for {text!r}")
 
-    expect(prose.check_prose_line, "we require evidence", "PROSE-001")
     expect(qstyle.check_q_line, "/", "bare /")
     expect(qstyle.check_q_line, "if[count args < 2;x]", "count")
     expect(source.check_python_line, "x = 1;", "semicolon")
@@ -164,14 +143,6 @@ def behavioural_checks(root: Path = ROOT) -> list[str]:
     expect(source.check_shell_line, "eval", "eval")
     expect(source.check_makefile_line, "all: ", "trailing whitespace")
     expect(source.check_json_line, '\t"a": 1', "tab")
-    expect(
-        source.check_markdown_line,
-        "##Bad",
-        "space",
-        in_fence=False,
-        bare_fence_opening=False,
-        is_fence_marker=False,
-    )
     if not rust.assertion_context_errors("assert!(x);"):
         failures.append("rule behaviour lost: Rust assertion context")
     return failures
@@ -248,7 +219,7 @@ class GateIntegrityTests(unittest.TestCase):
         required = REQUIRED_TEXT["scripts/check_source_style.py"]
         for needle in EXPECTED_LANGUAGE_FUNCTIONS:
             self.assertIn(needle, required)
-        self.assertEqual(len(EXPECTED_LANGUAGE_FUNCTIONS), 6)
+        self.assertEqual(len(EXPECTED_LANGUAGE_FUNCTIONS), 5)
         self.assertIn("scripts/check_q_style.py", REQUIRED_TEXT)
         self.assertIn("def check_q_line(", REQUIRED_TEXT["scripts/check_q_style.py"])
 

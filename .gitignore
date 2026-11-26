@@ -14,7 +14,6 @@ build-*/
 
 # Local market data, account state, credentials and research outputs.
 /data/*
-!/data/README.md
 /var/
 /captures/
 .env
@@ -31,8 +30,6 @@ build-*/
 # Editor and OS noise
 .DS_Store
 Thumbs.db
-
-Task.md
 
 # Generated rustdoc is a tracked deliverable, unlike the rest of target/.
 !target/doc/

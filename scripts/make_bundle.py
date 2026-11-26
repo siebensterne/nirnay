@@ -18,13 +18,12 @@ Layout produced inside the archive:
     artifacts/**             compiled wheels and binaries, if supplied
     sbom.cdx.json            copied from --source-dir unless --sbom says otherwise
     SOURCE-MANIFEST.sha256   hash of every file above
-    BUILD-RESULTS.md         copied from --source-dir unless --results says otherwise
 
 Two files are written beside the archive and not inside it: `<archive>.sha256`
 and `<archive>.manifest.sha256`, the latter a copy of the archive's own manifest
 so a release can publish the manifest it verified against.
 
-The manifest excludes `BUILD-RESULTS.md` and itself.
+The manifest excludes itself.
 """
 from __future__ import annotations
 
@@ -39,7 +38,7 @@ from pathlib import Path
 
 SOURCE_DIR_NAME = "nirnay-quant"
 MANIFEST_NAME = "SOURCE-MANIFEST.sha256"
-RECORD_FILES = ("BUILD-RESULTS.md", MANIFEST_NAME)
+RECORD_FILES = (MANIFEST_NAME,)
 SBOM_NAME = "sbom.cdx.json"
 
 EXCLUDED_DIRS = {
@@ -72,9 +71,9 @@ def fail(messages: list[str]) -> int:
 
 
 def ignored(directory: str, names: list[str]) -> set[str]:
-    # BUILD-RESULTS.md is a record of the bundle, not payload: it is copied to the
-    # bundle root by `stage` and stays outside the manifest, so that it can quote
-    # the manifest digest without invalidating it.
+    """Return the bundle-stage entries that must not be copied."""
+    # The manifest is a record of the bundle, not payload: it is written at the
+    # bundle root by `write_manifest` and stays outside the manifest it describes.
     excluded = EXCLUDED_DIRS | EXCLUDED_FILES | set(RECORD_FILES)
     return {
         name
@@ -83,7 +82,8 @@ def ignored(directory: str, names: list[str]) -> set[str]:
     }
 
 
-def stage(source: Path, stage: Path, artifacts: Path | None, sbom: Path | None, results: Path | None) -> list[str]:
+def stage(source: Path, stage: Path, artifacts: Path | None, sbom: Path | None) -> list[str]:
+    """Copy payload files into the staging tree and return their names."""
     shutil.copytree(
         source,
         stage / SOURCE_DIR_NAME,
@@ -93,10 +93,9 @@ def stage(source: Path, stage: Path, artifacts: Path | None, sbom: Path | None, 
     if artifacts is not None:
         shutil.copytree(artifacts, stage / "artifacts", ignore=ignored, symlinks=True)
 
-    for target, default in ((sbom, source / SBOM_NAME), (results, source / "BUILD-RESULTS.md")):
-        chosen = target if target is not None else default
-        if chosen.is_file():
-            shutil.copyfile(chosen, stage / chosen.name)
+    chosen = sbom if sbom is not None else source / SBOM_NAME
+    if chosen.is_file():
+        shutil.copyfile(chosen, stage / chosen.name)
 
     paths: list[str] = []
     for path in sorted(stage.rglob("*")):
@@ -165,7 +164,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--source-dir", type=Path, default=Path("."))
     parser.add_argument("--artifacts", type=Path, help="directory of compiled wheels and binaries")
     parser.add_argument("--sbom", type=Path, help=f"defaults to <source-dir>/{SBOM_NAME}")
-    parser.add_argument("--results", type=Path, help="defaults to <source-dir>/BUILD-RESULTS.md")
     parser.add_argument("--output", type=Path, required=True, help="archive path to write")
     parser.add_argument("--stage", type=Path, help="keep the staged tree at this path")
     args = parser.parse_args(argv)
@@ -209,7 +207,7 @@ def main(argv: list[str] | None = None) -> int:
         staging = Path(holder.name)
 
     try:
-        paths = stage(source, staging, args.artifacts, args.sbom, args.results)
+        paths = stage(source, staging, args.artifacts, args.sbom)
         if not paths:
             return fail(["nothing to bundle"])
         write_manifest(staging, paths)
@@ -232,7 +230,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"staged {len(paths)} files")
         print(f"manifest sha256  {sha256(staging / MANIFEST_NAME)}")
         print(f"archive sha256   {digest}")
-        print(f"archive entries  {len(paths) + 2}")
+        print(f"archive entries  {len(paths) + len(RECORD_FILES)}")
         executables = [
             name
             for name in paths

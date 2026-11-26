@@ -26,7 +26,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-MANIFEST = ROOT / "engineering" / "source-ingestion-freeze.v1.json"
+MANIFEST = ROOT / "configs" / "source-ingestion-freeze.v1.json"
 BASE_ENV = "SOURCE_FREEZE_BASE"
 DEFAULT_BASE = "main"
 MIGRATION_ORDER = (
@@ -224,7 +224,7 @@ class FreezeGateTests(unittest.TestCase):
     def setUp(self) -> None:
         """Build a minimal manifest for each test."""
         self.manifest: dict[str, object] = {
-            "record": "evidence/SOURCE-INGESTION-FREEZE-2026-11-23.md",
+            "record": "RRP-004",
             "freeze_date": "2026-11-23",
             "migration_order": list(MIGRATION_ORDER),
             "no_new_feature_rule": "no new features",
@@ -284,7 +284,7 @@ class FreezeGateTests(unittest.TestCase):
         """Ordinary documentation and tooling changes are allowed."""
         self.assertEqual(
             check_changes(
-                ["README.md", "scripts/check_source_ingestion_freeze.py"],
+                ["TODO.md", "scripts/check_source_ingestion_freeze.py"],
                 self.prefixes,
                 [],
                 lambda _evidence: True,

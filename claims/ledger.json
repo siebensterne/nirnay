@@ -260,7 +260,6 @@
       "status": "implemented",
       "scope": {
         "packages": [
-          "engineering/q-kdb-style.md",
           "scripts/check_q_style.py",
           "scripts/check_style_gate.py",
           "analytics/kdb/mbp-test.q"
@@ -369,8 +368,7 @@
           "Makefile",
           "crates/market-archive/tests/performance.rs",
           "crates/risk-authority/tests/performance.rs",
-          "crates/authoritative-oms/tests/performance.rs",
-          "evidence/PERFORMANCE-TEMPLATE.md"
+          "crates/authoritative-oms/tests/performance.rs"
         ]
       },
       "falsifier": "A BENCH-* counter is a hard-coded literal, a benchmark runs as a pass/fail gate in make check or CI, a latency threshold is asserted, a synthetic market benchmark is reintroduced, or a dated record presents local numbers as deployment or throughput evidence."
@@ -451,7 +449,6 @@
       "status": "implemented",
       "scope": {
         "files": [
-          "evidence/PERFORMANCE-2026-11-21.md",
           "evidence/performance-2026-11-21-bench-ingress.log",
           "evidence/performance-2026-11-21-bench-research.log",
           "evidence/performance-2026-11-21-bench-experiments.log",
@@ -459,8 +456,7 @@
           "evidence/performance-2026-11-21-bench-latency.log",
           "Makefile",
           "crates/market-archive/tests/performance.rs",
-          "crates/authoritative-oms/tests/performance.rs",
-          "engineering/research/compute-and-validation.md"
+          "crates/authoritative-oms/tests/performance.rs"
         ]
       },
       "falsifier": "A published number is fabricated or a BENCH counter is a hard-coded literal stand-in; a benchmark is added to make check or CI as a gate; a latency threshold is asserted; a dated record presents local synthetic numbers as deployment evidence; or an owner-gated scheduler, allocator, feature store, licensed-data or target-infrastructure gap is silently implemented."
@@ -537,7 +533,6 @@
           "research/python/src/quantlab/cli.py",
           "schemas/research/simulation-event.v1.schema.json",
           "schemas/research/simulation-run-record.v1.schema.json",
-          "engineering/capabilities.json",
           "claims/ledger.json",
           "research/python/tests/test_sim_extensions.py"
         ]
@@ -651,8 +646,7 @@
           "research/python/src/quantlab/experiments/search_adapter.py",
           "research/python/src/quantlab/alpha_search.py",
           "research/python/src/quantlab/cli.py",
-          "research/python/tests/test_experiment_registry.py",
-          "engineering/research/dataset-acceptance-contract.md"
+          "research/python/tests/test_experiment_registry.py"
         ]
       },
       "falsifier": "A daily registration accepts minute-spaced bars, a minute registration accepts an incompatible interval, a named basis accepts a different period count, a synthetic dataset passes without a synthetic calendar and fixed interval, a CLI value replaces the registered annualisation factor, a bare one-nanosecond latency passes without a declared model, or an unevaluated candidate carries a numeric holdout result."
@@ -673,8 +667,7 @@
           "research/python/src/quantlab/point_in_time.py",
           "research/python/src/quantlab/research_jobs.py",
           "caller-supplied calendar artifacts",
-          "research/python/tests/test_calendar_cadence.py",
-          "evidence/M4-2-1-CALENDAR-CADENCE-ADDENDUM-2026-11-22.md"
+          "research/python/tests/test_calendar_cadence.py"
         ]
       },
       "falsifier": "An unknown calendar id or a wrong calendar digest resolves; a config boolean or identifier substring overrides an explicit MARKET origin; a record origin disagrees with its manifest; a bar falls in an auction, break, holiday, weekend or after an early close; a missing session or minute bar inside an active session passes without a status; a status observation carries a numeric price; a five-minute bar passes under the one-minute basis; a CLI value replaces the registered annualisation basis; a fixture calendar marked synthetic:false certifies MARKET origin without EXCHANGE_PUBLISHED, PROVIDER_PUBLISHED or OWNER_VERIFIED provenance; an expected schedule generated from observed first and last timestamps passes a missing first or last bar without independent manifest coverage bounds; or a close-anchored inclusive 09:15-15:30 session yields 376 bars while the registered one-minute basis fixes 375 bars per session and 94500 periods per year without defined bar-open/close schedule math. Implemented, not independently verified; no provider data, rights, completeness, real-market calendar validity or live-readiness claim is made."

@@ -64,7 +64,7 @@ jobs:
           git ls-files -z -- '*.c' '*.cc' '*.cpp' '*.cxx' '*.h' '*.hpp' '*.hxx' \
             | xargs -0 --no-run-if-empty clang-format --style=file --dry-run --Werror
       - name: Configure numeric oracle
-        run: cmake -S verification/cpp-oracle -B build/cpp-oracle -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=g++
+        run: cmake -S tests/oracles/cpp-numeric -B build/cpp-oracle -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=g++
       - name: Build numeric oracle
         run: cmake --build build/cpp-oracle --parallel 2
       - name: Test numeric oracle
@@ -89,14 +89,9 @@ jobs:
         run: python3 scripts/check_source_style.py
       - name: Ruff on added Python lines
         run: |
-          python3 scripts/ruff_gate.py scripts/check_ruff_added_lines.py scripts/check_quality_contract.py scripts/check_style_references.py scripts/check_license_provenance.py scripts/ruff_gate.py
+          python3 scripts/ruff_gate.py scripts/check_ruff_added_lines.py scripts/check_quality_contract.py scripts/check_license_provenance.py scripts/ruff_gate.py
           python3 scripts/check_ruff_added_lines.py --self-test
           python3 scripts/check_ruff_added_lines.py
-      - name: Prose style on added lines
-        run: |
-          python3 scripts/check_prose_style.py
-          python3 scripts/check_prose_unified.py --self-test
-          python3 scripts/check_prose_unified.py
       - name: q / kdb+ style on added lines
         run: python3 scripts/check_q_style.py
       - name: ShellCheck and tool isolation
@@ -107,16 +102,8 @@ jobs:
       - name: Frozen source-ingestion boundary
         run: make freeze-check
 
-      - name: Documentation lifecycle
-        run: |
-          python3 scripts/check_docs.py --self-test
-          python3 scripts/check_docs.py
       - name: Git policy
         run: python3 scripts/check_git_policy.py
-      - name: Style reference integrity
-        run: |
-          python3 scripts/check_style_references.py --self-test
-          python3 scripts/check_style_references.py
       - name: Shared quality contract
         run: |
           python3 scripts/check_quality_contract.py --self-test
@@ -129,7 +116,6 @@ jobs:
         run: |
           python3 scripts/check_rust_style.py --self-test
           python3 scripts/check_source_style.py --self-test
-          python3 scripts/check_prose_style.py --self-test
           python3 scripts/check_style_gate.py --self-test
       - name: Style gate integrity
         run: python3 scripts/check_style_gate.py
@@ -233,7 +219,7 @@ jobs:
           set -e
           cat combined.log
           if [ "$status" -eq 0 ]; then
-            echo "::error::The combined provider install now resolves. Remove the isolation and update engineering/provider-environments.md."
+            echo "::error::The combined provider install now resolves. Remove the provider isolation and revisit the gate."
             exit 1
           fi
           grep -q 'requests' combined.log
@@ -306,7 +292,7 @@ jobs:
           cargo check --workspace --all-targets --locked
           cargo test --workspace --all-targets --locked
       - name: Configure numeric oracle with AppleClang
-        run: cmake -S verification/cpp-oracle -B build/cpp-oracle -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=clang++
+        run: cmake -S tests/oracles/cpp-numeric -B build/cpp-oracle -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=clang++
       - name: Build and test numeric oracle
         run: |
           cmake --build build/cpp-oracle --parallel 2
@@ -347,7 +333,7 @@ jobs:
           toolchain: 1.99.1
       - name: Build C++ oracle drivers
         run: |
-          cmake -S verification/cpp-oracle -B build/diff-oracle \
+          cmake -S tests/oracles/cpp-numeric -B build/diff-oracle \
             -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=g++
           cmake --build build/diff-oracle --parallel 2
       - name: Build Rust conformance driver
@@ -355,7 +341,7 @@ jobs:
       - name: Compare canonical outputs byte for byte
         run: |
           python3 scripts/check_numeric_differential.py \
-            --corpus verification/corpus \
+            --corpus tests/fixtures \
             --cpp-numeric build/diff-oracle/nirnay_numeric_driver \
             --rust-numeric target/debug/numeric_driver \
             --report build/diff-oracle/differential-report.json

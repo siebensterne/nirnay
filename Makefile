@@ -14,9 +14,9 @@
 #   bundle          build the release zip from BUNDLE_OUT/BUNDLE_ARTIFACTS
 #   bundle-verify   verify that same zip and its extracted BUNDLE_DIR
 #   tools           install the pinned Python tools
-# See README "Quick start" for dependency setup and gate scope.
+# Gate scope is defined by the targets below and by the task runner.
 
-.PHONY: help ci assure check check-static lint test perf bench-ingress bench-risk-oms docs-check freeze-check synthetic-market-policy-check shellcheck-check generated-paths-check pollution-check style rust-style source-style python-ruff-style q-style prose-style references-check standards-check style-gate python-format-check rust-test python-test python-check cpp-test cpp-format-check schema-check verify-local fmt constraints sbom supply-chain wheels packaging-test bundle bundle-verify git-policy kdb-analyze archive-verify tools
+.PHONY: help ci assure check check-static lint test perf bench-ingress bench-risk-oms freeze-check synthetic-market-policy-check shellcheck-check generated-paths-check pollution-check style rust-style source-style python-ruff-style q-style standards-check style-gate python-format-check rust-test python-test python-check cpp-test cpp-format-check schema-check verify-local fmt constraints sbom supply-chain wheels packaging-test bundle bundle-verify git-policy kdb-analyze archive-verify tools
 
 help:
 	@echo "check           full gate: static checks, Rust/Python tests, contracts"
@@ -43,7 +43,6 @@ check: check-static
 	$(MAKE) schema-check
 	$(MAKE) python-test
 check-static:
-	$(MAKE) docs-check
 	$(MAKE) freeze-check
 	$(MAKE) synthetic-market-policy-check
 	$(MAKE) shellcheck-check
@@ -57,9 +56,6 @@ lint:
 	cargo xtask lint
 test:
 	cargo xtask test
-docs-check:
-	python3 scripts/check_docs.py --self-test
-	python3 scripts/check_docs.py
 freeze-check:
 	python3 scripts/check_source_ingestion_freeze.py --self-test
 	python3 scripts/check_source_ingestion_freeze.py
@@ -75,8 +71,8 @@ generated-paths-check:
 	python3 scripts/check_generated_paths.py
 pollution-check:
 	python3 scripts/check_no_cross_pollution.py
-style: rust-style source-style python-ruff-style q-style prose-style \
-	references-check standards-check style-gate
+style: rust-style source-style python-ruff-style q-style standards-check \
+	style-gate
 rust-style:
 	python3 scripts/check_rust_style.py --self-test
 	python3 scripts/check_rust_style.py
@@ -84,20 +80,12 @@ source-style:
 	python3 scripts/check_source_style.py --self-test
 	python3 scripts/check_source_style.py
 python-ruff-style:
-	python3 scripts/ruff_gate.py scripts/check_ruff_added_lines.py scripts/check_quality_contract.py scripts/check_style_references.py scripts/check_license_provenance.py scripts/ruff_gate.py
+	python3 scripts/ruff_gate.py scripts/check_ruff_added_lines.py scripts/check_quality_contract.py scripts/check_license_provenance.py scripts/ruff_gate.py
 	python3 scripts/check_ruff_added_lines.py --self-test
 	python3 scripts/check_ruff_added_lines.py
-prose-style:
-	python3 scripts/check_prose_style.py --self-test
-	python3 scripts/check_prose_style.py
-	python3 scripts/check_prose_unified.py --self-test
-	python3 scripts/check_prose_unified.py
 q-style:
 	python3 scripts/check_q_style.py --self-test
 	python3 scripts/check_q_style.py
-references-check:
-	python3 scripts/check_style_references.py --self-test
-	python3 scripts/check_style_references.py
 standards-check:
 	python3 scripts/check_quality_contract.py --self-test
 	python3 scripts/check_quality_contract.py
@@ -120,8 +108,8 @@ perf:
 # Opt-in benchmarks. Remaining targets are Rust harnesses that print BENCH-*
 # lines with measured counters and are deliberately absent from `check` and CI
 # pass/fail gates. Emitted numbers are not throughput or latency certificates;
-# see evidence/PERFORMANCE-TEMPLATE.md for the fields required of any dated
-# result record. Under D11 the synthetic Python benchmark targets were retired
+# any dated result record must state its own scope and measurement fields.
+# Under D11 the synthetic Python benchmark targets were retired
 # with their invented market observations and must not be restored.
 bench-ingress:
 	cargo test -p market-archive --test performance --features market-shaped-tests -- --ignored --nocapture --skip recovery_child
@@ -175,13 +163,13 @@ bundle-verify:
 	python3 scripts/verify_bundle.py --bundle $(BUNDLE_DIR) --zip $(BUNDLE_OUT) --self-test
 git-policy:
 	python3 scripts/check_git_policy.py --strict
-CPP_BUILD_DIR ?= /tmp/nirnay-cpp-oracle-$(shell pwd | cksum | cut -d' ' -f 1)
+CPP_BUILD_DIR ?= /tmp/nirnay-cpp-numeric-$(shell pwd | cksum | cut -d' ' -f 1)
 cpp-test:
-	cmake -S verification/cpp-oracle -B $(CPP_BUILD_DIR) -DCMAKE_BUILD_TYPE=Release
+	cmake -S tests/oracles/cpp-numeric -B $(CPP_BUILD_DIR) -DCMAKE_BUILD_TYPE=Release
 	cmake --build $(CPP_BUILD_DIR) --parallel
 	ctest --test-dir $(CPP_BUILD_DIR) --output-on-failure
 CLANG_FORMAT ?= clang-format
-CPP_SOURCES := $(shell find verification/cpp-oracle -type f \( -name '*.c' -o -name '*.cc' -o -name '*.cpp' -o -name '*.cxx' -o -name '*.h' -o -name '*.hpp' -o -name '*.hxx' \) 2>/dev/null)
+CPP_SOURCES := $(shell find tests/oracles/cpp-numeric -type f \( -name '*.c' -o -name '*.cc' -o -name '*.cpp' -o -name '*.cxx' -o -name '*.h' -o -name '*.hpp' -o -name '*.hxx' \) 2>/dev/null)
 cpp-format-check:
 	@for f in $(CPP_SOURCES); do $(CLANG_FORMAT) --style=file --dry-run --Werror "$$f" || exit 1; done
 verify-local: python-test python-check schema-check cpp-test

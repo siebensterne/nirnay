@@ -36,7 +36,7 @@ jobs:
         run: |
           git ls-files -z -- '*.c' '*.cc' '*.cpp' '*.cxx' '*.h' '*.hpp' '*.hxx' \
             | xargs -0 --no-run-if-empty clang-format --style=file --dry-run --Werror
-      - run: cmake -S verification/cpp-oracle -B build/cpp-oracle -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=g++
+      - run: cmake -S tests/oracles/cpp-numeric -B build/cpp-oracle -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=g++
       - run: cmake --build build/cpp-oracle --parallel 2
       - run: ctest --test-dir build/cpp-oracle --output-on-failure
   python-research:

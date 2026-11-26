@@ -190,6 +190,18 @@
       "version": "1.1.2"
     },
     {
+      "name": "authoritative-oms",
+      "properties": [
+        {
+          "name": "nirnay:workspace-member",
+          "value": "true"
+        }
+      ],
+      "purl": "pkg:cargo/authoritative-oms@0.1.0",
+      "type": "library",
+      "version": "0.1.0"
+    },
+    {
       "name": "base64",
       "properties": [
         {
@@ -300,6 +312,18 @@
       "purl": "pkg:cargo/block-buffer@0.12.1",
       "type": "library",
       "version": "0.12.1"
+    },
+    {
+      "name": "broker-adapter",
+      "properties": [
+        {
+          "name": "nirnay:workspace-member",
+          "value": "true"
+        }
+      ],
+      "purl": "pkg:cargo/broker-adapter@0.1.0",
+      "type": "library",
+      "version": "0.1.0"
     },
     {
       "name": "bumpalo",
@@ -850,6 +874,38 @@
       "version": "0.1.0"
     },
     {
+      "name": "fallible-iterator",
+      "properties": [
+        {
+          "name": "cargo:source",
+          "value": "registry+https://github.com/rust-lang/crates.io-index"
+        },
+        {
+          "name": "cargo:checksum",
+          "value": "2acce4a10f12dc2fb14a218589d4f1f62ef011b2d0cc4b3cb1bba8e94da14649"
+        }
+      ],
+      "purl": "pkg:cargo/fallible-iterator@0.3.0",
+      "type": "library",
+      "version": "0.3.0"
+    },
+    {
+      "name": "fallible-streaming-iterator",
+      "properties": [
+        {
+          "name": "cargo:source",
+          "value": "registry+https://github.com/rust-lang/crates.io-index"
+        },
+        {
+          "name": "cargo:checksum",
+          "value": "7360491ce676a36bf9bb3c56c1aa791658183a54d2744120f27285738d90465a"
+        }
+      ],
+      "purl": "pkg:cargo/fallible-streaming-iterator@0.1.9",
+      "type": "library",
+      "version": "0.1.9"
+    },
+    {
       "name": "fastrand",
       "properties": [
         {
@@ -962,6 +1018,22 @@
       "version": "0.1.5"
     },
     {
+      "name": "foldhash",
+      "properties": [
+        {
+          "name": "cargo:source",
+          "value": "registry+https://github.com/rust-lang/crates.io-index"
+        },
+        {
+          "name": "cargo:checksum",
+          "value": "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
+        }
+      ],
+      "purl": "pkg:cargo/foldhash@0.2.0",
+      "type": "library",
+      "version": "0.2.0"
+    },
+    {
       "name": "form_urlencoded",
       "properties": [
         {
@@ -970,12 +1042,12 @@
         },
         {
           "name": "cargo:checksum",
-          "value": "cb4cb245038516f5f85277875cdaa4f7d2c9a0fa0468de06ed190163b1581fcf"
+          "value": "afa489199eaffb1211795df1c6236ce1ad0d41a6fa45250add73e3b02420f06e"
         }
       ],
-      "purl": "pkg:cargo/form_urlencoded@1.2.2",
+      "purl": "pkg:cargo/form_urlencoded@1.2.3",
       "type": "library",
-      "version": "1.2.2"
+      "version": "1.2.3"
     },
     {
       "name": "fs2",
@@ -992,6 +1064,30 @@
       "purl": "pkg:cargo/fs2@0.4.3",
       "type": "library",
       "version": "0.4.3"
+    },
+    {
+      "name": "fundamental-domain",
+      "properties": [
+        {
+          "name": "nirnay:workspace-member",
+          "value": "true"
+        }
+      ],
+      "purl": "pkg:cargo/fundamental-domain@0.1.0",
+      "type": "library",
+      "version": "0.1.0"
+    },
+    {
+      "name": "fundamental-tools",
+      "properties": [
+        {
+          "name": "nirnay:workspace-member",
+          "value": "true"
+        }
+      ],
+      "purl": "pkg:cargo/fundamental-tools@0.1.0",
+      "type": "library",
+      "version": "0.1.0"
     },
     {
       "name": "futures-channel",
@@ -1090,6 +1186,18 @@
       "version": "0.3.34"
     },
     {
+      "name": "fyers-importer",
+      "properties": [
+        {
+          "name": "nirnay:workspace-member",
+          "value": "true"
+        }
+      ],
+      "purl": "pkg:cargo/fyers-importer@0.1.0",
+      "type": "library",
+      "version": "0.1.0"
+    },
+    {
       "name": "generic-array",
       "properties": [
         {
@@ -1184,6 +1292,22 @@
       "purl": "pkg:cargo/hashbrown@0.17.1",
       "type": "library",
       "version": "0.17.1"
+    },
+    {
+      "name": "hashlink",
+      "properties": [
+        {
+          "name": "cargo:source",
+          "value": "registry+https://github.com/rust-lang/crates.io-index"
+        },
+        {
+          "name": "cargo:checksum",
+          "value": "a596f1b20ed2cc5ecac41a164aaebc7258057060f06c0cf7a2ba3991ee7990fb"
+        }
+      ],
+      "purl": "pkg:cargo/hashlink@0.12.2",
+      "type": "library",
+      "version": "0.12.2"
     },
     {
       "name": "heck",
@@ -1502,6 +1626,18 @@
       "version": "0.1.0"
     },
     {
+      "name": "india-reference",
+      "properties": [
+        {
+          "name": "nirnay:workspace-member",
+          "value": "true"
+        }
+      ],
+      "purl": "pkg:cargo/india-reference@0.1.0",
+      "type": "library",
+      "version": "0.1.0"
+    },
+    {
       "name": "ipnet",
       "properties": [
         {
@@ -1662,6 +1798,18 @@
       "version": "0.3.106"
     },
     {
+      "name": "kdb-lab",
+      "properties": [
+        {
+          "name": "nirnay:workspace-member",
+          "value": "true"
+        }
+      ],
+      "purl": "pkg:cargo/kdb-lab@0.1.0",
+      "type": "library",
+      "version": "0.1.0"
+    },
+    {
       "name": "libc",
       "properties": [
         {
@@ -1676,6 +1824,22 @@
       "purl": "pkg:cargo/libc@0.2.191",
       "type": "library",
       "version": "0.2.191"
+    },
+    {
+      "name": "libsqlite3-sys",
+      "properties": [
+        {
+          "name": "cargo:source",
+          "value": "registry+https://github.com/rust-lang/crates.io-index"
+        },
+        {
+          "name": "cargo:checksum",
+          "value": "14a5f01b87b92705d07b433c06f96cbc764637d81a0bffb5734ce17cf0f9a2b3"
+        }
+      ],
+      "purl": "pkg:cargo/libsqlite3-sys@0.39.1",
+      "type": "library",
+      "version": "0.39.1"
     },
     {
       "name": "linux-raw-sys",
@@ -1762,6 +1926,30 @@
         }
       ],
       "purl": "pkg:cargo/market-book@0.1.0",
+      "type": "library",
+      "version": "0.1.0"
+    },
+    {
+      "name": "market-event",
+      "properties": [
+        {
+          "name": "nirnay:workspace-member",
+          "value": "true"
+        }
+      ],
+      "purl": "pkg:cargo/market-event@0.1.0",
+      "type": "library",
+      "version": "0.1.0"
+    },
+    {
+      "name": "market-kernel",
+      "properties": [
+        {
+          "name": "nirnay:workspace-member",
+          "value": "true"
+        }
+      ],
+      "purl": "pkg:cargo/market-kernel@0.1.0",
       "type": "library",
       "version": "0.1.0"
     },
@@ -1874,6 +2062,18 @@
       "version": "1.70.2"
     },
     {
+      "name": "ops-runtime",
+      "properties": [
+        {
+          "name": "nirnay:workspace-member",
+          "value": "true"
+        }
+      ],
+      "purl": "pkg:cargo/ops-runtime@0.1.0",
+      "type": "library",
+      "version": "0.1.0"
+    },
+    {
       "name": "paper-engine",
       "properties": [
         {
@@ -1882,6 +2082,18 @@
         }
       ],
       "purl": "pkg:cargo/paper-engine@0.1.0",
+      "type": "library",
+      "version": "0.1.0"
+    },
+    {
+      "name": "paper-runner",
+      "properties": [
+        {
+          "name": "nirnay:workspace-member",
+          "value": "true"
+        }
+      ],
+      "purl": "pkg:cargo/paper-runner@0.1.0",
       "type": "library",
       "version": "0.1.0"
     },
@@ -1964,6 +2176,22 @@
       "purl": "pkg:cargo/pkcs8@0.11.0",
       "type": "library",
       "version": "0.11.0"
+    },
+    {
+      "name": "pkg-config",
+      "properties": [
+        {
+          "name": "cargo:source",
+          "value": "registry+https://github.com/rust-lang/crates.io-index"
+        },
+        {
+          "name": "cargo:checksum",
+          "value": "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
+        }
+      ],
+      "purl": "pkg:cargo/pkg-config@0.3.34",
+      "type": "library",
+      "version": "0.3.34"
     },
     {
       "name": "portable-atomic-util",
@@ -2430,6 +2658,18 @@
       "version": "1.13.1"
     },
     {
+      "name": "release-verifier",
+      "properties": [
+        {
+          "name": "nirnay:workspace-member",
+          "value": "true"
+        }
+      ],
+      "purl": "pkg:cargo/release-verifier@0.1.0",
+      "type": "library",
+      "version": "0.1.0"
+    },
+    {
       "name": "reqwest",
       "properties": [
         {
@@ -2462,6 +2702,18 @@
       "version": "0.17.14"
     },
     {
+      "name": "risk-authority",
+      "properties": [
+        {
+          "name": "nirnay:workspace-member",
+          "value": "true"
+        }
+      ],
+      "purl": "pkg:cargo/risk-authority@0.1.0",
+      "type": "library",
+      "version": "0.1.0"
+    },
+    {
       "name": "risk-engine",
       "properties": [
         {
@@ -2472,6 +2724,38 @@
       "purl": "pkg:cargo/risk-engine@0.1.0",
       "type": "library",
       "version": "0.1.0"
+    },
+    {
+      "name": "rsqlite-vfs",
+      "properties": [
+        {
+          "name": "cargo:source",
+          "value": "registry+https://github.com/rust-lang/crates.io-index"
+        },
+        {
+          "name": "cargo:checksum",
+          "value": "353b74f9810d5b085b6c42c9d86a5f0fdb795553235cdd48753b32e3809d18a7"
+        }
+      ],
+      "purl": "pkg:cargo/rsqlite-vfs@0.2.0",
+      "type": "library",
+      "version": "0.2.0"
+    },
+    {
+      "name": "rusqlite",
+      "properties": [
+        {
+          "name": "cargo:source",
+          "value": "registry+https://github.com/rust-lang/crates.io-index"
+        },
+        {
+          "name": "cargo:checksum",
+          "value": "da9bba6f3506135e120a6586df05be18b48d18896600646a4bec8f993d91a594"
+        }
+      ],
+      "purl": "pkg:cargo/rusqlite@0.41.1",
+      "type": "library",
+      "version": "0.41.1"
     },
     {
       "name": "rustc-hash",
@@ -2514,12 +2798,12 @@
         },
         {
           "name": "cargo:checksum",
-          "value": "891efababe418670775f199f0d233d84843c227a0949a883ce15b37c78d6629d"
+          "value": "e5e76742e5294153d4dde1207dbec5bdd81eef6fabdc0d2118babadabfd858aa"
         }
       ],
-      "purl": "pkg:cargo/rustix@1.1.5",
+      "purl": "pkg:cargo/rustix@1.1.6",
       "type": "library",
-      "version": "1.1.5"
+      "version": "1.1.6"
     },
     {
       "name": "rustls-pki-types",
@@ -2600,6 +2884,18 @@
       "purl": "pkg:cargo/ryu@1.0.23",
       "type": "library",
       "version": "1.0.23"
+    },
+    {
+      "name": "sbe-codec",
+      "properties": [
+        {
+          "name": "nirnay:workspace-member",
+          "value": "true"
+        }
+      ],
+      "purl": "pkg:cargo/sbe-codec@0.1.0",
+      "type": "library",
+      "version": "0.1.0"
     },
     {
       "name": "semver",
@@ -2874,6 +3170,22 @@
       "version": "0.8.1"
     },
     {
+      "name": "sqlite-wasm-rs",
+      "properties": [
+        {
+          "name": "cargo:source",
+          "value": "registry+https://github.com/rust-lang/crates.io-index"
+        },
+        {
+          "name": "cargo:checksum",
+          "value": "a6cd504cecbfe7eef649988840f9a6cb768d11085efec138f8e99f160632d867"
+        }
+      ],
+      "purl": "pkg:cargo/sqlite-wasm-rs@0.6.3",
+      "type": "library",
+      "version": "0.6.3"
+    },
+    {
       "name": "stable_deref_trait",
       "properties": [
         {
@@ -2888,6 +3200,18 @@
       "purl": "pkg:cargo/stable_deref_trait@1.2.1",
       "type": "library",
       "version": "1.2.1"
+    },
+    {
+      "name": "strategy-runtime",
+      "properties": [
+        {
+          "name": "nirnay:workspace-member",
+          "value": "true"
+        }
+      ],
+      "purl": "pkg:cargo/strategy-runtime@0.1.0",
+      "type": "library",
+      "version": "0.1.0"
     },
     {
       "name": "strsim",
@@ -3366,12 +3690,12 @@
         },
         {
           "name": "cargo:checksum",
-          "value": "ff67a8a4397373c3ef660812acab3268222035010ab8680ec4215f38ba3d0eed"
+          "value": "f00cd2407bb42c0ef17be88d4cf020f5cceffd121665bac9b8b9493a369b3b1a"
         }
       ],
-      "purl": "pkg:cargo/url@2.5.8",
+      "purl": "pkg:cargo/url@2.5.9",
       "type": "library",
-      "version": "2.5.8"
+      "version": "2.5.9"
     },
     {
       "name": "utf8_iter",
@@ -3404,6 +3728,22 @@
       "purl": "pkg:cargo/utf8parse@0.2.2",
       "type": "library",
       "version": "0.2.2"
+    },
+    {
+      "name": "vcpkg",
+      "properties": [
+        {
+          "name": "cargo:source",
+          "value": "registry+https://github.com/rust-lang/crates.io-index"
+        },
+        {
+          "name": "cargo:checksum",
+          "value": "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
+        }
+      ],
+      "purl": "pkg:cargo/vcpkg@0.2.15",
+      "type": "library",
+      "version": "0.2.15"
     },
     {
       "name": "version_check",
@@ -5020,19 +5360,11 @@
     "properties": [
       {
         "name": "nirnay:component-digest",
-        "value": "02423733a3017bd1fd58ecd1d3cf657b93ea6c650c484425af17ae6ed9195b64"
+        "value": "3c4b3094476d1da412c4bd2d0848a2b48a34972e4d712cc14db0b43d314d7a27"
       },
       {
         "name": "nirnay:generated-from",
         "value": "Cargo.lock + constraints/*.txt"
-      },
-      {
-        "name": "nirnay:snapshot-status",
-        "value": "STALE SNAPSHOT checked into Git; regenerate with make sbom (python3 scripts/supply_chain.py sbom sbom.cdx.json). CI regenerates this file from the exact commit and records its digest; the checked-in copy is not a release verifier input."
-      },
-      {
-        "name": "nirnay:consolidation-record",
-        "value": "evidence/RRP-005-CONSOLIDATION-2026-11-23.md"
       }
     ],
     "tools": [

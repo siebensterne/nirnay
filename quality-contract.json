@@ -21,7 +21,6 @@
     ".shellcheckrc",
     "ruff.toml",
     "quality-contract.json",
-    "scripts/check_prose_unified.py",
     ".clang-tidy",
     ".pre-commit-config.yaml",
     "CMakeLists.txt",

@@ -7,10 +7,9 @@ Markdown: only lines added relative to a base ref are checked, so existing code
 is not churned. It has no third-party dependencies and is binding in
 `make check`.
 
-Policy sources and the repository's conflict resolutions are recorded in
-`engineering/style-policy.md`. The authoritative formatters remain
-`clang-format` for C/C++ (pinned in CI) and `ruff` for Python (opt-in until the
-existing corpus is reformatted in a dedicated PR).
+The authoritative formatters remain `clang-format` for C/C++ (pinned in CI)
+and `ruff` for Python (opt-in until the existing corpus is reformatted in a
+dedicated PR).
 
 Run from the repository root. Set `NIRNAY_STYLE_BASE` to compare against a
 different ref (default: `main`). Use `--self-test` for adversarial unit tests.
@@ -164,8 +163,7 @@ def collect_added_lines(base: str) -> dict[str, list[tuple[int, str]]]:
     )
     # Decode raw bytes: text mode would translate CRLF to LF and hide defects.
     added = parse_added_lines(result.stdout.decode("utf-8", errors="replace"))
-    # Vendored references are byte-exact third-party documents verified by
-    # check_style_references.py; they are not authored source and are excluded
+    # Vendored reference documents are not authored source; they are excluded
     # from formatting and prose checks (same rule as fieldbook).
     excluded = ("engineering/references/", "references/")
     return {
