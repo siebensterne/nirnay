@@ -1,6 +1,6 @@
 {
   "environment": {
-    "code_digest": "c032c86f0d0afb16309bb9d12be14cd9f6febbe847742f1745ad7bf8f5c717b2",
+    "code_digest": "2411846aacb37eab7da78821bde067090ccc3c1403dae0f685763f52e03aa5bc",
     "code_paths": [
       "research/python/src/quantlab/__init__.py",
       "research/python/src/quantlab/_canonical.py",

@@ -4,6 +4,7 @@
 #   check           full gate: static checks, Rust/Python tests, contracts
 #   check-static    static checks only; no python-test or rust-test
 #   freeze-check    RRP-004 frozen ingestion paths guard (with self-test)
+#   research-code-digest-check  declared research source digest guard (self-test)
 #   synthetic-market-policy-check  D11 source-pattern guard (with self-test)
 #   ci              full CI parity task
 #   assure          full assurance superset
@@ -26,12 +27,13 @@ export PYTEST_ADDOPTS := $(strip $(PYTEST_ADDOPTS) -p no:cacheprovider)
 Q_STYLE_BASE_SHA := $(shell git rev-parse --verify origin/main^{commit} 2>/dev/null)
 export Q_STYLE_BASE_SHA
 
-.PHONY: help ci assure check check-static lint test perf bench-ingress bench-risk-oms freeze-check synthetic-market-policy-check shellcheck-check generated-paths-check pollution-check style rust-style source-style python-ruff-style q-style standards-check style-gate python-format-check rust-test python-test python-check cpp-test cpp-format-check schema-check verify-local fmt constraints sbom supply-chain wheels packaging-test bundle bundle-verify git-policy kdb-analyze archive-verify tools
+.PHONY: help ci assure check check-static lint test perf bench-ingress bench-risk-oms freeze-check research-code-digest-check synthetic-market-policy-check shellcheck-check generated-paths-check pollution-check style rust-style source-style python-ruff-style q-style standards-check style-gate python-format-check rust-test python-test python-check cpp-test cpp-format-check schema-check verify-local fmt constraints sbom supply-chain wheels packaging-test bundle bundle-verify git-policy kdb-analyze archive-verify tools
 
 help:
 	@echo "check           full gate: static checks, Rust/Python tests, contracts"
 	@echo "check-static    static checks only; no python-test or rust-test"
 	@echo "freeze-check    RRP-004 frozen ingestion paths guard (with self-test)"
+	@echo "research-code-digest-check  declared research source digest guard (self-test)"
 	@echo "synthetic-market-policy-check  D11 source-pattern guard (with self-test)"
 	@echo "ci              full CI parity task"
 	@echo "assure          full assurance superset"
@@ -54,6 +56,7 @@ check: check-static
 	$(MAKE) python-test
 check-static:
 	$(MAKE) freeze-check
+	$(MAKE) research-code-digest-check
 	$(MAKE) synthetic-market-policy-check
 	$(MAKE) shellcheck-check
 	$(MAKE) generated-paths-check
@@ -69,6 +72,9 @@ test:
 freeze-check:
 	python3 scripts/check_source_ingestion_freeze.py --self-test
 	python3 scripts/check_source_ingestion_freeze.py
+research-code-digest-check:
+	python3 scripts/check_code_digest.py --self-test
+	python3 scripts/check_code_digest.py
 synthetic-market-policy-check:
 	python3 scripts/check_synthetic_market_policy.py --self-test
 	python3 scripts/check_synthetic_market_policy.py
