@@ -16,6 +16,6 @@ include("${CMAKE_CURRENT_LIST_DIR}/cmake/strict-flags.cmake")
 
 include(CTest)
 
-if(BUILD_TESTING AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/verification/cpp-oracle/CMakeLists.txt")
-  add_subdirectory(verification/cpp-oracle)
+if(BUILD_TESTING)
+  add_subdirectory(tests/oracles/cpp-numeric)
 endif()

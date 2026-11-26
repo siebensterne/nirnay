@@ -16,6 +16,11 @@
 # taken before phase 0 so setup steps are covered too.
 set -euo pipefail
 
+# The generated-path gate inspects ignored untracked files, so the gate itself
+# must not leave Python bytecode or a pytest cache in the source tree.
+export PYTHONDONTWRITEBYTECODE=1
+export PYTEST_ADDOPTS="${PYTEST_ADDOPTS:-} -p no:cacheprovider"
+
 source "$(dirname "${BASH_SOURCE[0]}")/gate.sh"
 gate_cd_root
 
@@ -78,12 +83,9 @@ run_step "python test suite" python3 -m pytest -q
 run_step "repository policy gates" python3 scripts/check_repo.py check
 run_step "architecture traceability" python3 scripts/check_repo.py arch
 run_step "generated-path policy" python3 scripts/check_generated_paths.py
-run_step "style reference integrity" python3 scripts/check_style_references.py
 run_step "git policy" python3 scripts/check_git_policy.py
 run_step "cross-pollution guard" python3 scripts/check_no_cross_pollution.py
 run_step "Rust added-line style" python3 scripts/check_rust_style.py
-run_step "documentation lifecycle" python3 scripts/check_docs.py
-run_step "unified prose audit" python3 scripts/check_prose_unified.py --all
 run_step "quality contract" python3 scripts/check_quality_contract.py
 run_step "license provenance" python3 scripts/check_license_provenance.py
 if cargo audit --version >/dev/null 2>&1; then

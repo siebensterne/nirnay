@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate the working copy against engineering/git-policy.json.
+"""Validate the working copy against the root git-policy.json.
 
 The policy can only be enforced where it is observable: branch names, commit
 subjects, tracked generated paths, and the inventory of branches, worktrees and
@@ -22,7 +22,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-POLICY = Path(__file__).resolve().parent.parent / "engineering" / "git-policy.json"
+POLICY = Path(__file__).resolve().parent.parent / "git-policy.json"
 
 
 def git(*args: str) -> str:

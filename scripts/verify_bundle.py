@@ -8,7 +8,7 @@ cannot catch this because the shell resolves the name through the filesystem.
 
 This verifier compares manifest paths and archive member names as exact
 strings, and asserts that the archive's member list equals the manifest's path
-list plus the two record files. It needs no case-sensitive filesystem.
+list plus the one record file. It needs no case-sensitive filesystem.
 
     python scripts/verify_bundle.py --bundle /path/to/extracted
     python scripts/verify_bundle.py --bundle /path/to/extracted --zip /path/to/bundle.zip
@@ -20,8 +20,7 @@ all five of its compiled binaries. `--self-test` proves that check can fail by
 clearing one executable bit in a copy of the archive.
 
 Record files excluded from the manifest:
-    BUILD-RESULTS.md      describes the bundle, so it cannot be inside its own hash set
-    SOURCE-MANIFEST.sha256
+    SOURCE-MANIFEST.sha256  describes the bundle, so it cannot hash itself
 """
 from __future__ import annotations
 
@@ -34,7 +33,7 @@ import zipfile
 from pathlib import Path, PurePosixPath
 
 MANIFEST_NAME = "SOURCE-MANIFEST.sha256"
-RECORD_FILES = {"BUILD-RESULTS.md", MANIFEST_NAME}
+RECORD_FILES = {MANIFEST_NAME}
 IGNORED = {".DS_Store"}
 
 # Mach-O (thin little/big endian, fat) and ELF headers: the payloads a consumer

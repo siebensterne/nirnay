@@ -1,5 +1,11 @@
 import datetime as dt
+import json
+import subprocess
+import tempfile
 import unittest
+from pathlib import Path
+
+import check_generated_paths
 from check_repo import check_graph, check_waivers
 
 
@@ -57,6 +63,73 @@ class WaiverTests(unittest.TestCase):
                 root.__truediv__.return_value = Path(d) / 'deny.toml'
                 errs = check_waivers(dt.date(2026, 11, 12))
         self.assertTrue(any('expired' in e for e in errs))
+
+
+class GeneratedPathTests(unittest.TestCase):
+    """Adversarial tests for the generated-path and Markdown gate."""
+
+    def policy(self) -> dict:
+        """Return a minimal generated-path policy for the tests."""
+        return {
+            "generated_paths": {
+                "forbidden_components": [".DS_Store", "__pycache__"],
+                "forbidden_component_prefixes": ["build-"],
+                "forbidden_suffixes": [".pyc"],
+                "exceptions": [{"path": "target/doc"}],
+            }
+        }
+
+    def test_root_todo_is_allowed(self) -> None:
+        """The one allowed root Markdown file passes."""
+        self.assertIsNone(
+            check_generated_paths.forbidden("TODO.md", self.policy())
+        )
+
+    def test_markdown_paths_are_rejected(self) -> None:
+        """Every other Markdown name, path and case is refused."""
+        cases = (
+            "README.md",
+            "src/example.md",
+            "docs/example.markdown",
+            "subdir/TODO.md",
+            "NOTES.MD",
+            "notes.MDX",
+            "notes.mdown",
+            "notes.mkd",
+            "notes.md.sha256",
+        )
+        for path in cases:
+            with self.subTest(path=path):
+                self.assertIsNotNone(
+                    check_generated_paths.forbidden(path, self.policy())
+                )
+
+    def test_generated_exception_excludes_markdown_rule(self) -> None:
+        """Declared generated output stays outside the Markdown rule."""
+        for path in ("target/doc/index.html", "target/doc/LICENSE.md"):
+            with self.subTest(path=path):
+                self.assertIsNone(
+                    check_generated_paths.forbidden(path, self.policy())
+                )
+
+    def test_tracked_and_ignored_untracked_markdown_is_detected(self) -> None:
+        """Tracked, untracked and ignored Markdown are all reported."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            subprocess.run(["git", "init", "-q", str(root)], check=True)
+            (root / "git-policy.json").write_text(json.dumps(self.policy()))
+            (root / ".gitignore").write_text("ignored/\n")
+            for relative in ("tracked.md", "untracked.md", "ignored/notes.md"):
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("notes\n")
+            subprocess.run(
+                ["git", "-C", str(root), "add", "tracked.md"], check=True
+            )
+            findings = check_generated_paths.validate(root)
+        self.assertTrue(any("tracked path `tracked.md`" in f for f in findings))
+        self.assertTrue(any("untracked path `untracked.md`" in f for f in findings))
+        self.assertTrue(any("ignored/notes.md" in f for f in findings))
 
 
 if __name__ == '__main__':

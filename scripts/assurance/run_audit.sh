@@ -17,11 +17,13 @@ if [[ "${1:-}" == "--history" ]]; then
   shift
 fi
 
-output="${1:-${repo_root}/build/assurance/english-audit.json}"
+# Keep the generated report out of the source tree: the generated-path gate
+# inspects ignored untracked files as well as tracked ones.
+output="${1:-${TMPDIR:-/tmp}/nirnay-english-audit.json}"
 mkdir -p "$(dirname "${output}")"
 
-# Vendored reference documents are byte-exact third-party material, verified
-# by scripts/check_style_references.py. Their wording is not authored prose.
+# Vendored reference documents are byte-exact third-party material; their
+# wording is not authored prose.
 audit_excludes=(--exclude 'engineering/references/*')
 
 set +e

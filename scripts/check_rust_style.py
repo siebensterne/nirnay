@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Check Rust style guidance on changed lines.
 
-Binding sources (see AGENTS.md):
+Binding sources:
   - Linux kernel Rust coding guidelines: https://docs.kernel.org/rust/coding-guidelines.html
   - Google Rust style guide: https://google.github.io/styleguide/rustguide.html
 

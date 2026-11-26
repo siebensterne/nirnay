@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Fail-closed gate for policy-forbidden generated paths.
+"""Fail-closed gate for forbidden generated paths and Markdown sources.
 
-The repository's `git-policy.json` declares components and suffixes that must
-never be tracked. This gate inspects both tracked files and untracked,
-non-ignored files so a generated artifact cannot enter a commit unnoticed.
-Ignored build output is deliberately excluded: the build directory is not part
-of the reviewed source surface.
+The repository's root `git-policy.json` declares components and suffixes that
+must never be tracked. This gate inspects tracked files and every untracked
+file, including ignored ones, so a generated artifact cannot enter a commit
+unnoticed. A single root `TODO.md` is the only permitted Markdown file;
+generated rustdoc under the declared `target/doc` exception is excluded from
+the Markdown rule.
 """
 
 from __future__ import annotations
@@ -15,10 +16,13 @@ import subprocess
 import sys
 from pathlib import Path
 
+MARKDOWN_EXTENSIONS = (".md", ".markdown", ".mdown", ".mkd", ".mdx")
+ALLOWED_MARKDOWN = "TODO.md"
+
 
 def load_policy(root: Path) -> dict:
     """Exercise load policy."""
-    return json.loads((root / "engineering" / "git-policy.json").read_text(encoding="utf-8"))
+    return json.loads((root / "git-policy.json").read_text(encoding="utf-8"))
 
 
 def git_paths(root: Path, args: list[str]) -> list[str]:
@@ -32,6 +36,19 @@ def git_paths(root: Path, args: list[str]) -> list[str]:
         detail = result.stderr.decode("utf-8", errors="replace").strip()
         raise RuntimeError(f"git {' '.join(args)} failed: {detail}")
     return [part for part in result.stdout.decode("utf-8").split("\0") if part]
+
+
+def markdown_violation(path: str) -> str | None:
+    """Return a reason when a path is a forbidden Markdown source file."""
+    normalized = path.replace("\\", "/").strip().strip("/")
+    if normalized == ALLOWED_MARKDOWN:
+        return None
+    name = normalized.rsplit("/", 1)[-1].lower()
+    if any(name.endswith(extension) for extension in MARKDOWN_EXTENSIONS):
+        return "forbidden Markdown file"
+    if any(name.endswith(extension + ".sha256") for extension in MARKDOWN_EXTENSIONS):
+        return "forbidden Markdown sidecar"
+    return None
 
 
 def forbidden(path: str, policy: dict) -> str | None:
@@ -50,16 +67,14 @@ def forbidden(path: str, policy: dict) -> str | None:
     for suffix in generated["forbidden_suffixes"]:
         if path.endswith(suffix):
             return f"forbidden suffix `{suffix}`"
-    return None
+    return markdown_violation(path)
 
 
 def validate(root: Path) -> list[str]:
     """Exercise validate."""
     policy = load_policy(root)
     tracked = git_paths(root, ["ls-files", "-z"])
-    untracked = git_paths(
-        root, ["ls-files", "--others", "--exclude-standard", "-z"]
-    )
+    untracked = git_paths(root, ["ls-files", "--others", "-z"])
     errors: list[str] = []
     for source, paths in (("tracked", tracked), ("untracked", untracked)):
         for path in paths:
