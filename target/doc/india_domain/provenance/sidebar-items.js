@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["PROVENANCE_SCHEMA_VERSION"],"fn":["provenance_for_source"],"struct":["SourceProvenance"]};

@@ -30,6 +30,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 BASE_REF = os.environ.get("NIRNAY_STYLE_BASE", "main")
+GENERATED_MARKDOWN_PREFIX = "target/doc/"
 
 RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
     (
@@ -114,7 +115,11 @@ def tracked_markdown() -> list[str]:
         capture_output=True,
         text=True,
     )
-    return [path for path in result.stdout.splitlines() if path]
+    return [
+        path
+        for path in result.stdout.splitlines()
+        if path and not path.startswith(GENERATED_MARKDOWN_PREFIX)
+    ]
 
 
 def added_markdown(base: str) -> dict[str, list[tuple[int, str]]]:
@@ -139,7 +144,9 @@ def added_markdown(base: str) -> dict[str, list[tuple[int, str]]]:
         if raw.startswith("+") and number and current:
             # Vendored references are third-party documents, not project
             # prose; they are hash-pinned by check_style_references.py.
-            if current.startswith(("engineering/references/", "references/")):
+            if current.startswith(
+                ("engineering/references/", "references/", GENERATED_MARKDOWN_PREFIX)
+            ):
                 number += 1
                 continue
             by_file.setdefault(current, []).append((number, raw[1:]))

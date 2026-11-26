@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["catalog_instrument","dataset_digest","decimal_to_paise","engine_config","event_sequence","journal_digest","level_price","level_quantity","main","parse_date","parse_venue","quantity","quote_for","run","times_for"],"struct":["Args","DatasetEvent","InstrumentSpec","Level","RiskSpec","RunReport","RunSpec","StrategySpec"]};

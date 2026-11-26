@@ -117,11 +117,13 @@ def check_generated(policy: dict) -> list[str]:
     suffixes = tuple(rule["forbidden_suffixes"])
     # Exceptions are explicit and reasoned in the policy file; anything not
     # listed here is a failure even if it happens to look like the exception.
-    exceptions = {entry["path"] for entry in rule.get("exceptions", [])}
+    exceptions = {entry["path"].rstrip("/") for entry in rule.get("exceptions", [])}
 
     errors: list[str] = []
     for path in git("ls-files", "-z").split("\0"):
-        if not path or path in exceptions:
+        if not path or any(
+            path == exc or path.startswith(exc + "/") for exc in exceptions
+        ):
             continue
         parts = path.split("/")
         for part in parts:

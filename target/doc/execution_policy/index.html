@@ -1,0 +1,64 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Central execution-mode policy (task P0-06, approval-authority revision)."><title>execution_policy - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../static.files/rustdoc-0c87338a.css"><meta name="rustdoc-vars" data-root-path="../" data-static-root-path="../static.files/" data-current-crate="execution_policy" data-themes="" data-resource-suffix="" data-rustdoc-version="1.99.1 (58cf8f9c3 2026-10-13)" data-channel="1.99.1" data-search-js="search-cf4fc35e.js" data-stringdex-js="stringdex-b5109af9.js" data-settings-js="settings-170eb4bf.js" ><script src="../static.files/storage-41dd4d93.js"></script><script defer src="../crates.js"></script><script defer src="../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../static.files/noscript-9f56287d.css"></noscript><link rel="alternate icon" type="image/png" href="../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../static.files/favicon-044be391.svg"></head><body class="rustdoc mod crate"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Crate execution_policy</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../execution_policy/index.html">execution_<wbr>policy</a><span class="version">0.1.0</span></h2></div><div class="sidebar-elems"><ul class="block"><li><a id="all-types" href="all.html">All Items</a></li></ul><section id="rustdoc-toc"><h3><a href="#structs">Crate Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#enums" title="Enums">Enums</a></li><li><a href="#constants" title="Constants">Constants</a></li><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1>Crate <span>execution_<wbr>policy</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../src/execution_policy/lib.rs.html#1-930">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Central execution-mode policy (task P0-06, approval-authority revision).</p>
+<p>Live authority is cryptographically enforced through <strong>independent
+attestations</strong>, not an issuer-signed list of names:</p>
+<ul>
+<li>The issuer signs the permit body (commit, account, broker, strategy,
+instruments, limits, expiry) with the release key.</li>
+<li>Every approver separately signs the issuer’s permit digest with their
+own Ed25519 key. Attestations bind to the issuer, the permit digest,
+and the expiry.</li>
+<li>Verification requires one distinct valid attestation per counted
+approval, from a registered approver key. Duplicate identities and
+duplicate keys are rejected; revocation is checked on every call.</li>
+<li>Registry configurations with a threshold above the registered approver
+count are rejected as malformed.</li>
+</ul>
+<p>Construction security: a carried envelope never grants authority. Every
+authorization re-verifies the issuer signature and every attestation.
+The runtime clock, commit identity and projected exposure come from the
+trusted runtime and risk authorities, never from the strategy.</p>
+<p>Enforcement boundary and its limits:</p>
+<ul>
+<li>Mode: only an explicitly Live-configured policy can reach permit
+verification. Paper and Simulated policies deny Live authorization even
+when they carry a valid permit; a permit never changes the mode.</li>
+<li>Scope: a permit authorizes only its account, broker, strategy,
+instrument allowlist, and financial limits. The permit schema has no
+venue/action/side fields, so those dimensions are NOT enforced —
+permissive assumptions about them are forbidden.</li>
+<li>Time: a permit is expired at its expiry instant. Unrepresentable
+timestamps fail closed; they are never replaced with a fallback.</li>
+<li>Limits: a request exactly at a limit is allowed; above denies.</li>
+<li>Revocation: the registry supplied by the authority-owning application
+carries revocations. If that snapshot is stale or unavailable, the
+deployment — not this crate — owns re-fetching it; this crate only
+evaluates the registry it is given. Production use requires a fresh
+snapshot (a separate risk authority decision, not yet built).</li>
+<li>Authorization is not reservation: this crate evaluates policy on the
+state it is given. Atomic exposure reservation, idempotency, and
+reconciliation belong to the independent risk authority, which does
+not exist yet. Do not describe this crate as an independent RMS.</li>
+</ul>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.ApprovalAttestation.html" title="struct execution_policy::ApprovalAttestation">Approval<wbr>Attestation</a></dt><dd>One approver’s independent attestation: the approver signs the issuer’s
+permit digest, binding the approval to the exact permit body, the
+issuer, and the expiry.</dd><dt><a class="struct" href="struct.Authorization.html" title="struct execution_policy::Authorization">Authorization</a></dt><dd>The decision record. Bound to the permit commit so a policy change can
+never silently authorize outstanding orders.</dd><dt><a class="struct" href="struct.ExecutionPolicy.html" title="struct execution_policy::ExecutionPolicy">Execution<wbr>Policy</a></dt><dd>The central policy object. Only paper/simulated authority can exist
+without a permit. A carried envelope has zero authority: every
+authorization re-derives authority from cryptographic verification.</dd><dt><a class="struct" href="struct.OrderRequest.html" title="struct execution_policy::OrderRequest">Order<wbr>Request</a></dt><dd>Order context for one authorization request. Supplied by the OMS; the
+strategy can only propose these fields, the policy validates them
+against the permit.</dd><dt><a class="struct" href="struct.PermitBody.html" title="struct execution_policy::PermitBody">Permit<wbr>Body</a></dt><dd>The permit body: everything the issuer signs. Excludes signatures and
+attestations (those sign this digest).</dd><dt><a class="struct" href="struct.PermitEnvelope.html" title="struct execution_policy::PermitEnvelope">Permit<wbr>Envelope</a></dt><dd>A live permit envelope: issuer signature over the body, plus one
+independent attestation per distinct approver.</dd><dt><a class="struct" href="struct.TrustRegistry.html" title="struct execution_policy::TrustRegistry">Trust<wbr>Registry</a></dt><dd>Trust registry: issuer keys, approver keys, minimum approvals, and
+revocation list. Loaded from protected configuration; never constructed
+from strategy input.</dd><dt><a class="struct" href="struct.TrustedKey.html" title="struct execution_policy::TrustedKey">Trusted<wbr>Key</a></dt><dd>A registered public key. Fields are private; construction is the
+authority’s job, so untrusted input cannot pose as a trusted key.
+Every key is grammar-checked, hex-decoded, canonicalized, and Ed25519
+validated at construction: invalid key material fails here, never at
+verification time.</dd><dt><a class="struct" href="struct.TrustedRuntime.html" title="struct execution_policy::TrustedRuntime">Trusted<wbr>Runtime</a></dt><dd>Runtime facts supplied by trusted authorities, not by the strategy.
+Fields are private so untrusted bytes cannot pose as trusted state.
+Construction is the authority-owning application’s responsibility.</dd></dl><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.ExecutionMode.html" title="enum execution_policy::ExecutionMode">Execution<wbr>Mode</a></dt><dd>Execution mode: distinct types enforced at the type level. <code>Live</code>
+authority exists only while a cryptographically verified permit and its
+approval attestations are valid.</dd><dt><a class="enum" href="enum.PolicyError.html" title="enum execution_policy::PolicyError">Policy<wbr>Error</a></dt><dd>Error for every fail-closed path. Authorization fails with a typed
+category so callers can distinguish mode, permit, scope, input, and
+timestamp denials; no variant leaks secret material.</dd></dl><h2 id="constants" class="section-header">Constants<a href="#constants" class="anchor">§</a></h2><dl class="item-table"><dt><a class="constant" href="constant.ENCODING_VERSION.html" title="constant execution_policy::ENCODING_VERSION">ENCODING_<wbr>VERSION</a></dt><dd>Policy encoding version. Any change to the canonical encoding bumps this.</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.approver_identity.html" title="fn execution_policy::approver_identity">approver_<wbr>identity</a></dt><dd>The approver identity for a registered key: the suffix after the final
+‘/’ in the key id, or the whole key id when it has no separator.</dd></dl></section></div></main></body></html>

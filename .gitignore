@@ -1,5 +1,5 @@
 # Rust and Python build artefacts
-target/
+target/*
 **/__pycache__/
 *.py[cod]
 .pytest_cache/
@@ -33,3 +33,7 @@ build-*/
 Thumbs.db
 
 Task.md
+
+# Generated rustdoc is a tracked deliverable, unlike the rest of target/.
+!target/doc/
+!target/doc/**

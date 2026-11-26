@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DEFAULT_MAX_RECORDS","DEFAULT_MAX_RECORD_BYTES","DEFAULT_MAX_TOTAL_BYTES"],"enum":["ValidationError"],"fn":["validate_company_jsonl","validate_jsonl"],"struct":["ValidationLimits","ValidationReport"]};

@@ -37,8 +37,8 @@ def git_paths(root: Path, args: list[str]) -> list[str]:
 def forbidden(path: str, policy: dict) -> str | None:
     """Exercise forbidden."""
     generated = policy["generated_paths"]
-    exceptions = {item["path"] for item in generated.get("exceptions", [])}
-    if path in exceptions:
+    exceptions = {item["path"].rstrip("/") for item in generated.get("exceptions", [])}
+    if any(path == exc or path.startswith(exc + "/") for exc in exceptions):
         return None
     parts = path.split("/")
     for component in generated["forbidden_components"]:
