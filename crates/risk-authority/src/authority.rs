@@ -4036,6 +4036,22 @@ fn reconcile_executions(
                 record.execution_id
             )));
         }
+        // An execution report only observes the order the durable decision
+        // authorized. Raising OrderQty would inherit approval for exposure that
+        // was never decided; lowering it is an amendment that needs its own
+        // decision and permit identity. Neither is implicit in a FIX report.
+        if record.order_quantity > authorized_quantity {
+            return Err(RecoveryError::Inconsistent(format!(
+                "execution {} increases OrderQty {} above the authorized quantity {}",
+                record.execution_id, record.order_quantity, authorized_quantity
+            )));
+        }
+        if record.order_quantity < authorized_quantity {
+            return Err(RecoveryError::Inconsistent(format!(
+                "execution {} reduces OrderQty {} without an explicit amendment decision and new permit identity",
+                record.execution_id, record.order_quantity
+            )));
+        }
         match sequences.entry(record.report_sequence) {
             std::collections::btree_map::Entry::Vacant(entry) => {
                 entry.insert(record.execution_id.clone());
@@ -4155,11 +4171,16 @@ fn reconcile_executions(
             RecoveryError::Inconsistent("execution correction costs underflow".to_owned())
         })?;
         if record.kind == ExecutionEventKind::TradeCancel {
+            // All four cumulative facts must agree with the executions that
+            // remain: quantity, notional, fees and costs are cleared together
+            // and any disagreement is a contradiction, not a usable estimate.
             if record.cumulative_filled_quantity != other_quantity
                 || record.cumulative_notional_paise != other_notional
+                || record.fees_paise != other_fees
+                || record.costs_paise != other_costs
             {
                 return Err(RecoveryError::Inconsistent(format!(
-                    "trade cancel {} disagrees with the remaining executions",
+                    "trade cancel {} disagrees with the remaining executions on quantity, notional, fees or costs",
                     record.execution_id
                 )));
             }
@@ -4169,6 +4190,12 @@ fn reconcile_executions(
             target.costs_paise = 0;
             target.cancelled = true;
         } else {
+            if target.cancelled {
+                return Err(RecoveryError::Inconsistent(format!(
+                    "execution correction {} targets an already cancelled execution",
+                    record.execution_id
+                )));
+            }
             let new_quantity = record
                 .cumulative_filled_quantity
                 .checked_sub(other_quantity)
@@ -4389,19 +4416,13 @@ fn apply_execution_to_state(
             remaining.reserved_notional_paise = leaves_notional;
             state.reservations.insert(decision.intent_id, remaining);
             if filled_quantity > 0 {
-                let exposure = match execution {
-                    Some(value) => value,
-                    None => ExecutionExposure::new(
-                        reservation.quantity.get(),
-                        filled_quantity,
-                        leaves_quantity,
-                        filled_notional,
-                        Paise(0),
-                        Paise(0),
-                        Vec::new(),
-                    )?,
-                };
-                state.executions.insert(decision.intent_id, exposure);
+                // Only a reconciled execution journal may create an exposure.
+                // An aggregate-only fill has no execution identity and no
+                // certified fee or cost fact; inventing zeros here would turn
+                // missing evidence into an apparent reconciliation.
+                if let Some(value) = execution {
+                    state.executions.insert(decision.intent_id, value);
+                }
             }
         }
         OmsPermitState::Filled => {
@@ -4727,6 +4748,17 @@ fn reconstruct(
                     }
                 }
             }
+        }
+        // A reported fill with no execution-level evidence is not reconciled:
+        // no summary was synthesized, no zero-fee exposure was inserted, and
+        // the authority stays NOT-READY until the owner resolves the gap.
+        if filled_quantity > 0 && summary.is_none() && uncertain.is_none() {
+            latch_reconciliation(
+                &mut state,
+                reconciliation.as_ref(),
+                "an OMS fill has no execution-level evidence and cannot be reconciled".to_owned(),
+                format!("permit-{}", oms.permit_id),
+            )?;
         }
         if let Some(uncertain) = uncertain {
             latch_reconciliation(

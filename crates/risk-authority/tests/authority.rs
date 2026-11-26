@@ -2285,12 +2285,25 @@ mod recovery_tests {
             reservation.quantity.get(),
         );
         account.seal(1, genesis_digest());
+        let full_fill = exec_record(
+            &reservation,
+            "exec-full",
+            1,
+            ExecutionEventKind::Fill,
+            None,
+            reservation.quantity.get(),
+            0,
+            reservation.reserved_notional_paise.0,
+            0,
+            0,
+        );
 
         let (c2, d2) = file_stores(&control, &decisions);
         let second = build_recovered(
             &lock,
             FixtureRecords {
                 oms: vec![oms],
+                executions: seal_executions(vec![full_fill]),
                 account: vec![account],
                 ..Default::default()
             },
@@ -2402,12 +2415,25 @@ mod recovery_tests {
             1,
         );
         account.seal(1, genesis_digest());
+        let partial_fill = exec_record(
+            &reservation,
+            "exec-partial",
+            1,
+            ExecutionEventKind::Fill,
+            None,
+            1,
+            3,
+            PRICE,
+            0,
+            0,
+        );
 
         let (c, d) = file_stores(&control, &decisions);
         let recovered = build_recovered(
             &lock,
             FixtureRecords {
                 oms: vec![oms],
+                executions: seal_executions(vec![partial_fill]),
                 account: vec![account],
                 ..Default::default()
             },
@@ -3118,8 +3144,9 @@ mod recovery_tests {
         let (target, reservation) = consumed_permit(&control, &decisions, &lock, 4)?;
         let digest = digest_for(&target, &reservation);
 
-        // A fill with no notional cannot be priced. Recovery still books the
-        // executed quantity and shrinks the reservation, but stays NOT-READY.
+        // A fill with no notional cannot be priced. The execution-level report
+        // is still required; recovery books the executed quantity and shrinks
+        // the reservation, but stays NOT-READY.
         let (c1, d1) = file_stores(&control, &decisions);
         let unpriced = build_recovered(
             &lock,
@@ -3132,6 +3159,18 @@ mod recovery_tests {
                     0,
                     Some(3),
                 )],
+                executions: seal_executions(vec![exec_record(
+                    &reservation,
+                    "exec-unpriced",
+                    1,
+                    ExecutionEventKind::Fill,
+                    None,
+                    1,
+                    3,
+                    0,
+                    0,
+                    0,
+                )]),
                 account: account_delta(1)?,
                 ..Default::default()
             },
@@ -3264,6 +3303,7 @@ mod recovery_tests {
                     PRICE,
                     Some(3),
                 )],
+                executions: seal_executions(vec![fill.clone()]),
                 account: account_delta(2)?,
                 ..Default::default()
             },
@@ -3311,6 +3351,7 @@ mod recovery_tests {
                     PRICE,
                     Some(2),
                 )],
+                executions: seal_executions(vec![fill.clone()]),
                 account: account_delta(1)?,
                 ..Default::default()
             },
@@ -3362,6 +3403,18 @@ mod recovery_tests {
                     PRICE,
                     Some(3),
                 )],
+                executions: seal_executions(vec![exec_record(
+                    &reservation,
+                    "exec-cancelled",
+                    1,
+                    ExecutionEventKind::Fill,
+                    None,
+                    1,
+                    3,
+                    PRICE,
+                    0,
+                    0,
+                )]),
                 account: account_delta(1)?,
                 ..Default::default()
             },
@@ -3397,6 +3450,18 @@ mod recovery_tests {
                     4 * PRICE,
                     Some(2),
                 )],
+                executions: seal_executions(vec![exec_record(
+                    &reservation,
+                    "exec-filled",
+                    1,
+                    ExecutionEventKind::Fill,
+                    None,
+                    4,
+                    0,
+                    4 * PRICE,
+                    0,
+                    0,
+                )]),
                 account: account_delta(4)?,
                 ..Default::default()
             },
@@ -3513,6 +3578,21 @@ mod recovery_tests {
             2_000,
         );
         filled.seal(1, genesis_digest());
+        let mut full_fill = ExecutionRecoveryRecord::new(
+            sealed.permit_id,
+            sealed.intent_id,
+            "exec-mismatch".to_owned(),
+            1,
+            ExecutionEventKind::Fill,
+            None,
+            2,
+            2,
+            0,
+            2_000,
+            0,
+            0,
+        );
+        full_fill.seal(1, genesis_digest());
         let mut account = AccountRecoveryRecord::new(
             "account-event".to_owned(),
             AccountId::new(ACCOUNT)?,
@@ -3525,6 +3605,7 @@ mod recovery_tests {
             &lock,
             FixtureRecords {
                 oms: vec![filled],
+                executions: vec![full_fill],
                 account: vec![account],
                 ..Default::default()
             },
@@ -3941,6 +4022,337 @@ mod recovery_tests {
         let _ = std::fs::remove_file(&control);
         let _ = std::fs::remove_file(&decisions);
         let _ = std::fs::remove_file(&lock);
+        Ok(())
+    }
+
+    /// An OMS cumulative summary is not execution-level evidence. Without a
+    /// sealed execution report there is no execution identity and no fee or
+    /// cost fact, so recovery may not fabricate a zero-fee exposure or grant
+    /// fresh risk on the strength of the aggregate alone.
+    #[test]
+    fn recovery_does_not_synthesize_execution_evidence_from_oms_aggregates() -> TestResult {
+        let control = temp_path("control-no-evidence");
+        let decisions = temp_path("decisions-no-evidence");
+        let lock = temp_path("lock-no-evidence");
+        for path in [&control, &decisions, &lock] {
+            let _ = std::fs::remove_file(path);
+        }
+        let (target, reservation) = consumed_permit(&control, &decisions, &lock, 4)?;
+        let digest = digest_for(&target, &reservation);
+
+        let (c, d) = file_stores(&control, &decisions);
+        let recovered = build_recovered(
+            &lock,
+            FixtureRecords {
+                oms: vec![oms_record(
+                    &reservation,
+                    digest,
+                    OmsPermitState::Open,
+                    1,
+                    PRICE,
+                    Some(3),
+                )],
+                account: account_delta(1)?,
+                ..Default::default()
+            },
+            c,
+            d,
+        )?;
+        let snapshot = recovered.snapshot()?;
+        assert!(
+            !snapshot.executions.contains_key(&reservation.intent_id),
+            "no execution exposure is synthesized without execution-level evidence"
+        );
+        assert!(
+            snapshot.reconciliation_blocked,
+            "an uncertifiable aggregate-only fill latches reconciliation"
+        );
+        assert!(
+            snapshot
+                .reconciliation_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("execution-level evidence")),
+            "the latch names the missing evidence"
+        );
+        assert!(
+            !risk_probe(&recovered)?,
+            "a NOT-READY authority denies new risk"
+        );
+        drop(recovered);
+        for path in [&control, &decisions, &lock] {
+            let _ = std::fs::remove_file(path);
+        }
+        Ok(())
+    }
+
+    /// A FIX OrderQty change is an amendment of the authorization, not a new
+    /// reading of the original permit. An increase borrows approval for
+    /// exposure that was never decided; a decrease needs a new, explicit
+    /// decision and permit identity. Neither is implicit in an execution report.
+    #[test]
+    fn recovery_rejects_unauthorised_order_quantity_amendments() -> TestResult {
+        let control = temp_path("control-qty-amend");
+        let decisions = temp_path("decisions-qty-amend");
+        let lock = temp_path("lock-qty-amend");
+        for path in [&control, &decisions, &lock] {
+            let _ = std::fs::remove_file(path);
+        }
+        // Seed the original authorization directly so the fixture is about
+        // amendment evidence alone, not the evaluation policy's gross cap.
+        let mut decision = RiskDecisionRecord::new(
+            intent(1, 10, PRICE, Side::Buy)?,
+            DecisionOutcome::Accepted,
+            1,
+            10 * PRICE,
+            1,
+            0,
+        );
+        decision.seal(1, genesis_digest());
+        let permit_id = decision.permit_id;
+        let intent_id = decision.intent_id;
+        let digest = permit_digest(permit_id, "risk-v1", decision.revision, &decision.intent);
+        let decision_store = || -> Box<dyn DecisionStore + Send + Sync> {
+            write_json_lines(&decisions, std::slice::from_ref(&decision))
+                .expect("durable decision");
+            Box::new(FileDecisionStore::new(&decisions))
+        };
+        let oms = |leaves: i64| {
+            let mut record = OmsPermitRecord::new(
+                permit_id,
+                intent_id,
+                digest.clone(),
+                OmsPermitState::Open,
+                1,
+                PRICE,
+            );
+            record = record.with_leaves_quantity(leaves);
+            record.seal(1, genesis_digest());
+            record
+        };
+        let exec = |id: &str, order_quantity: i64, leaves: i64| {
+            ExecutionRecoveryRecord::new(
+                permit_id,
+                intent_id,
+                id.to_owned(),
+                1,
+                ExecutionEventKind::Fill,
+                None,
+                order_quantity,
+                1,
+                leaves,
+                PRICE,
+                0,
+                0,
+            )
+        };
+
+        let (c1, _) = file_stores(&control, &decisions);
+        let rejected = build_recovered(
+            &lock,
+            FixtureRecords {
+                oms: vec![oms(11)], // Original OrderQty 10, CumQty 1, LeavesQty 11
+                executions: seal_executions(vec![exec("exec-increase", 12, 11)]),
+                account: account_delta(1)?,
+                ..Default::default()
+            },
+            c1,
+            decision_store(),
+        );
+        assert!(
+            rejected.err().is_some_and(inconsistent),
+            "OrderQty 12 above the original authorization of 10 is explicitly rejected"
+        );
+
+        let (c2, _) = file_stores(&control, &decisions);
+        let rejected = build_recovered(
+            &lock,
+            FixtureRecords {
+                oms: vec![oms(8)],
+                executions: seal_executions(vec![exec("exec-reduce", 9, 8)]),
+                account: account_delta(1)?,
+                ..Default::default()
+            },
+            c2,
+            decision_store(),
+        );
+        assert!(
+            rejected.err().is_some_and(inconsistent),
+            "a reduced OrderQty without a new decision and permit identity is rejected"
+        );
+        for path in [&control, &decisions, &lock] {
+            let _ = std::fs::remove_file(path);
+        }
+        Ok(())
+    }
+
+    /// A trade cancel removes one execution from the effective set. All four
+    /// cumulative facts must agree with the remaining executions, and a later
+    /// correction may not rewrite an execution that no longer exists.
+    #[test]
+    fn recovery_validates_trade_cancel_money_and_late_corrections() -> TestResult {
+        let control = temp_path("control-trade-cancel");
+        let decisions = temp_path("decisions-trade-cancel");
+        let lock = temp_path("lock-trade-cancel");
+        for path in [&control, &decisions, &lock] {
+            let _ = std::fs::remove_file(path);
+        }
+        let (target, reservation) = consumed_permit(&control, &decisions, &lock, 4)?;
+        let digest = digest_for(&target, &reservation);
+        let fill1 = exec_record(
+            &reservation,
+            "exec-1",
+            1,
+            ExecutionEventKind::Fill,
+            None,
+            1,
+            3,
+            PRICE,
+            10,
+            5,
+        );
+        let fill2 = exec_record(
+            &reservation,
+            "exec-2",
+            2,
+            ExecutionEventKind::Fill,
+            None,
+            2,
+            2,
+            2 * PRICE,
+            25,
+            12,
+        );
+        let cancel = exec_record(
+            &reservation,
+            "exec-cancel",
+            3,
+            ExecutionEventKind::TradeCancel,
+            Some("exec-2"),
+            1,
+            3,
+            PRICE,
+            10,
+            5,
+        );
+        let oms = || {
+            oms_record(
+                &reservation,
+                digest.clone(),
+                OmsPermitState::Open,
+                1,
+                PRICE,
+                Some(3),
+            )
+        };
+
+        let (c1, d1) = file_stores(&control, &decisions);
+        let valid = build_recovered(
+            &lock,
+            FixtureRecords {
+                oms: vec![oms()],
+                executions: seal_executions(vec![fill1.clone(), fill2.clone(), cancel.clone()]),
+                account: account_delta(1)?,
+                ..Default::default()
+            },
+            c1,
+            d1,
+        )?;
+        let exposure = valid
+            .snapshot()?
+            .executions
+            .get(&reservation.intent_id)
+            .cloned()
+            .expect("the remaining execution stays exposure");
+        assert_eq!(
+            exposure.filled_quantity, 1,
+            "a cancelled execution leaves only the remaining fill"
+        );
+        assert_eq!(
+            exposure.fees_paise,
+            Paise(10),
+            "the remaining execution keeps its own fees"
+        );
+        assert_eq!(
+            exposure.costs_paise,
+            Paise(5),
+            "the remaining execution keeps its own costs"
+        );
+        assert_eq!(
+            exposure.execution_ids,
+            vec!["exec-1".to_owned()],
+            "the cancelled execution identity is excluded"
+        );
+        drop(valid);
+
+        let mut bad_fees = cancel.clone();
+        bad_fees.fees_paise = 11;
+        let (c2, d2) = file_stores(&control, &decisions);
+        let rejected = build_recovered(
+            &lock,
+            FixtureRecords {
+                oms: vec![oms()],
+                executions: seal_executions(vec![fill1.clone(), fill2.clone(), bad_fees]),
+                account: account_delta(1)?,
+                ..Default::default()
+            },
+            c2,
+            d2,
+        );
+        assert!(
+            rejected.err().is_some_and(inconsistent),
+            "a cancel contradicting the remaining fees fails closed"
+        );
+
+        let mut bad_costs = cancel.clone();
+        bad_costs.costs_paise = 6;
+        let (c3, d3) = file_stores(&control, &decisions);
+        let rejected = build_recovered(
+            &lock,
+            FixtureRecords {
+                oms: vec![oms()],
+                executions: seal_executions(vec![fill1.clone(), fill2.clone(), bad_costs]),
+                account: account_delta(1)?,
+                ..Default::default()
+            },
+            c3,
+            d3,
+        );
+        assert!(
+            rejected.err().is_some_and(inconsistent),
+            "a cancel contradicting the remaining costs fails closed"
+        );
+
+        let late_correction = exec_record(
+            &reservation,
+            "exec-late",
+            4,
+            ExecutionEventKind::Correct,
+            Some("exec-2"),
+            1,
+            3,
+            PRICE,
+            10,
+            5,
+        );
+        let (c4, d4) = file_stores(&control, &decisions);
+        let rejected = build_recovered(
+            &lock,
+            FixtureRecords {
+                oms: vec![oms()],
+                executions: seal_executions(vec![fill1, fill2, cancel, late_correction]),
+                account: account_delta(1)?,
+                ..Default::default()
+            },
+            c4,
+            d4,
+        );
+        assert!(
+            rejected.err().is_some_and(inconsistent),
+            "a correction cannot rewrite an execution already cancelled"
+        );
+        for path in [&control, &decisions, &lock] {
+            let _ = std::fs::remove_file(path);
+        }
         Ok(())
     }
 }
