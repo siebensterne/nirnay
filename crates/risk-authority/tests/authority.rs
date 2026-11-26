@@ -4065,7 +4065,7 @@ mod recovery_tests {
             &permits,
             &executions,
             &JournalIdentity::new(ObservationSource::Oms, AccountId::new(99)?, OMS_JOURNAL_ID),
-            &RecoveryAuthenticity::OwnerDirectory,
+            &RecoveryAuthenticity::OwnerSignature(owner_key()),
         )?;
         let (c1, d1) = file_stores(&control, &decisions);
         let wrong_account = RiskAuthority::recover(RecoveryConfig {
@@ -4093,7 +4093,7 @@ mod recovery_tests {
                 AccountId::new(ACCOUNT)?,
                 "some-other-journal",
             ),
-            &RecoveryAuthenticity::OwnerDirectory,
+            &RecoveryAuthenticity::OwnerSignature(owner_key()),
         )?;
         let (c2, d2) = file_stores(&control, &decisions);
         let wrong_journal = RiskAuthority::recover(RecoveryConfig {
