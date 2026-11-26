@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Check added q / kdb+ lines for mechanical style violations.
 
-The binding rule set is ``q-style.json`` at the repository root. This checker
+The binding rule set is ``q.toml`` at the repository root. This checker
 loads it at import time, so editing the JSON changes enforcement and editing
 the checker's constants cannot silently diverge from the published contract.
 The rules cover whitespace hygiene, the silent loader-stop bare ``/`` line,
@@ -20,7 +20,7 @@ Use --self-test for adversarial unit tests.
 
 from __future__ import annotations
 
-import json
+import tomllib
 import os
 import re
 import subprocess
@@ -30,23 +30,23 @@ from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
-CONFIG_PATH = ROOT / "q-style.json"
+CONFIG_PATH = ROOT / "q.toml"
 
 
 def validate_config(data: dict[str, Any]) -> dict[str, Any]:
     """Validate the machine-readable q style contract."""
     if data.get("schema_version") != 1:
-        raise ValueError("unsupported q-style.json schema_version")
+        raise ValueError("unsupported q.toml schema_version")
     if data.get("enforcement", {}).get("waivers") != "none":
-        raise ValueError("q-style.json must declare zero waivers")
+        raise ValueError("q.toml must declare zero waivers")
     if data.get("rules", {}).get("max_columns") != 100:
-        raise ValueError("q-style.json max_columns must remain 100")
+        raise ValueError("q.toml max_columns must remain 100")
     return data
 
 
 def load_config(path: Path = CONFIG_PATH) -> dict[str, Any]:
     """Load and validate the machine-readable q style contract."""
-    return validate_config(json.loads(path.read_text(encoding="utf-8")))
+    return validate_config(tomllib.loads(path.read_text(encoding="utf-8")))
 
 
 CONFIG = load_config()
