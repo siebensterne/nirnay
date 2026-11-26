@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"enum":["MarketStatus","RequestMode","Type"],"mod":["feed","full_feed"],"struct":["Feed","FeedResponse","FirstLevelWithGreeks","FullFeed","IndexFullFeed","Ltpc","MarketFullFeed","MarketInfo","MarketLevel","MarketOhlc","Ohlc","OptionGreeks","Quote","StatusInfo"]};

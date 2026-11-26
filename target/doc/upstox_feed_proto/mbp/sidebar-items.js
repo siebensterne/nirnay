@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"constant":["FULL_DEPTH_LEVELS"],"enum":["MbpDecodeError"],"fn":["market_full_to_mbp","millis_to_ns","rupees_to_paise"]};

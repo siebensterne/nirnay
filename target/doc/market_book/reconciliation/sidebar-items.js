@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"fn":["compare_books","is_live"],"struct":["BookComparison","SourceBookView"]};

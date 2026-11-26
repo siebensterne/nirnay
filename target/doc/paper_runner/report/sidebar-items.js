@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"constant":["PAPER_REPORT_SCHEMA_VERSION"],"struct":["DecisionRecord","PaperReport"]};

@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"enum":["DecodeError","FeedKind","FeedResponseType"],"fn":["decode_feed_response","decode_feed_response_diagnostic","response_type_from_raw"],"struct":["FeedResponseDiagnostic","FeedSummary"],"type":["DecodeResult"]};

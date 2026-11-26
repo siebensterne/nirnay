@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"constant":["ENCODING_VERSION"],"enum":["ExecutionMode","PolicyError"],"fn":["approver_identity"],"struct":["ApprovalAttestation","Authorization","ExecutionPolicy","OrderRequest","PermitBody","PermitEnvelope","TrustRegistry","TrustedKey","TrustedRuntime"]};

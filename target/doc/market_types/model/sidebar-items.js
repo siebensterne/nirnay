@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"enum":["ContinuityState","Control","DiscontinuityReason","ExchangeEvent","LifecycleKind","QuantityChange","ResetReason"],"struct":["BookSnapshot","EventMeta","Level","Price","Quantity","QuantityDelta","SourceId","SourceStatus"]};

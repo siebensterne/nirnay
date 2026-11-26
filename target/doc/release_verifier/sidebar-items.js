@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"mod":["canonical_wire","error","files","jcs","payload_registry","profile_resolver","receipt","resource_profile","schema","streaming","trust","verifier"]};

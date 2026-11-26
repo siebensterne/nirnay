@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"enum":["OriginClass","SequenceScope"],"fn":["business_event_id","capture_frame_id","observation_id"],"struct":["ContentId"]};

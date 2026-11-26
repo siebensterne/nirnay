@@ -89,11 +89,6 @@
     "forbidden_suffixes": [
       ".pyc",
       ".pyo"
-    ],
-    "exceptions": [
-      {
-        "path": "target/doc"
-      }
     ]
   },
   "automation": {
