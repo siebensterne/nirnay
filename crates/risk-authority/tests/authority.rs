@@ -465,8 +465,9 @@ fn baseline_reservation_is_accepted() -> TestResult {
         "exact notional is reserved"
     );
     assert_eq!(
-        reservation.snapshot_revision, 1,
-        "the permit records its state revision"
+        reservation.snapshot_revision,
+        authority.revision()?,
+        "the permit records the complete committed state revision"
     );
     Ok(())
 }
@@ -1427,6 +1428,316 @@ fn protected_control_actions_require_token_and_evidence() -> TestResult {
             )
             .is_ok(),
         "an evidenced operator release is accepted"
+    );
+    Ok(())
+}
+
+/// Revision is a complete version of every fact used by risk evaluation, not
+/// just of clock and exposure. A real change advances it exactly once; a
+/// repeated value is a defined no-op and advances it zero times.
+#[test]
+fn public_mutations_are_revision_aware() -> TestResult {
+    let authority = authority()?;
+    let start = authority.revision()?;
+
+    authority.set_session_open(true)?;
+    assert_eq!(
+        authority.revision()?,
+        start,
+        "repeating session state is a no-op"
+    );
+    authority.set_session_open(false)?;
+    assert_eq!(
+        authority.revision()?,
+        start + 1,
+        "closing the session is versioned"
+    );
+    authority.set_session_open(true)?;
+    assert_eq!(
+        authority.revision()?,
+        start + 2,
+        "reopening the session is versioned"
+    );
+
+    authority.set_snapshot_available(true)?;
+    assert_eq!(
+        authority.revision()?,
+        start + 2,
+        "repeating snapshot state is a no-op"
+    );
+    authority.set_snapshot_available(false)?;
+    assert_eq!(
+        authority.revision()?,
+        start + 3,
+        "withdrawing the snapshot is versioned"
+    );
+
+    authority.set_daily_pnl(Paise(10))?;
+    assert_eq!(authority.revision()?, start + 4, "daily P&L is versioned");
+    authority.set_daily_pnl(Paise(10))?;
+    assert_eq!(
+        authority.revision()?,
+        start + 4,
+        "repeating daily P&L is a no-op"
+    );
+
+    authority.set_now(LogicalNanos::new(1_000))?;
+    assert_eq!(
+        authority.revision()?,
+        start + 5,
+        "the logical clock is versioned"
+    );
+    authority.set_now(LogicalNanos::new(1_000))?;
+    assert_eq!(
+        authority.revision()?,
+        start + 5,
+        "repeating the clock is a no-op"
+    );
+
+    let tokens = authority.register_all_owners()?;
+    authority.set_kill_switch(
+        tokens.operator,
+        true,
+        "op".to_owned(),
+        "stop".to_owned(),
+        None,
+    )?;
+    assert_eq!(
+        authority.revision()?,
+        start + 6,
+        "engaging the kill switch is versioned"
+    );
+    authority.set_reconciliation_blocked(
+        tokens.reconciliation,
+        true,
+        "blocked".to_owned(),
+        None,
+    )?;
+    assert_eq!(
+        authority.revision()?,
+        start + 7,
+        "latching reconciliation is versioned"
+    );
+    authority.set_reconciliation_blocked(
+        tokens.reconciliation,
+        true,
+        "blocked".to_owned(),
+        None,
+    )?;
+    assert_eq!(
+        authority.revision()?,
+        start + 7,
+        "repeating the latch is a no-op"
+    );
+    Ok(())
+}
+
+/// `mutate` returns the revision observed immediately before the single
+/// transition under test, so setups with their own earlier transitions do not
+/// hide an extra revision bump.
+fn assert_stale_fence_after<F>(label: &str, mutate: F) -> TestResult
+where
+    F: FnOnce(&RiskAuthority) -> Result<u64, Box<dyn std::error::Error>>,
+{
+    let authority = authority()?;
+    let before = mutate(&authority)?;
+    let after = authority.revision()?;
+    assert_eq!(
+        after,
+        before + 1,
+        "{label}: revision advances exactly once on a real change"
+    );
+    let stale = authority.evaluate_and_reserve(
+        intent(999, 2, PRICE, Side::Buy)?,
+        Observations::default(),
+        Some(before),
+    );
+    assert!(
+        matches!(stale, Err(AuthorityError::StaleSnapshot { expected, current }) if expected == before && current == after),
+        "{label}: a revision observed before the mutation cannot authorize new risk"
+    );
+    Ok(())
+}
+
+/// Each mutation that affects risk evaluation invalidates fences taken before
+/// it, including observation-derived latches and all accounting transitions.
+#[test]
+fn stale_revision_is_rejected_after_every_relevant_mutation() -> TestResult {
+    assert_stale_fence_after("session", |authority| {
+        let before = authority.revision()?;
+        authority.set_session_open(false)?;
+        Ok(before)
+    })?;
+    assert_stale_fence_after("snapshot", |authority| {
+        let before = authority.revision()?;
+        authority.set_snapshot_available(false)?;
+        Ok(before)
+    })?;
+    assert_stale_fence_after("daily pnl", |authority| {
+        let before = authority.revision()?;
+        authority.set_daily_pnl(Paise(10))?;
+        Ok(before)
+    })?;
+    assert_stale_fence_after("clock", |authority| {
+        let before = authority.revision()?;
+        authority.set_now(LogicalNanos::new(1_000))?;
+        Ok(before)
+    })?;
+    assert_stale_fence_after("kill switch", |authority| {
+        let tokens = authority.register_all_owners()?;
+        let before = authority.revision()?;
+        authority.set_kill_switch(
+            tokens.operator,
+            true,
+            "op".to_owned(),
+            "stop".to_owned(),
+            None,
+        )?;
+        Ok(before)
+    })?;
+    assert_stale_fence_after("reconciliation", |authority| {
+        let tokens = authority.register_all_owners()?;
+        let before = authority.revision()?;
+        authority.set_reconciliation_blocked(
+            tokens.reconciliation,
+            true,
+            "blocked".to_owned(),
+            None,
+        )?;
+        Ok(before)
+    })?;
+    assert_stale_fence_after("reservation", |authority| {
+        let before = authority.revision()?;
+        authority.evaluate_and_reserve(
+            intent(1, 2, PRICE, Side::Buy)?,
+            observation(authority)?,
+            None,
+        )?;
+        Ok(before)
+    })?;
+    assert_stale_fence_after("release", |authority| {
+        let reservation = authority.evaluate_and_reserve(
+            intent(1, 2, PRICE, Side::Buy)?,
+            observation(authority)?,
+            None,
+        )?;
+        let before = authority.revision()?;
+        authority.release(reservation.intent_id)?;
+        Ok(before)
+    })?;
+    assert_stale_fence_after("fill", |authority| {
+        let reservation = authority.evaluate_and_reserve(
+            intent(1, 2, PRICE, Side::Buy)?,
+            observation(authority)?,
+            None,
+        )?;
+        let before = authority.revision()?;
+        authority.apply_fill(reservation.intent_id)?;
+        Ok(before)
+    })?;
+    assert_stale_fence_after("observation latch", |authority| {
+        let mut killed = observation(authority)?;
+        killed
+            .operator
+            .as_mut()
+            .expect("operator")
+            .payload
+            .kill_switch_engaged = true;
+        let before = authority.revision()?;
+        let error = authority
+            .check_observations(&killed)
+            .expect_err("an observed engagement is a typed denial");
+        assert!(
+            matches!(error, AuthorityError::KillSwitchEngaged { .. }),
+            "the kill switch observation denies new risk"
+        );
+        Ok(before)
+    })?;
+    Ok(())
+}
+
+/// Observed fail-closed latches are authority state changes even when the
+/// observation bundle ultimately denies new risk; they carry one revision each.
+#[test]
+fn observation_derived_changes_advance_revision() -> TestResult {
+    let authority = authority()?;
+    let before = authority.revision()?;
+    let mut killed = observation(&authority)?;
+    killed
+        .operator
+        .as_mut()
+        .expect("operator")
+        .payload
+        .kill_switch_engaged = true;
+    let engaged = authority
+        .check_observations(&killed)
+        .expect_err("an observed engagement denies new risk");
+    assert!(
+        matches!(engaged, AuthorityError::KillSwitchEngaged { .. }),
+        "the observed engagement is a typed denial"
+    );
+    assert_eq!(
+        authority.revision()?,
+        before + 1,
+        "an observed kill-switch engagement is versioned"
+    );
+    assert!(
+        authority.kill_switch_engaged()?,
+        "the observation latches engaged"
+    );
+
+    let before = authority.revision()?;
+    let mut blocked = observation(&authority)?;
+    blocked
+        .reconciliation
+        .as_mut()
+        .expect("reconciliation")
+        .payload
+        .report
+        .status = ReconciliationStatus::Unavailable;
+    let error = authority
+        .check_observations(&blocked)
+        .expect_err("an unavailable reconciliation denies");
+    assert!(
+        matches!(error, AuthorityError::ReconciliationMismatch { .. }),
+        "the reconciliation latch is a typed denial"
+    );
+    assert_eq!(
+        authority.revision()?,
+        before + 1,
+        "a fail-closed latch reached on a failing check is committed once"
+    );
+    Ok(())
+}
+
+/// Recording a rejected decision mutates authority state, so it is versioned
+/// once and an idempotent replay of that decision is a no-op.
+#[test]
+fn risk_rejection_is_a_versioned_transition() -> TestResult {
+    let authority = authority()?;
+    let before = authority.revision()?;
+    let oversized = intent(1, 11, PRICE, Side::Buy)?;
+    let error = authority
+        .evaluate_and_reserve(oversized.clone(), observation(&authority)?, None)
+        .expect_err("an oversized intent is refused by policy");
+    assert!(
+        rejected_check(&error, RiskCheck::QuantityLimit),
+        "the quantity limit is the binding check"
+    );
+    assert_eq!(
+        authority.revision()?,
+        before + 1,
+        "a recorded rejection advances revision exactly once"
+    );
+    let replay = authority.evaluate_and_reserve(oversized, observation(&authority)?, None);
+    assert!(
+        matches!(replay, Err(AuthorityError::PreviouslyRejected(_))),
+        "the rejection is remembered"
+    );
+    assert_eq!(
+        authority.revision()?,
+        before + 1,
+        "replaying a rejection does not mutate state"
     );
     Ok(())
 }

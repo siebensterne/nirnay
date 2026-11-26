@@ -11,6 +11,13 @@
 //! concurrent callers can never both evaluate against the same stale state.
 //! On full acceptance the reservation is applied before the lock is released;
 //! on any rejection nothing is reserved.
+//!
+//! `revision` versions every fact used by risk evaluation, not just the clock
+//! and exposure. Each transition validates on a cloned candidate, performs
+//! every checked computation, then commits the candidate once with exactly one
+//! revision bump; a defined no-op commits nothing. The mutex serializes
+//! callers, and the candidate is what makes a late failure roll back the
+//! whole transition instead of only the step that failed.
 
 use std::{
     collections::{
@@ -79,6 +86,15 @@ use crate::{
 };
 
 const NANOS_PER_SECOND: u64 = 1_000_000_000;
+
+/// The next revision, or a fail-closed error. A saturated revision would
+/// silently reuse a fence already handed to a caller, so exhaustion is never
+/// allowed to succeed.
+fn next_revision(revision: u64) -> Result<u64, AuthorityError> {
+    revision
+        .checked_add(1)
+        .ok_or_else(|| AuthorityError::AccountingOverflow("revision".to_owned()))
+}
 
 static NEXT_OWNER_NONCE: AtomicU64 = AtomicU64::new(1);
 
@@ -181,7 +197,8 @@ pub struct AuthoritySnapshot {
 }
 
 /// All mutable account-global facts. Never constructed from caller claims.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
+#[cfg_attr(test, derive(Serialize))]
 struct AuthorityState {
     now: LogicalNanos,
     revision: u64,
@@ -263,6 +280,21 @@ impl AuthorityState {
         while self.order_times.front().is_some_and(|at| at.get() < cutoff) {
             self.order_times.pop_front();
         }
+    }
+
+    /// Advance a proposed state by exactly one revision. Exhaustion must fail
+    /// the whole transition rather than silently reusing an issued fence.
+    fn bump_revision(&mut self) -> Result<(), AuthorityError> {
+        self.revision = next_revision(self.revision)?;
+        Ok(())
+    }
+
+    /// Deterministic serialization of every mutable fact. Tests use this to
+    /// prove that a failed transition changed nothing, not just the fields
+    /// exposed by `AuthoritySnapshot`.
+    #[cfg(test)]
+    fn digest(&self) -> String {
+        serde_json::to_string(self).expect("state is serializable")
     }
 }
 
@@ -417,19 +449,38 @@ impl RiskAuthority {
 
     pub fn set_now(&self, now: LogicalNanos) -> Result<(), AuthorityError> {
         let mut state = self.lock()?;
-        state.now = now;
-        state.prune_order_times();
-        state.revision += 1;
+        let mut candidate = state.clone();
+        candidate.now = now;
+        candidate.prune_order_times();
+        if candidate.now == state.now && candidate.order_times == state.order_times {
+            return Ok(());
+        }
+        candidate.bump_revision()?;
+        *state = candidate;
         Ok(())
     }
 
     pub fn set_session_open(&self, open: bool) -> Result<(), AuthorityError> {
-        self.lock()?.session_open = open;
+        let mut state = self.lock()?;
+        if state.session_open == open {
+            return Ok(());
+        }
+        let mut candidate = state.clone();
+        candidate.session_open = open;
+        candidate.bump_revision()?;
+        *state = candidate;
         Ok(())
     }
 
     pub fn set_snapshot_available(&self, available: bool) -> Result<(), AuthorityError> {
-        self.lock()?.account_snapshot_available = available;
+        let mut state = self.lock()?;
+        if state.account_snapshot_available == available {
+            return Ok(());
+        }
+        let mut candidate = state.clone();
+        candidate.account_snapshot_available = available;
+        candidate.bump_revision()?;
+        *state = candidate;
         Ok(())
     }
 
@@ -456,7 +507,11 @@ impl RiskAuthority {
                 action: "kill_switch_release".to_owned(),
             });
         }
-        let revision = state.revision.saturating_add(1);
+        // The durable record and the in-memory flag share one version. The
+        // version is computed with checked arithmetic before the store write,
+        // and the state is committed only after the write succeeds, so a
+        // control failure changes neither the record nor the authority.
+        let revision = next_revision(state.revision)?;
         let record = KillSwitchState {
             enabled: engaged,
             actor_id,
@@ -467,7 +522,10 @@ impl RiskAuthority {
         self.control
             .append_kill_switch(&record)
             .map_err(|error: ControlError| AuthorityError::ControlFailure(error.to_string()))?;
-        state.kill_switch_engaged = engaged;
+        let mut candidate = state.clone();
+        candidate.kill_switch_engaged = engaged;
+        candidate.revision = revision;
+        *state = candidate;
         Ok(())
     }
 
@@ -477,7 +535,7 @@ impl RiskAuthority {
         &self,
         token: OwnerToken,
         blocked: bool,
-        _reason: String,
+        reason: String,
         evidence_ref: Option<String>,
     ) -> Result<(), AuthorityError> {
         let mut state = self.lock()?;
@@ -491,14 +549,32 @@ impl RiskAuthority {
                 action: "reconciliation_resolution".to_owned(),
             });
         }
-        state.reconciliation_blocked = blocked;
+        // `reason` is the reconciliation owner's authored justification. The
+        // authority has no durable field for it: adding one would change the
+        // persisted recovery record shape, which is explicitly out of scope
+        // for this transition-only change. It is acknowledged here rather
+        // than silently discarded; the evidenced, versioned latch is what is
+        // committed. A repeated value is a defined no-op with no revision use.
+        let _ = reason;
+        if state.reconciliation_blocked == blocked {
+            return Ok(());
+        }
+        let mut candidate = state.clone();
+        candidate.reconciliation_blocked = blocked;
+        candidate.bump_revision()?;
+        *state = candidate;
         Ok(())
     }
 
     pub fn set_daily_pnl(&self, pnl: Paise) -> Result<(), AuthorityError> {
         let mut state = self.lock()?;
-        state.daily_pnl = pnl;
-        state.revision += 1;
+        if state.daily_pnl == pnl {
+            return Ok(());
+        }
+        let mut candidate = state.clone();
+        candidate.daily_pnl = pnl;
+        candidate.bump_revision()?;
+        *state = candidate;
         Ok(())
     }
 
@@ -548,7 +624,30 @@ impl RiskAuthority {
     /// in-lock aggregation as a reservation, but never reserves exposure.
     pub fn check_observations(&self, observations: &Observations) -> Result<(), AuthorityError> {
         let mut state = self.lock()?;
-        self.check_observations_locked(&mut state, observations)
+        self.observe(&mut state, observations)
+    }
+
+    /// Aggregate observations into a candidate and commit only the four
+    /// authority-owned readiness latches. A fail-closed latch persists even
+    /// when the health decision denies new risk, so it is committed with its
+    /// own revision before the decision is returned. No exposure, permit or
+    /// decision fact is written here: those belong to atomic transitions.
+    fn observe(
+        &self,
+        state: &mut AuthorityState,
+        observations: &Observations,
+    ) -> Result<(), AuthorityError> {
+        let mut candidate = state.clone();
+        let decision = self.check_observations_locked(&mut candidate, observations);
+        let latched = state.session_open != candidate.session_open
+            || state.account_snapshot_available != candidate.account_snapshot_available
+            || state.kill_switch_engaged != candidate.kill_switch_engaged
+            || state.reconciliation_blocked != candidate.reconciliation_blocked;
+        if latched {
+            candidate.bump_revision()?;
+            *state = candidate;
+        }
+        decision
     }
 
     /// Validate and aggregate all six owner observations while holding the
@@ -808,14 +907,21 @@ impl RiskAuthority {
             });
         }
 
-        // Health decision, freshness and aggregation all happen inside this
-        // same lock. No caller-owned boolean or string reason is accepted.
-        self.check_observations_locked(&mut state, &observations)?;
+        // The fence was checked against the state as observed on entry.
+        // Aggregation may itself latch readiness facts; that is a real
+        // transition and is committed with its own revision before the health
+        // decision is returned. No caller-owned boolean or reason is accepted.
+        self.observe(&mut state, &observations)?;
 
         let context = self.build_context(&state, &intent, &observations)?;
         let assessment = evaluate_risk(&intent, &self.policy, &context);
         if !assessment.accepted {
-            state.decided.insert(intent.intent_id, intent);
+            // Remembering a rejection is a state change in its own right and
+            // must invalidate any fence taken before it.
+            let mut candidate = state.clone();
+            candidate.decided.insert(intent.intent_id, intent);
+            candidate.bump_revision()?;
+            *state = candidate;
             return Err(AuthorityError::Rejected(assessment));
         }
 
@@ -912,47 +1018,65 @@ impl RiskAuthority {
         intent: &OrderIntent,
         assessment: &RiskAssessment,
     ) -> Result<Reservation, AuthorityError> {
+        // Plan every affected quantity with checked arithmetic before any of
+        // it is written back, so a late overflow cannot leave a partial
+        // exposure, permit or revision behind.
         let notional = i128::from(intent.limit_price.get().0) * i128::from(intent.quantity.get());
         let notional_paise =
             Paise(i64::try_from(notional).map_err(|_| AuthorityError::NotionalOverflow)?);
-        state.pending_gross_exposure_paise = state
+        let pending_gross = state
             .pending_gross_exposure_paise
             .checked_add(notional_paise)
             .map_err(|_| AuthorityError::NotionalOverflow)?;
-        let strategy_entry = state
+        let strategy_exposure = state
             .strategy_exposure
-            .entry(intent.strategy_id)
-            .or_insert(Paise(0));
-        *strategy_entry = strategy_entry
+            .get(&intent.strategy_id)
+            .copied()
+            .unwrap_or(Paise(0))
             .checked_add(notional_paise)
             .map_err(|_| AuthorityError::NotionalOverflow)?;
-        if let Some(label) = self.sectors.get(&intent.instrument_id) {
-            let sector_entry = state
+        let sector_exposure = if let Some(label) = self.sectors.get(&intent.instrument_id) {
+            let current = state
                 .sector_exposure
-                .entry(label.clone())
-                .or_insert(Paise(0));
-            *sector_entry = sector_entry
-                .checked_add(notional_paise)
-                .map_err(|_| AuthorityError::NotionalOverflow)?;
-        }
-        let pending = match intent.side {
-            Side::Buy => &mut state.pending_buy,
-            Side::Sell => &mut state.pending_sell,
+                .get(label)
+                .copied()
+                .unwrap_or(Paise(0));
+            Some(
+                current
+                    .checked_add(notional_paise)
+                    .map_err(|_| AuthorityError::NotionalOverflow)?,
+            )
+        } else {
+            None
         };
-        let entry = pending.entry(intent.instrument_id.clone()).or_insert(0);
-        *entry = (*entry).checked_add(intent.quantity.get()).ok_or(
-            AuthorityError::AccountingOverflow("pending quantity".to_owned()),
-        )?;
-
-        state.open_orders = state
+        let pending_quantity = match intent.side {
+            Side::Buy => state
+                .pending_buy
+                .get(&intent.instrument_id)
+                .copied()
+                .unwrap_or(0),
+            Side::Sell => state
+                .pending_sell
+                .get(&intent.instrument_id)
+                .copied()
+                .unwrap_or(0),
+        }
+        .checked_add(intent.quantity.get())
+        .ok_or(AuthorityError::AccountingOverflow(
+            "pending quantity".to_owned(),
+        ))?;
+        let open_orders = state
             .open_orders
             .checked_add(1)
             .ok_or(AuthorityError::AccountingOverflow("open orders".to_owned()))?;
-        state.order_times.push_back(state.now);
-        state.prune_order_times();
-        state.revision = state.revision.saturating_add(1);
+        let revision = next_revision(state.revision)?;
+        // A saturated permit counter would reuse an issued permit id, so it
+        // fails the entire reservation closed instead of silently wrapping.
         let permit_id = state.next_permit;
-        state.next_permit = state.next_permit.saturating_add(1);
+        let next_permit = state
+            .next_permit
+            .checked_add(1)
+            .ok_or(AuthorityError::AccountingOverflow("permit id".to_owned()))?;
 
         let reservation = Reservation {
             permit_id,
@@ -964,14 +1088,38 @@ impl RiskAuthority {
             side: intent.side,
             quantity: intent.quantity,
             reserved_notional_paise: notional_paise,
-            snapshot_revision: state.revision,
+            snapshot_revision: revision,
             assessment: assessment.clone(),
         };
         reservation.validate_invariants()?;
-        state
+
+        // Commit once: every field below was derived from the pre-transition
+        // state and none of the remaining operations can fail.
+        let mut candidate = state.clone();
+        candidate.pending_gross_exposure_paise = pending_gross;
+        candidate
+            .strategy_exposure
+            .insert(intent.strategy_id, strategy_exposure);
+        if let (Some(label), Some(exposure)) =
+            (self.sectors.get(&intent.instrument_id), sector_exposure)
+        {
+            candidate.sector_exposure.insert(label.clone(), exposure);
+        }
+        let pending = match intent.side {
+            Side::Buy => &mut candidate.pending_buy,
+            Side::Sell => &mut candidate.pending_sell,
+        };
+        pending.insert(intent.instrument_id.clone(), pending_quantity);
+        candidate.open_orders = open_orders;
+        candidate.order_times.push_back(candidate.now);
+        candidate.prune_order_times();
+        candidate.revision = revision;
+        candidate.next_permit = next_permit;
+        candidate
             .reservations
             .insert(intent.intent_id, reservation.clone());
-        state.decided.insert(intent.intent_id, intent.clone());
+        candidate.decided.insert(intent.intent_id, intent.clone());
+        *state = candidate;
         Ok(reservation)
     }
 
@@ -992,12 +1140,17 @@ impl RiskAuthority {
     /// fail-closed. See invariant L5.
     pub fn release(&self, intent_id: IntentId) -> Result<Reservation, AuthorityError> {
         let mut state = self.lock()?;
-        let reservation = state
+        let mut candidate = state.clone();
+        let reservation = candidate
             .reservations
-            .remove(&intent_id)
+            .get(&intent_id)
+            .cloned()
             .ok_or(AuthorityError::UnknownIntent(intent_id.to_string()))?;
-        state.pending_gross_exposure_paise = Paise(
-            state
+        // All fallible accounting runs on the candidate. The reservation is
+        // only removed at the commit point below, so a failed subtraction
+        // leaves it available for a later, successful release.
+        candidate.pending_gross_exposure_paise = Paise(
+            candidate
                 .pending_gross_exposure_paise
                 .0
                 .checked_sub(reservation.reserved_notional_paise.0)
@@ -1005,14 +1158,16 @@ impl RiskAuthority {
                     "pending exposure".to_owned(),
                 ))?,
         );
-        self.remove_pending(&mut state, &reservation)?;
-        self.release_grouped_exposure(&mut state, &reservation)?;
-        state.open_orders = state
+        self.remove_pending(&mut candidate, &reservation)?;
+        self.release_grouped_exposure(&mut candidate, &reservation)?;
+        candidate.open_orders = candidate
             .open_orders
             .checked_sub(1)
             .ok_or(AuthorityError::AccountingOverflow("open orders".to_owned()))?;
-        state.consumed.insert(intent_id);
-        state.revision = state.revision.saturating_add(1);
+        candidate.bump_revision()?;
+        candidate.reservations.remove(&intent_id);
+        candidate.consumed.insert(intent_id);
+        *state = candidate;
         Ok(reservation)
     }
 
@@ -1021,12 +1176,18 @@ impl RiskAuthority {
     /// when the feed is stale or the kill switch is engaged (L5).
     pub fn apply_fill(&self, intent_id: IntentId) -> Result<Reservation, AuthorityError> {
         let mut state = self.lock()?;
-        let reservation = state
+        let mut candidate = state.clone();
+        let reservation = candidate
             .reservations
-            .remove(&intent_id)
+            .get(&intent_id)
+            .cloned()
             .ok_or(AuthorityError::UnknownIntent(intent_id.to_string()))?;
-        state.pending_gross_exposure_paise = Paise(
-            state
+        // Nothing is consumed from state until every checked step succeeds.
+        // The reservation, pending buckets, gross, grouped exposure, position,
+        // open-order count, permit counter and revision therefore all roll
+        // back together on any failure.
+        candidate.pending_gross_exposure_paise = Paise(
+            candidate
                 .pending_gross_exposure_paise
                 .0
                 .checked_sub(reservation.reserved_notional_paise.0)
@@ -1034,8 +1195,8 @@ impl RiskAuthority {
                     "pending exposure".to_owned(),
                 ))?,
         );
-        state.gross_exposure_paise = Paise(
-            state
+        candidate.gross_exposure_paise = Paise(
+            candidate
                 .gross_exposure_paise
                 .0
                 .checked_add(reservation.reserved_notional_paise.0)
@@ -1043,11 +1204,11 @@ impl RiskAuthority {
                     "gross exposure".to_owned(),
                 ))?,
         );
-        self.remove_pending(&mut state, &reservation)?;
+        self.remove_pending(&mut candidate, &reservation)?;
         // The strategy/sector buckets already include this reservation from
         // commit time; a fill only moves pending exposure into a position.
         // Verify the checked cover before treating the fill as accounted.
-        let strategy_cover = state
+        let strategy_cover = candidate
             .strategy_exposure
             .get(&reservation.strategy_id)
             .copied()
@@ -1058,7 +1219,7 @@ impl RiskAuthority {
             ));
         }
         if let Some(label) = self.sectors.get(&reservation.instrument_id) {
-            let sector_cover = state
+            let sector_cover = candidate
                 .sector_exposure
                 .get(label)
                 .copied()
@@ -1073,19 +1234,21 @@ impl RiskAuthority {
             Side::Buy => reservation.quantity.get(),
             Side::Sell => -reservation.quantity.get(),
         };
-        let position = state
+        let position = candidate
             .positions
             .entry(reservation.instrument_id.clone())
             .or_insert(0);
         *position = position
             .checked_add(signed)
             .ok_or(AuthorityError::AccountingOverflow("position".to_owned()))?;
-        state.open_orders = state
+        candidate.open_orders = candidate
             .open_orders
             .checked_sub(1)
             .ok_or(AuthorityError::AccountingOverflow("open orders".to_owned()))?;
-        state.consumed.insert(intent_id);
-        state.revision = state.revision.saturating_add(1);
+        candidate.bump_revision()?;
+        candidate.reservations.remove(&intent_id);
+        candidate.consumed.insert(intent_id);
+        *state = candidate;
         Ok(reservation)
     }
 
@@ -1180,5 +1343,416 @@ fn decrement_exposure<K: Ord + Clone>(
             }
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use risk_engine::{
+        RiskPolicy, //
+        ValidatedRiskPolicy,
+    };
+    use trading_core::{
+        AlgoId, //
+        JournalRef,
+        PricePaise,
+        Product,
+    };
+
+    fn sectors() -> BTreeMap<InstrumentId, String> {
+        BTreeMap::from([(
+            InstrumentId::new("nse.cash.test").expect("instrument"),
+            "synthetic-sector".to_owned(),
+        )])
+    }
+
+    fn test_authority() -> RiskAuthority {
+        let raw = RiskPolicy {
+            version: "risk-atomic-test".to_owned(),
+            allowed_accounts: BTreeSet::from([AccountId::new(1).expect("account")]),
+            allowed_strategies: BTreeSet::from([StrategyId::new(2).expect("strategy")]),
+            allowed_algos: BTreeSet::from([AlgoId::new(3).expect("algo")]),
+            allowed_instruments: BTreeSet::from([
+                InstrumentId::new("nse.cash.test").expect("instrument")
+            ]),
+            max_order_quantity: Quantity::new(100).expect("quantity"),
+            max_order_notional_paise: Paise(1_000_000),
+            max_position_quantity: Quantity::new(100).expect("quantity"),
+            max_gross_exposure_paise: Paise(1_000_000),
+            max_daily_loss_paise: Paise(5_000),
+            max_open_orders: 100,
+            max_orders_per_second: 100,
+            max_price_deviation_ppm: 100_000,
+            max_quote_age_ns: 1_000,
+            allow_short: true,
+            max_strategy_exposure_paise: Paise(1_000_000),
+            max_sector_exposure_paise: None,
+            stress_scenario: None,
+            max_stress_loss_paise: None,
+            max_participation_ppm: None,
+            greek_limits: None,
+            max_borrow_quantity: None,
+            max_financing_cost_paise: None,
+        };
+        RiskAuthority::new(
+            AccountId::new(1).expect("account"),
+            ValidatedRiskPolicy::from_policy(&raw).expect("policy"),
+            Vec::new(),
+            TradeDate::new(2026, 1, 1).expect("date"),
+        )
+        .with_sectors(sectors())
+    }
+
+    fn intent(id: u64, quantity: i64, price: i64, side: Side) -> OrderIntent {
+        OrderIntent {
+            intent_id: IntentId::new(id).expect("intent id"),
+            account_id: AccountId::new(1).expect("account"),
+            strategy_id: StrategyId::new(2).expect("strategy"),
+            strategy_version: "test".to_owned(),
+            algo_id: AlgoId::new(3).expect("algo"),
+            instrument_id: InstrumentId::new("nse.cash.test").expect("instrument"),
+            venue: Venue::Nse,
+            side,
+            product: Product::Intraday,
+            quantity: Quantity::new(quantity).expect("quantity"),
+            limit_price: PricePaise::new(Paise(price)).expect("price"),
+            reason: "test".to_owned(),
+            evidence: vec![JournalRef {
+                sequence: 1,
+                hash_hex: "ab".repeat(32),
+            }],
+            expires_at: LogicalNanos::new(20_000),
+        }
+    }
+
+    fn assessment(target: &OrderIntent) -> RiskAssessment {
+        RiskAssessment {
+            intent_id: target.intent_id,
+            policy_version: "risk-atomic-test".to_owned(),
+            accepted: true,
+            checks: Vec::new(),
+        }
+    }
+
+    fn reserved_id() -> IntentId {
+        IntentId::new(1).expect("intent id")
+    }
+
+    /// A fully consistent committed reservation of two lots at 1_000 paise.
+    fn seed_reservation(state: &mut AuthorityState, side: Side) {
+        let target = intent(1, 2, 1_000, side);
+        state.revision = 7;
+        state.reservations.insert(
+            target.intent_id,
+            Reservation {
+                permit_id: 1,
+                intent_id: target.intent_id,
+                account_id: AccountId::new(1).expect("account"),
+                strategy_id: StrategyId::new(2).expect("strategy"),
+                instrument_id: target.instrument_id.clone(),
+                venue: Venue::Nse,
+                side,
+                quantity: Quantity::new(2).expect("quantity"),
+                reserved_notional_paise: Paise(2_000),
+                snapshot_revision: 7,
+                assessment: assessment(&target),
+            },
+        );
+        state.pending_gross_exposure_paise = Paise(2_000);
+        state
+            .strategy_exposure
+            .insert(StrategyId::new(2).expect("strategy"), Paise(2_000));
+        state
+            .sector_exposure
+            .insert("synthetic-sector".to_owned(), Paise(2_000));
+        let pending = match side {
+            Side::Buy => &mut state.pending_buy,
+            Side::Sell => &mut state.pending_sell,
+        };
+        pending.insert(target.instrument_id, 2);
+        state.open_orders = 1;
+    }
+
+    fn assert_atomic_failure<R: std::fmt::Debug>(
+        authority: &RiskAuthority,
+        label: &str,
+        edit: impl FnOnce(&mut AuthorityState),
+        operation: impl FnOnce(&RiskAuthority) -> Result<R, AuthorityError>,
+    ) {
+        {
+            let mut state = authority.state.lock().expect("lock");
+            edit(&mut state);
+        }
+        let before = authority.state.lock().expect("lock").digest();
+        let message = format!("{label}: overflow must fail closed");
+        let error = operation(authority).expect_err(&message);
+        assert!(
+            matches!(
+                error,
+                AuthorityError::NotionalOverflow | AuthorityError::AccountingOverflow(_)
+            ),
+            "{label}: the failure is a typed accounting error"
+        );
+        assert_eq!(
+            authority.state.lock().expect("lock").digest(),
+            before,
+            "{label}: every authority fact is unchanged after the failure"
+        );
+    }
+
+    fn assert_reservation_failure(label: &str, price: i64, edit: impl FnOnce(&mut AuthorityState)) {
+        let authority = test_authority();
+        let target = intent(1, 2, price, Side::Buy);
+        let decision = assessment(&target);
+        assert_atomic_failure(&authority, label, edit, |authority| {
+            let mut state = authority.state.lock().expect("lock");
+            authority.commit_reservation(&mut state, &target, &decision)
+        });
+    }
+
+    fn assert_release_failure(label: &str, edit: impl FnOnce(&mut AuthorityState)) {
+        let authority = test_authority();
+        assert_atomic_failure(
+            &authority,
+            label,
+            |state| {
+                seed_reservation(state, Side::Buy);
+                edit(state);
+            },
+            |authority| authority.release(reserved_id()),
+        );
+    }
+
+    fn assert_fill_failure(label: &str, edit: impl FnOnce(&mut AuthorityState)) {
+        let authority = test_authority();
+        assert_atomic_failure(
+            &authority,
+            label,
+            |state| {
+                seed_reservation(state, Side::Buy);
+                edit(state);
+            },
+            |authority| authority.apply_fill(reserved_id()),
+        );
+    }
+
+    #[test]
+    fn each_reservation_accounting_overflow_is_atomic() {
+        assert_reservation_failure("notional conversion", i64::MAX, |_| {});
+        assert_reservation_failure("pending gross", 1_000, |state| {
+            state.pending_gross_exposure_paise = Paise(i64::MAX);
+        });
+        assert_reservation_failure("strategy exposure", 1_000, |state| {
+            state
+                .strategy_exposure
+                .insert(StrategyId::new(2).expect("strategy"), Paise(i64::MAX));
+        });
+        assert_reservation_failure("sector exposure", 1_000, |state| {
+            state
+                .sector_exposure
+                .insert("synthetic-sector".to_owned(), Paise(i64::MAX));
+        });
+        assert_reservation_failure("pending quantity", 1_000, |state| {
+            state.pending_buy.insert(
+                InstrumentId::new("nse.cash.test").expect("instrument"),
+                i64::MAX,
+            );
+        });
+        assert_reservation_failure("open orders", 1_000, |state| {
+            state.open_orders = u32::MAX;
+        });
+    }
+
+    #[test]
+    fn each_release_accounting_overflow_is_atomic() {
+        assert_release_failure("pending exposure", |state| {
+            state.pending_gross_exposure_paise = Paise(i64::MIN);
+        });
+        assert_release_failure("pending quantity", |state| {
+            state.pending_buy.insert(
+                InstrumentId::new("nse.cash.test").expect("instrument"),
+                i64::MIN,
+            );
+        });
+        assert_release_failure("strategy exposure", |state| {
+            state
+                .strategy_exposure
+                .insert(StrategyId::new(2).expect("strategy"), Paise(i64::MIN));
+        });
+        assert_release_failure("sector exposure", |state| {
+            state
+                .sector_exposure
+                .insert("synthetic-sector".to_owned(), Paise(i64::MIN));
+        });
+        assert_release_failure("open orders", |state| state.open_orders = 0);
+    }
+
+    #[test]
+    fn each_fill_accounting_overflow_is_atomic() {
+        assert_fill_failure("pending exposure", |state| {
+            state.pending_gross_exposure_paise = Paise(i64::MIN);
+        });
+        assert_fill_failure("gross exposure", |state| {
+            state.gross_exposure_paise = Paise(i64::MAX);
+        });
+        assert_fill_failure("pending quantity", |state| {
+            state.pending_buy.insert(
+                InstrumentId::new("nse.cash.test").expect("instrument"),
+                i64::MIN,
+            );
+        });
+        assert_fill_failure("strategy cover", |state| {
+            state
+                .strategy_exposure
+                .insert(StrategyId::new(2).expect("strategy"), Paise(0));
+        });
+        assert_fill_failure("sector cover", |state| {
+            state
+                .sector_exposure
+                .insert("synthetic-sector".to_owned(), Paise(0));
+        });
+        assert_fill_failure("position", |state| {
+            state.positions.insert(
+                InstrumentId::new("nse.cash.test").expect("instrument"),
+                i64::MAX,
+            );
+        });
+        assert_fill_failure("open orders", |state| state.open_orders = 0);
+    }
+
+    #[test]
+    fn failed_release_and_fill_retain_the_reservation() {
+        let authority = test_authority();
+        {
+            let mut state = authority.state.lock().expect("lock");
+            seed_reservation(&mut state, Side::Buy);
+            state.pending_gross_exposure_paise = Paise(i64::MIN);
+        }
+        assert!(
+            authority.release(reserved_id()).is_err(),
+            "underflow denies the release"
+        );
+        assert_eq!(
+            authority.snapshot().expect("snapshot").reservation_count,
+            1,
+            "the failed release did not consume the reservation"
+        );
+        assert_eq!(
+            authority
+                .reservation(reserved_id())
+                .expect("retained permit")
+                .permit_id,
+            1,
+            "the permit is still available to downstream consumers"
+        );
+
+        assert!(
+            authority.apply_fill(reserved_id()).is_err(),
+            "underflow denies the fill"
+        );
+        let snapshot = authority.snapshot().expect("snapshot");
+        assert_eq!(
+            snapshot.reservation_count, 1,
+            "the failed fill kept the reservation"
+        );
+        assert_eq!(
+            snapshot.pending_gross_exposure_paise,
+            Paise(i64::MIN),
+            "the failed fill kept the prior pending exposure"
+        );
+        assert_eq!(
+            snapshot.gross_exposure_paise,
+            Paise(0),
+            "the failed fill did not move exposure into gross"
+        );
+    }
+
+    #[test]
+    fn permit_and_revision_exhaustion_fail_closed() {
+        let authority = test_authority();
+        let target = intent(1, 2, 1_000, Side::Buy);
+        let decision = assessment(&target);
+
+        let mut state = authority.state.lock().expect("lock");
+        state.next_permit = u64::MAX;
+        let before = state.digest();
+        let error = authority
+            .commit_reservation(&mut state, &target, &decision)
+            .expect_err("a permit counter at its maximum must not saturate");
+        assert!(
+            matches!(error, AuthorityError::AccountingOverflow(field) if field == "permit id"),
+            "permit exhaustion is a typed fail-closed error"
+        );
+        assert_eq!(
+            state.digest(),
+            before,
+            "no partial reservation is committed"
+        );
+
+        state.next_permit = 1;
+        state.revision = u64::MAX;
+        let before = state.digest();
+        let error = authority
+            .commit_reservation(&mut state, &target, &decision)
+            .expect_err("a revision at its maximum must not saturate");
+        assert!(
+            matches!(error, AuthorityError::AccountingOverflow(field) if field == "revision"),
+            "revision exhaustion is a typed fail-closed error"
+        );
+        assert_eq!(
+            state.digest(),
+            before,
+            "no partial reservation is committed"
+        );
+    }
+
+    #[test]
+    fn public_setters_fail_closed_at_revision_exhaustion() {
+        let authority = test_authority();
+        let tokens = authority.register_all_owners().expect("owners");
+        {
+            let mut state = authority.state.lock().expect("lock");
+            state.revision = u64::MAX;
+        }
+        let before = authority.state.lock().expect("lock").digest();
+
+        let failures = [
+            authority.set_now(LogicalNanos::new(1)).err(),
+            authority.set_session_open(true).err(),
+            authority.set_snapshot_available(true).err(),
+            authority.set_daily_pnl(Paise(1)).err(),
+            authority
+                .set_kill_switch(
+                    tokens.operator,
+                    true,
+                    "op".to_owned(),
+                    "stop".to_owned(),
+                    None,
+                )
+                .err(),
+            authority
+                .set_reconciliation_blocked(
+                    tokens.reconciliation,
+                    false,
+                    "resolved".to_owned(),
+                    Some("evidence".to_owned()),
+                )
+                .err(),
+        ];
+        for failure in failures {
+            assert!(
+                matches!(
+                    failure,
+                    Some(AuthorityError::AccountingOverflow(field)) if field == "revision"
+                ),
+                "every setter fails closed when revision is exhausted"
+            );
+        }
+        assert_eq!(
+            authority.state.lock().expect("lock").digest(),
+            before,
+            "exhaustion leaves the entire state unchanged"
+        );
     }
 }
