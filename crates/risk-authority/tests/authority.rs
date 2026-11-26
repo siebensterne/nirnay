@@ -1947,6 +1947,7 @@ fn observation_derived_changes_advance_revision() -> TestResult {
 mod recovery_tests {
     use super::*;
     use risk_authority::{
+        ACCOUNT_JOURNAL_ID,
         AccountRecoveryRecord, //
         ControlError,
         ControlStore,
@@ -1955,14 +1956,17 @@ mod recovery_tests {
         FileControlStore,
         FileDecisionStore,
         InMemoryDecisionStore,
+        JournalIdentity,
         KillSwitchState,
         NoopControlStore,
+        OMS_JOURNAL_ID,
         OmsPermitRecord,
         OmsPermitState,
         RecoveryConfig,
         RecoveryError,
-        RecoveryRecords,
         RiskDecisionRecord,
+        VerifiedAccountSnapshot,
+        VerifiedOmsSnapshot,
         authority::{
             ExecutionEventKind, //
             ExecutionRecoveryRecord,
@@ -1983,28 +1987,136 @@ mod recovery_tests {
         ))
     }
 
-    fn build_recovered(
-        lock_path: &std::path::Path,
-        mut records: RecoveryRecords,
-        control: Box<dyn risk_authority::ControlStore + Send + Sync>,
-        decisions: Box<dyn DecisionStore + Send + Sync>,
-    ) -> Result<RiskAuthority, Box<dyn std::error::Error>> {
-        if records.daily_pnl.record.is_none() {
-            let (daily, journal) = daily_recovery_for_accounts(&records.account)?;
+    /// Raw fixture shape. It is sealed into opaque snapshots before recovery;
+    /// an external caller of the library cannot supply records in this form.
+    #[derive(Default)]
+    struct FixtureRecords {
+        oms: Vec<OmsPermitRecord>,
+        executions: Vec<ExecutionRecoveryRecord>,
+        account: Vec<AccountRecoveryRecord>,
+        daily_pnl: DailyPnlRecovery,
+    }
+
+    struct VerifiedFixtures {
+        oms: VerifiedOmsSnapshot,
+        account: VerifiedAccountSnapshot,
+    }
+
+    fn oms_identity() -> JournalIdentity {
+        JournalIdentity::new(
+            ObservationSource::Oms,
+            AccountId::new(ACCOUNT).expect("account"),
+            OMS_JOURNAL_ID,
+        )
+    }
+
+    fn account_identity() -> JournalIdentity {
+        JournalIdentity::new(
+            ObservationSource::AccountJournal,
+            AccountId::new(ACCOUNT).expect("account"),
+            ACCOUNT_JOURNAL_ID,
+        )
+    }
+
+    fn write_json_lines<T: serde::Serialize>(
+        path: &std::path::Path,
+        records: &[T],
+    ) -> Result<(), RecoveryError> {
+        let mut text = String::new();
+        for record in records {
+            text.push_str(
+                &serde_json::to_string(record)
+                    .map_err(|error| RecoveryError::Snapshot(error.to_string()))?,
+            );
+            text.push('\n');
+        }
+        std::fs::write(path, text).map_err(|error| RecoveryError::Snapshot(error.to_string()))
+    }
+
+    /// Act as the two journal owners: write the durable journals, run the
+    /// authority's verifier, and hand startup only the sealed snapshots.
+    fn verified_records_inner(
+        mut records: FixtureRecords,
+        fill_pnl: bool,
+    ) -> Result<VerifiedFixtures, RecoveryError> {
+        if fill_pnl && records.daily_pnl.record.is_none() {
+            let (daily, journal) = daily_recovery_for_accounts(&records.account)
+                .map_err(|error| RecoveryError::Snapshot(error.to_string()))?;
             records.daily_pnl = daily;
             records.account = journal;
         }
-        Ok(RiskAuthority::recover(RecoveryConfig {
-            account_id: AccountId::new(ACCOUNT)?,
-            policy: policy()?,
-            instruments: vec![instrument()?],
-            trade_date: date()?,
+        let permits = temp_path("fixture-permits");
+        let executions = temp_path("fixture-executions");
+        let accounts = temp_path("fixture-accounts");
+        let pnl = temp_path("fixture-pnl");
+        write_json_lines(&permits, &records.oms)?;
+        write_json_lines(&executions, &records.executions)?;
+        write_json_lines(&accounts, &records.account)?;
+        let pnl_text = serde_json::to_string(&records.daily_pnl)
+            .map_err(|error| RecoveryError::Snapshot(error.to_string()))?;
+        std::fs::write(&pnl, pnl_text)
+            .map_err(|error| RecoveryError::Snapshot(error.to_string()))?;
+        let oms = VerifiedOmsSnapshot::verify(&permits, &executions, &oms_identity())?;
+        let account = VerifiedAccountSnapshot::verify(&accounts, &pnl, &account_identity())?;
+        for path in [&permits, &executions, &accounts, &pnl] {
+            let _ = std::fs::remove_file(path);
+        }
+        Ok(VerifiedFixtures { oms, account })
+    }
+
+    fn verified_records(records: FixtureRecords) -> Result<VerifiedFixtures, RecoveryError> {
+        verified_records_inner(records, true)
+    }
+
+    fn recover_with_inner(
+        lock_path: &std::path::Path,
+        records: FixtureRecords,
+        control: Box<dyn risk_authority::ControlStore + Send + Sync>,
+        decisions: Box<dyn DecisionStore + Send + Sync>,
+        fill_pnl: bool,
+    ) -> Result<RiskAuthority, RecoveryError> {
+        let fixtures = verified_records_inner(records, fill_pnl)?;
+        RiskAuthority::recover(RecoveryConfig {
+            account_id: AccountId::new(ACCOUNT).expect("account"),
+            policy: policy().expect("policy"),
+            instruments: vec![instrument().expect("instrument")],
+            trade_date: date().expect("date"),
             control,
             decisions,
-            records,
+            oms: fixtures.oms,
+            account: fixtures.account,
             sectors: BTreeMap::new(),
             ownership_path: lock_path.to_path_buf(),
-        })?)
+        })
+    }
+
+    fn recover_with(
+        lock_path: &std::path::Path,
+        records: FixtureRecords,
+        control: Box<dyn risk_authority::ControlStore + Send + Sync>,
+        decisions: Box<dyn DecisionStore + Send + Sync>,
+    ) -> Result<RiskAuthority, RecoveryError> {
+        recover_with_inner(lock_path, records, control, decisions, true)
+    }
+
+    /// Seal exactly the supplied fixture, with no synthetic P&L fill. Used by
+    /// the test that proves startup fails when the owner supplied no P&L.
+    fn recover_with_no_pnl_fill(
+        lock_path: &std::path::Path,
+        records: FixtureRecords,
+        control: Box<dyn risk_authority::ControlStore + Send + Sync>,
+        decisions: Box<dyn DecisionStore + Send + Sync>,
+    ) -> Result<RiskAuthority, RecoveryError> {
+        recover_with_inner(lock_path, records, control, decisions, false)
+    }
+
+    fn build_recovered(
+        lock_path: &std::path::Path,
+        records: FixtureRecords,
+        control: Box<dyn risk_authority::ControlStore + Send + Sync>,
+        decisions: Box<dyn DecisionStore + Send + Sync>,
+    ) -> Result<RiskAuthority, Box<dyn std::error::Error>> {
+        Ok(recover_with(lock_path, records, control, decisions)?)
     }
 
     fn file_stores(
@@ -2103,7 +2215,7 @@ mod recovery_tests {
         let _ = std::fs::remove_file(&lock);
 
         let (c1, d1) = file_stores(&control, &decisions);
-        let first = build_recovered(&lock, RecoveryRecords::default(), c1, d1)?;
+        let first = build_recovered(&lock, FixtureRecords::default(), c1, d1)?;
         assert!(
             first.snapshot()?.kill_switch_engaged,
             "recovery starts engaged without a persisted release"
@@ -2161,7 +2273,7 @@ mod recovery_tests {
         let (c2, d2) = file_stores(&control, &decisions);
         let second = build_recovered(
             &lock,
-            RecoveryRecords {
+            FixtureRecords {
                 oms: vec![oms],
                 account: vec![account],
                 ..Default::default()
@@ -2278,7 +2390,7 @@ mod recovery_tests {
         let (c, d) = file_stores(&control, &decisions);
         let recovered = build_recovered(
             &lock,
-            RecoveryRecords {
+            FixtureRecords {
                 oms: vec![oms],
                 account: vec![account],
                 ..Default::default()
@@ -2482,7 +2594,7 @@ mod recovery_tests {
         let (c1, d1) = file_stores(&control, &decisions);
         let stage1 = build_recovered(
             &lock,
-            RecoveryRecords {
+            FixtureRecords {
                 oms: vec![oms_record(
                     &reservation,
                     digest.clone(),
@@ -2527,7 +2639,7 @@ mod recovery_tests {
         let (c2, d2) = file_stores(&control, &decisions);
         let stage2 = build_recovered(
             &lock,
-            RecoveryRecords {
+            FixtureRecords {
                 oms: vec![oms_record(
                     &reservation,
                     digest.clone(),
@@ -2580,7 +2692,7 @@ mod recovery_tests {
         let (c3, d3) = file_stores(&control, &decisions);
         let stage3 = build_recovered(
             &lock,
-            RecoveryRecords {
+            FixtureRecords {
                 oms: vec![oms_record(
                     &reservation,
                     digest.clone(),
@@ -2632,7 +2744,7 @@ mod recovery_tests {
         let (c4, d4) = file_stores(&other_control, &other_decisions);
         let direct = build_recovered(
             &other_lock,
-            RecoveryRecords {
+            FixtureRecords {
                 oms: vec![oms_record(
                     &direct_reservation,
                     digest_for(&direct_target, &direct_reservation),
@@ -2728,7 +2840,7 @@ mod recovery_tests {
         let (c1, d1) = file_stores(&control, &decisions);
         let duplicate = build_recovered(
             &lock,
-            RecoveryRecords {
+            FixtureRecords {
                 oms: vec![oms_record(
                     &reservation,
                     digest.clone(),
@@ -2759,7 +2871,7 @@ mod recovery_tests {
         let (c2, d2) = file_stores(&control, &decisions);
         let conflict = build_recovered(
             &lock,
-            RecoveryRecords {
+            FixtureRecords {
                 oms: vec![oms_record(
                     &reservation,
                     digest.clone(),
@@ -2783,7 +2895,7 @@ mod recovery_tests {
         let (c3, d3) = file_stores(&control, &decisions);
         let reordered = build_recovered(
             &lock,
-            RecoveryRecords {
+            FixtureRecords {
                 oms: vec![oms_record(
                     &reservation,
                     digest,
@@ -2862,7 +2974,7 @@ mod recovery_tests {
         let (c1, d1) = file_stores(&control, &decisions);
         let corrected = build_recovered(
             &lock,
-            RecoveryRecords {
+            FixtureRecords {
                 oms: vec![oms_record(
                     &reservation,
                     digest.clone(),
@@ -2937,7 +3049,7 @@ mod recovery_tests {
         let (c2, d2) = file_stores(&control, &decisions);
         let cancelled = build_recovered(
             &lock,
-            RecoveryRecords {
+            FixtureRecords {
                 oms: vec![oms_record(
                     &reservation,
                     digest,
@@ -2995,7 +3107,7 @@ mod recovery_tests {
         let (c1, d1) = file_stores(&control, &decisions);
         let unpriced = build_recovered(
             &lock,
-            RecoveryRecords {
+            FixtureRecords {
                 oms: vec![oms_record(
                     &reservation,
                     digest.clone(),
@@ -3055,7 +3167,7 @@ mod recovery_tests {
         let (c2, d2) = file_stores(&control, &decisions);
         let uncertain = build_recovered(
             &lock,
-            RecoveryRecords {
+            FixtureRecords {
                 oms: vec![oms_record(
                     &reservation,
                     digest,
@@ -3127,7 +3239,7 @@ mod recovery_tests {
         let (c1, d1) = file_stores(&control, &decisions);
         let account_disagreement = build_recovered(
             &lock,
-            RecoveryRecords {
+            FixtureRecords {
                 oms: vec![oms_record(
                     &reservation,
                     digest.clone(),
@@ -3150,7 +3262,7 @@ mod recovery_tests {
         let (c2, d2) = file_stores(&control, &decisions);
         let journal_disagreement = build_recovered(
             &lock,
-            RecoveryRecords {
+            FixtureRecords {
                 oms: vec![oms_record(
                     &reservation,
                     digest.clone(),
@@ -3174,7 +3286,7 @@ mod recovery_tests {
         let (c3, d3) = file_stores(&control, &decisions);
         let broken_leaves = build_recovered(
             &lock,
-            RecoveryRecords {
+            FixtureRecords {
                 oms: vec![oms_record(
                     &reservation,
                     digest.clone(),
@@ -3199,7 +3311,7 @@ mod recovery_tests {
         let (c4, d4) = file_stores(&control, &decisions);
         let broken_execution = build_recovered(
             &lock,
-            RecoveryRecords {
+            FixtureRecords {
                 oms: vec![oms_record(
                     &reservation,
                     digest.clone(),
@@ -3225,7 +3337,7 @@ mod recovery_tests {
         let (c5, d5) = file_stores(&control, &decisions);
         let cancelled = build_recovered(
             &lock,
-            RecoveryRecords {
+            FixtureRecords {
                 oms: vec![oms_record(
                     &reservation,
                     digest.clone(),
@@ -3260,7 +3372,7 @@ mod recovery_tests {
         let (c6, d6) = file_stores(&control, &decisions);
         let filled = build_recovered(
             &lock,
-            RecoveryRecords {
+            FixtureRecords {
                 oms: vec![oms_record(
                     &reservation,
                     digest,
@@ -3321,21 +3433,16 @@ mod recovery_tests {
         );
         oms.seal(2, genesis_digest());
         let (c1, d1) = file_stores(&control, &decisions);
-        let gap = RiskAuthority::recover(RecoveryConfig {
-            account_id: AccountId::new(ACCOUNT)?,
-            policy: policy()?,
-            instruments: vec![instrument()?],
-            trade_date: date()?,
-            control: c1,
-            decisions: d1,
-            records: RecoveryRecords {
+        let gap = recover_with(
+            &lock,
+            FixtureRecords {
                 oms: vec![oms],
                 account: Vec::new(),
                 ..Default::default()
             },
-            sectors: BTreeMap::new(),
-            ownership_path: lock.to_path_buf(),
-        });
+            c1,
+            d1,
+        );
         assert!(
             matches!(gap, Err(RecoveryError::Sequence(_))),
             "a non-contiguous OMS journal sequence fails startup closed"
@@ -3357,17 +3464,7 @@ mod recovery_tests {
             format!("{}\n", serde_json::to_string(&tampered)?),
         )?;
         let (c2, d2) = file_stores(&control, &decisions);
-        let digest_failure = RiskAuthority::recover(RecoveryConfig {
-            account_id: AccountId::new(ACCOUNT)?,
-            policy: policy()?,
-            instruments: vec![instrument()?],
-            trade_date: date()?,
-            control: c2,
-            decisions: d2,
-            records: RecoveryRecords::default(),
-            sectors: BTreeMap::new(),
-            ownership_path: lock.to_path_buf(),
-        });
+        let digest_failure = recover_with(&lock, FixtureRecords::default(), c2, d2);
         assert!(
             matches!(digest_failure, Err(RecoveryError::DecisionStore(_))),
             "a broken decision digest chain fails startup closed"
@@ -3408,21 +3505,16 @@ mod recovery_tests {
         );
         account.seal(1, genesis_digest());
         let (c3, d3) = file_stores(&control, &decisions);
-        let mismatch = RiskAuthority::recover(RecoveryConfig {
-            account_id: AccountId::new(ACCOUNT)?,
-            policy: policy()?,
-            instruments: vec![instrument()?],
-            trade_date: date()?,
-            control: c3,
-            decisions: d3,
-            records: RecoveryRecords {
+        let mismatch = recover_with(
+            &lock,
+            FixtureRecords {
                 oms: vec![filled],
                 account: vec![account],
                 ..Default::default()
             },
-            sectors: BTreeMap::new(),
-            ownership_path: lock.to_path_buf(),
-        });
+            c3,
+            d3,
+        );
         assert!(
             matches!(mismatch, Err(RecoveryError::Inconsistent(_))),
             "an account position that disagrees with the derived fill fails startup closed"
@@ -3435,20 +3527,85 @@ mod recovery_tests {
     }
 
     #[test]
-    fn noop_control_store_is_not_a_durable_startup_default() -> TestResult {
-        let lock = temp_path("lock-noop");
-        let _ = std::fs::remove_file(&lock);
-        let failures = RiskAuthority::recover(RecoveryConfig {
+    fn recovery_rejects_snapshots_bound_to_a_foreign_journal_or_account() -> TestResult {
+        let control = temp_path("control-foreign-snapshot");
+        let decisions = temp_path("decisions-foreign-snapshot");
+        let lock = temp_path("lock-foreign-snapshot");
+        let permits = temp_path("foreign-permits");
+        let executions = temp_path("foreign-executions");
+        for path in [&control, &decisions, &lock, &permits, &executions] {
+            let _ = std::fs::remove_file(path);
+        }
+        write_json_lines(&permits, &Vec::<OmsPermitRecord>::new())?;
+        write_json_lines(&executions, &Vec::<ExecutionRecoveryRecord>::new())?;
+        let account = verified_records(FixtureRecords::default())?.account;
+
+        let foreign_account = VerifiedOmsSnapshot::verify(
+            &permits,
+            &executions,
+            &JournalIdentity::new(ObservationSource::Oms, AccountId::new(99)?, OMS_JOURNAL_ID),
+        )?;
+        let (c1, d1) = file_stores(&control, &decisions);
+        let wrong_account = RiskAuthority::recover(RecoveryConfig {
             account_id: AccountId::new(ACCOUNT)?,
             policy: policy()?,
             instruments: vec![instrument()?],
             trade_date: date()?,
-            control: Box::new(NoopControlStore),
-            decisions: Box::new(InMemoryDecisionStore::new()),
-            records: RecoveryRecords::default(),
+            control: c1,
+            decisions: d1,
+            oms: foreign_account,
+            account: account.clone(),
             sectors: BTreeMap::new(),
             ownership_path: lock.to_path_buf(),
         });
+        assert!(
+            matches!(wrong_account, Err(RecoveryError::Snapshot(_))),
+            "a snapshot sealed for another account is denied at startup"
+        );
+
+        let foreign_journal = VerifiedOmsSnapshot::verify(
+            &permits,
+            &executions,
+            &JournalIdentity::new(
+                ObservationSource::Oms,
+                AccountId::new(ACCOUNT)?,
+                "some-other-journal",
+            ),
+        )?;
+        let (c2, d2) = file_stores(&control, &decisions);
+        let wrong_journal = RiskAuthority::recover(RecoveryConfig {
+            account_id: AccountId::new(ACCOUNT)?,
+            policy: policy()?,
+            instruments: vec![instrument()?],
+            trade_date: date()?,
+            control: c2,
+            decisions: d2,
+            oms: foreign_journal,
+            account,
+            sectors: BTreeMap::new(),
+            ownership_path: lock.to_path_buf(),
+        });
+        assert!(
+            matches!(wrong_journal, Err(RecoveryError::Snapshot(_))),
+            "a snapshot sealed from another journal is denied at startup"
+        );
+
+        for path in [&control, &decisions, &lock, &permits, &executions] {
+            let _ = std::fs::remove_file(path);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn noop_control_store_is_not_a_durable_startup_default() -> TestResult {
+        let lock = temp_path("lock-noop");
+        let _ = std::fs::remove_file(&lock);
+        let failures = recover_with(
+            &lock,
+            FixtureRecords::default(),
+            Box::new(NoopControlStore),
+            Box::new(InMemoryDecisionStore::new()),
+        );
         assert!(
             matches!(failures, Err(RecoveryError::NonDurableStore)),
             "an in-memory control store cannot establish durable startup state"
@@ -3520,7 +3677,7 @@ mod recovery_tests {
         lock: &std::path::Path,
     ) -> Result<RiskAuthority, Box<dyn std::error::Error>> {
         let (c, d) = file_stores(control, decisions);
-        let value = build_recovered(lock, RecoveryRecords::default(), c, d)?;
+        let value = build_recovered(lock, FixtureRecords::default(), c, d)?;
         let tokens = value.register_all_owners()?;
         value.set_kill_switch(
             tokens.operator,
@@ -3575,7 +3732,7 @@ mod recovery_tests {
         let (c, d) = file_stores(&control, &decisions);
         let second = build_recovered(
             &lock,
-            RecoveryRecords {
+            FixtureRecords {
                 oms: vec![oms],
                 account: Vec::new(),
                 ..Default::default()
@@ -3644,7 +3801,7 @@ mod recovery_tests {
         drop(first);
 
         let (c, d) = file_stores(&control, &decisions);
-        let second = build_recovered(&lock, RecoveryRecords::default(), c, d)?;
+        let second = build_recovered(&lock, FixtureRecords::default(), c, d)?;
         let replay = second.evaluate_and_reserve(oversized, observation(&second)?, None);
         assert!(
             matches!(replay, Err(AuthorityError::PreviouslyRejected(_))),
@@ -3668,17 +3825,7 @@ mod recovery_tests {
 
         let first = ready_authority(&control, &decisions, &lock)?;
         let (c, d) = file_stores(&control, &decisions);
-        let competing = RiskAuthority::recover(RecoveryConfig {
-            account_id: AccountId::new(ACCOUNT)?,
-            policy: policy()?,
-            instruments: vec![instrument()?],
-            trade_date: date()?,
-            control: c,
-            decisions: d,
-            records: RecoveryRecords::default(),
-            sectors: BTreeMap::new(),
-            ownership_path: lock.to_path_buf(),
-        });
+        let competing = recover_with(&lock, FixtureRecords::default(), c, d);
         assert!(
             matches!(competing, Err(RecoveryError::StateOwnership(_))),
             "a second startup cannot own the same authority state"
@@ -3687,17 +3834,7 @@ mod recovery_tests {
 
         std::fs::write(&control, "{broken\n")?;
         let (c2, d2) = file_stores(&control, &decisions);
-        let corrupt = RiskAuthority::recover(RecoveryConfig {
-            account_id: AccountId::new(ACCOUNT)?,
-            policy: policy()?,
-            instruments: vec![instrument()?],
-            trade_date: date()?,
-            control: c2,
-            decisions: d2,
-            records: RecoveryRecords::default(),
-            sectors: BTreeMap::new(),
-            ownership_path: lock.to_path_buf(),
-        });
+        let corrupt = recover_with(&lock, FixtureRecords::default(), c2, d2);
         assert!(
             matches!(corrupt, Err(RecoveryError::Control(_))),
             "a corrupt control store is an explicit startup error"
@@ -3720,17 +3857,7 @@ mod recovery_tests {
         let _ = std::fs::remove_file(&lock);
 
         let (c1, d1) = file_stores(&control, &decisions);
-        let missing = RiskAuthority::recover(RecoveryConfig {
-            account_id: AccountId::new(ACCOUNT)?,
-            policy: policy()?,
-            instruments: vec![instrument()?],
-            trade_date: date()?,
-            control: c1,
-            decisions: d1,
-            records: RecoveryRecords::default(),
-            sectors: BTreeMap::new(),
-            ownership_path: lock.to_path_buf(),
-        });
+        let missing = recover_with_no_pnl_fill(&lock, FixtureRecords::default(), c1, d1);
         assert!(
             matches!(missing, Err(RecoveryError::DailyPnl(_))),
             "recovery without sealed daily P&L fails closed"
@@ -3763,7 +3890,7 @@ mod recovery_tests {
         let (c2, d2) = file_stores(&control, &decisions);
         let recovered = build_recovered(
             &lock,
-            RecoveryRecords {
+            FixtureRecords {
                 oms: Vec::new(),
                 executions: Vec::new(),
                 account: vec![account],

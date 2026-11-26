@@ -13,6 +13,7 @@ pub mod error;
 pub mod observation;
 
 pub use authority::{
+    ACCOUNT_JOURNAL_ID,    //
     AccountRecoveryRecord, //
     AuthorityOwnership,
     AuthoritySnapshot,
@@ -23,14 +24,19 @@ pub use authority::{
     FileDecisionStore,
     GENESIS_DIGEST,
     InMemoryDecisionStore,
+    JournalIdentity,
+    OMS_JOURNAL_ID,
     OmsPermitRecord,
     OmsPermitState,
+    RECOVERY_SNAPSHOT_VERSION,
+    RecoveryCheckpoint,
     RecoveryConfig,
     RecoveryError,
-    RecoveryRecords,
     Reservation,
     RiskAuthority,
     RiskDecisionRecord,
+    VerifiedAccountSnapshot,
+    VerifiedOmsSnapshot,
     genesis_digest,
     verify_recovery_chain,
 };

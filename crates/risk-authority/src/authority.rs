@@ -449,6 +449,10 @@ impl DailyPnlRecord {
 }
 
 impl ChainedRecord for DailyPnlRecord {
+    fn schema_version(&self) -> u32 {
+        self.schema_version
+    }
+
     fn sequence(&self) -> u64 {
         self.sequence
     }
@@ -538,6 +542,10 @@ impl ValuationRecord {
 }
 
 impl ChainedRecord for ValuationRecord {
+    fn schema_version(&self) -> u32 {
+        self.schema_version
+    }
+
     fn sequence(&self) -> u64 {
         self.sequence
     }
@@ -566,7 +574,7 @@ impl ChainedRecord for ValuationRecord {
 
 /// The sealed P&L evidence bundle required at startup. All three fields are
 /// mandatory: recovery fails closed when any of them is absent.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DailyPnlRecovery {
     pub record: Option<DailyPnlRecord>,
     pub valuations: Vec<ValuationRecord>,
@@ -2503,6 +2511,7 @@ pub fn genesis_digest() -> &'static str {
 /// A recovery record whose position in its stream and link to its predecessor
 /// can be independently verified.
 pub trait ChainedRecord {
+    fn schema_version(&self) -> u32;
     fn sequence(&self) -> u64;
     fn prev_digest(&self) -> &str;
     fn digest(&self) -> &str;
@@ -2558,6 +2567,8 @@ pub enum RecoveryError {
     Digest(String),
     #[error("derived risk state disagrees with identified records: {0}")]
     Inconsistent(String),
+    #[error("verified recovery snapshot was rejected: {0}")]
+    Snapshot(String),
     #[error("startup recovery requires a durable control and decision store")]
     NonDurableStore,
     #[error("startup recovery cannot establish authoritative daily pnl: {0}")]
@@ -2652,6 +2663,10 @@ impl RiskDecisionRecord {
 }
 
 impl ChainedRecord for RiskDecisionRecord {
+    fn schema_version(&self) -> u32 {
+        self.schema_version
+    }
+
     fn sequence(&self) -> u64 {
         self.sequence
     }
@@ -2747,6 +2762,10 @@ impl OmsPermitRecord {
 }
 
 impl ChainedRecord for OmsPermitRecord {
+    fn schema_version(&self) -> u32 {
+        self.schema_version
+    }
+
     fn sequence(&self) -> u64 {
         self.sequence
     }
@@ -2868,6 +2887,10 @@ impl ExecutionRecoveryRecord {
 }
 
 impl ChainedRecord for ExecutionRecoveryRecord {
+    fn schema_version(&self) -> u32 {
+        self.schema_version
+    }
+
     fn sequence(&self) -> u64 {
         self.sequence
     }
@@ -2974,6 +2997,10 @@ impl AccountRecoveryRecord {
 }
 
 impl ChainedRecord for AccountRecoveryRecord {
+    fn schema_version(&self) -> u32 {
+        self.schema_version
+    }
+
     fn sequence(&self) -> u64 {
         self.sequence
     }
@@ -3002,19 +3029,352 @@ impl ChainedRecord for AccountRecoveryRecord {
     }
 }
 
-/// Verified, identified records from the two other owner journals. The
-/// authority never treats an OMS or account summary as risk state; it derives
-/// state from these records and cross-checks them against its own decisions.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct RecoveryRecords {
-    pub oms: Vec<OmsPermitRecord>,
-    /// Execution-level facts behind the OMS cumulative summaries. They are
-    /// independent records: recovery re-verifies their chain, deduplicates
-    /// execution identities and applies corrections before using them.
-    pub executions: Vec<ExecutionRecoveryRecord>,
-    pub account: Vec<AccountRecoveryRecord>,
-    /// Sealed daily P&L evidence. Recovery fails closed when it is absent.
-    pub daily_pnl: DailyPnlRecovery,
+/// Verification version of a sealed recovery snapshot. A snapshot carrying any
+/// other version is rejected before any state is reconstructed.
+pub const RECOVERY_SNAPSHOT_VERSION: u32 = 1;
+
+/// Stable identity of the authoritative OMS journal.
+pub const OMS_JOURNAL_ID: &str = "authoritative-oms";
+/// Stable identity of the authoritative account journal.
+pub const ACCOUNT_JOURNAL_ID: &str = "account-journal";
+
+/// The identity a snapshot is bound to. A caller supplies the *expected*
+/// identity when wiring startup; it is metadata, never proof on its own.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct JournalIdentity {
+    pub source: ObservationSource,
+    pub account_id: AccountId,
+    pub journal_id: String,
+}
+
+impl JournalIdentity {
+    #[must_use]
+    pub fn new(
+        source: ObservationSource,
+        account_id: AccountId,
+        journal_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            source,
+            account_id,
+            journal_id: journal_id.into(),
+        }
+    }
+}
+
+/// Replay checkpoint a verified snapshot was reconstructed from. `None` means
+/// the verifier replayed the whole journal from the genesis digest.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RecoveryCheckpoint {
+    pub sequence: u64,
+    pub digest: String,
+}
+
+/// Bindings recomputed by the verifier from the authoritative journal. Every
+/// field is private so a caller cannot forge a count, sequence, digest or
+/// identity claim about the journal it is presenting.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SnapshotBinding {
+    identity: JournalIdentity,
+    schema_version: u32,
+    verification_version: u32,
+    record_count: u64,
+    first_sequence: u64,
+    last_sequence: u64,
+    head_digest: String,
+    state_digest: String,
+    replay_checkpoint: Option<RecoveryCheckpoint>,
+}
+
+/// The subset of bindings derived from the journal records themselves.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DerivedBinding {
+    record_count: u64,
+    first_sequence: u64,
+    last_sequence: u64,
+    head_digest: String,
+    state_digest: String,
+    replay_checkpoint: Option<RecoveryCheckpoint>,
+}
+
+fn read_recovery_journal<T: serde::de::DeserializeOwned>(
+    path: &Path,
+) -> Result<Vec<T>, RecoveryError> {
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let file = File::open(path)
+        .map_err(|error| RecoveryError::Snapshot(format!("journal {}: {error}", path.display())))?;
+    let mut records = Vec::new();
+    for (index, line) in std::io::BufReader::new(file).lines().enumerate() {
+        let line = line
+            .map_err(|error| RecoveryError::Snapshot(format!("journal read failure: {error}")))?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let record: T = serde_json::from_str(&line).map_err(|error| {
+            RecoveryError::Snapshot(format!("journal line {}: {error}", index + 1))
+        })?;
+        records.push(record);
+    }
+    Ok(records)
+}
+
+/// Re-verify the authoritative chain and derive the exact bindings that seal a
+/// snapshot. `supplement` carries the owner's other records so the state digest
+/// covers everything replayed from that journal, not just its primary stream.
+fn bind_recovery_journal<T, S>(
+    records: &[T],
+    supplement: &S,
+) -> Result<DerivedBinding, RecoveryError>
+where
+    T: ChainedRecord + Serialize,
+    S: Serialize,
+{
+    verify_recovery_chain(records)?;
+    for record in records {
+        if record.schema_version() != 1 {
+            return Err(RecoveryError::Snapshot(format!(
+                "unsupported journal schema {}",
+                record.schema_version()
+            )));
+        }
+    }
+    let record_count = u64::try_from(records.len())
+        .map_err(|_| RecoveryError::Snapshot("journal count overflow".to_owned()))?;
+    let first_sequence = records.first().map_or(0, ChainedRecord::sequence);
+    let last_sequence = records.last().map_or(0, ChainedRecord::sequence);
+    let head_digest = records.last().map_or_else(
+        || GENESIS_DIGEST.to_owned(),
+        |record| record.digest().to_owned(),
+    );
+    let canonical = serde_json::to_string(&(records, supplement))
+        .map_err(|error| RecoveryError::Snapshot(format!("journal serialization: {error}")))?;
+    let state_digest = digest::sha256_hex(canonical.as_bytes());
+    // This verifier only supports a full replay from the genesis digest.
+    let replay_checkpoint = None;
+    Ok(DerivedBinding {
+        record_count,
+        first_sequence,
+        last_sequence,
+        head_digest,
+        state_digest,
+        replay_checkpoint,
+    })
+}
+
+fn check_snapshot_identity(
+    binding: &SnapshotBinding,
+    account_id: AccountId,
+    source: ObservationSource,
+    journal_id: &str,
+) -> Result<(), RecoveryError> {
+    if binding.identity.source != source {
+        return Err(RecoveryError::Snapshot(
+            "journal source mismatch".to_owned(),
+        ));
+    }
+    if binding.identity.account_id != account_id {
+        return Err(RecoveryError::Snapshot(
+            "snapshot belongs to a different account".to_owned(),
+        ));
+    }
+    if binding.identity.journal_id != journal_id {
+        return Err(RecoveryError::Snapshot(
+            "snapshot belongs to a different journal".to_owned(),
+        ));
+    }
+    if binding.verification_version != RECOVERY_SNAPSHOT_VERSION {
+        return Err(RecoveryError::Snapshot(
+            "unsupported snapshot verification version".to_owned(),
+        ));
+    }
+    if binding.schema_version != 1 {
+        return Err(RecoveryError::Snapshot(
+            "unsupported journal schema".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn check_derived_binding(
+    binding: &SnapshotBinding,
+    derived: &DerivedBinding,
+) -> Result<(), RecoveryError> {
+    if binding.record_count != derived.record_count {
+        return Err(RecoveryError::Snapshot("record count mismatch".to_owned()));
+    }
+    if binding.first_sequence != derived.first_sequence {
+        return Err(RecoveryError::Snapshot(
+            "first sequence mismatch".to_owned(),
+        ));
+    }
+    if binding.last_sequence != derived.last_sequence {
+        return Err(RecoveryError::Snapshot("last sequence mismatch".to_owned()));
+    }
+    if binding.head_digest != derived.head_digest {
+        return Err(RecoveryError::Snapshot("head digest mismatch".to_owned()));
+    }
+    if binding.state_digest != derived.state_digest {
+        return Err(RecoveryError::Snapshot("state digest mismatch".to_owned()));
+    }
+    if binding.replay_checkpoint != derived.replay_checkpoint {
+        return Err(RecoveryError::Snapshot(
+            "replay checkpoint mismatch".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+/// Opaque, owner-verified snapshot of the authoritative OMS journal. Its fields
+/// are private: a caller cannot build one from vectors it fabricated, and
+/// startup re-derives every binding before trusting the records.
+///
+/// ```compile_fail
+/// use risk_authority::VerifiedOmsSnapshot;
+/// let forged = VerifiedOmsSnapshot {
+///     binding: unreachable!(),
+///     permits: Vec::new(),
+///     executions: Vec::new(),
+/// };
+/// ```
+#[derive(Clone, Debug)]
+pub struct VerifiedOmsSnapshot {
+    binding: SnapshotBinding,
+    permits: Vec<OmsPermitRecord>,
+    executions: Vec<ExecutionRecoveryRecord>,
+}
+
+impl VerifiedOmsSnapshot {
+    /// Read and verify the owner's OMS journal from durable files, then seal a
+    /// snapshot bound to the supplied expected identity. Both streams must have
+    /// exact sequence and digest continuity.
+    pub fn verify(
+        permits_path: impl AsRef<Path>,
+        executions_path: impl AsRef<Path>,
+        expected: &JournalIdentity,
+    ) -> Result<Self, RecoveryError> {
+        if expected.source != ObservationSource::Oms || expected.journal_id.trim().is_empty() {
+            return Err(RecoveryError::Snapshot(
+                "invalid OMS journal identity".to_owned(),
+            ));
+        }
+        let permits: Vec<OmsPermitRecord> = read_recovery_journal(permits_path.as_ref())?;
+        let executions: Vec<ExecutionRecoveryRecord> =
+            read_recovery_journal(executions_path.as_ref())?;
+        verify_recovery_chain(&executions)?;
+        let derived = bind_recovery_journal(&permits, &executions)?;
+        let binding = SnapshotBinding {
+            identity: expected.clone(),
+            schema_version: 1,
+            verification_version: RECOVERY_SNAPSHOT_VERSION,
+            record_count: derived.record_count,
+            first_sequence: derived.first_sequence,
+            last_sequence: derived.last_sequence,
+            head_digest: derived.head_digest,
+            state_digest: derived.state_digest,
+            replay_checkpoint: derived.replay_checkpoint,
+        };
+        Ok(Self {
+            binding,
+            permits,
+            executions,
+        })
+    }
+
+    pub(crate) fn permits(&self) -> &[OmsPermitRecord] {
+        &self.permits
+    }
+
+    pub(crate) fn executions(&self) -> &[ExecutionRecoveryRecord] {
+        &self.executions
+    }
+
+    pub(crate) fn validate(&self, account_id: AccountId) -> Result<(), RecoveryError> {
+        check_snapshot_identity(
+            &self.binding,
+            account_id,
+            ObservationSource::Oms,
+            OMS_JOURNAL_ID,
+        )?;
+        verify_recovery_chain(&self.executions)?;
+        let derived = bind_recovery_journal(&self.permits, &self.executions)?;
+        check_derived_binding(&self.binding, &derived)
+    }
+}
+
+/// Opaque, owner-verified snapshot of the authoritative account journal. Its
+/// fields are private and startup re-derives every binding before use.
+#[derive(Clone, Debug)]
+pub struct VerifiedAccountSnapshot {
+    binding: SnapshotBinding,
+    records: Vec<AccountRecoveryRecord>,
+    daily_pnl: DailyPnlRecovery,
+}
+
+impl VerifiedAccountSnapshot {
+    /// Read and verify the owner's account journal and its sealed daily P&L
+    /// bundle from durable files, then bind the snapshot to `expected`.
+    pub fn verify(
+        accounts_path: impl AsRef<Path>,
+        daily_pnl_path: impl AsRef<Path>,
+        expected: &JournalIdentity,
+    ) -> Result<Self, RecoveryError> {
+        if expected.source != ObservationSource::AccountJournal
+            || expected.journal_id.trim().is_empty()
+        {
+            return Err(RecoveryError::Snapshot(
+                "invalid account journal identity".to_owned(),
+            ));
+        }
+        let records: Vec<AccountRecoveryRecord> = read_recovery_journal(accounts_path.as_ref())?;
+        let daily_pnl: DailyPnlRecovery = if daily_pnl_path.as_ref().exists() {
+            let text = std::fs::read_to_string(daily_pnl_path.as_ref()).map_err(|error| {
+                RecoveryError::Snapshot(format!("daily pnl read failure: {error}"))
+            })?;
+            serde_json::from_str(&text).map_err(|error| {
+                RecoveryError::Snapshot(format!("daily pnl bundle is corrupt: {error}"))
+            })?
+        } else {
+            DailyPnlRecovery::default()
+        };
+        let derived = bind_recovery_journal(&records, &daily_pnl)?;
+        let binding = SnapshotBinding {
+            identity: expected.clone(),
+            schema_version: 1,
+            verification_version: RECOVERY_SNAPSHOT_VERSION,
+            record_count: derived.record_count,
+            first_sequence: derived.first_sequence,
+            last_sequence: derived.last_sequence,
+            head_digest: derived.head_digest,
+            state_digest: derived.state_digest,
+            replay_checkpoint: derived.replay_checkpoint,
+        };
+        Ok(Self {
+            binding,
+            records,
+            daily_pnl,
+        })
+    }
+
+    pub(crate) fn records(&self) -> &[AccountRecoveryRecord] {
+        &self.records
+    }
+
+    pub(crate) fn daily_pnl(&self) -> &DailyPnlRecovery {
+        &self.daily_pnl
+    }
+
+    pub(crate) fn validate(&self, account_id: AccountId) -> Result<(), RecoveryError> {
+        check_snapshot_identity(
+            &self.binding,
+            account_id,
+            ObservationSource::AccountJournal,
+            ACCOUNT_JOURNAL_ID,
+        )?;
+        let derived = bind_recovery_journal(&self.records, &self.daily_pnl)?;
+        check_derived_binding(&self.binding, &derived)
+    }
 }
 
 /// Complete startup input. All stores are supplied explicitly; there is no
@@ -3026,7 +3386,11 @@ pub struct RecoveryConfig {
     pub trade_date: TradeDate,
     pub control: Box<dyn ControlStore + Send + Sync>,
     pub decisions: Box<dyn DecisionStore + Send + Sync>,
-    pub records: RecoveryRecords,
+    /// Sealed by the OMS journal owner through [`VerifiedOmsSnapshot::verify`].
+    pub oms: VerifiedOmsSnapshot,
+    /// Sealed by the account journal owner through
+    /// [`VerifiedAccountSnapshot::verify`].
+    pub account: VerifiedAccountSnapshot,
     /// Effective-dated instrument-to-sector map supplied by the reference-data
     /// owner. It is required to reconstruct sector exposure consistently.
     pub sectors: BTreeMap<InstrumentId, String>,
@@ -3998,9 +4362,10 @@ fn reconstruct(
         .load_decisions()
         .map_err(|error| RecoveryError::DecisionStore(error.to_string()))?;
     verify_recovery_chain(&decisions)?;
-    verify_recovery_chain(&config.records.oms)?;
-    verify_recovery_chain(&config.records.executions)?;
-    verify_recovery_chain(&config.records.account)?;
+    // The owner journals are never accepted as caller vectors. Both snapshots
+    // must carry bindings that re-derive exactly from their sealed records.
+    config.oms.validate(config.account_id)?;
+    config.account.validate(config.account_id)?;
 
     let mut state = AuthorityState {
         kill_switch_engaged: kill.as_ref().is_none_or(|record| record.enabled),
@@ -4078,7 +4443,7 @@ fn reconstruct(
     }
 
     let mut executions_by_permit: BTreeMap<u64, Vec<&ExecutionRecoveryRecord>> = BTreeMap::new();
-    for execution in &config.records.executions {
+    for execution in config.oms.executions() {
         executions_by_permit
             .entry(execution.permit_id)
             .or_default()
@@ -4087,7 +4452,7 @@ fn reconstruct(
     let no_executions: &[&ExecutionRecoveryRecord] = &[];
 
     let mut consumed_permits = BTreeSet::new();
-    for oms in &config.records.oms {
+    for oms in config.oms.permits() {
         if oms.schema_version != 1 {
             return Err(RecoveryError::Inconsistent(
                 "unsupported OMS recovery schema".to_owned(),
@@ -4292,7 +4657,7 @@ fn reconstruct(
     }
 
     let mut account_positions: BTreeMap<InstrumentId, i64> = BTreeMap::new();
-    for record in &config.records.account {
+    for record in config.account.records() {
         if record.schema_version != 1 {
             return Err(RecoveryError::Inconsistent(
                 "unsupported account recovery schema".to_owned(),
@@ -4332,22 +4697,19 @@ fn reconstruct(
     // Startup never invents a zero P&L. A missing or contradictory sealed
     // bundle is an explicit recovery failure, so the authority cannot reach a
     // state where the daily-loss limit silently sees no loss.
-    let daily = config
-        .records
-        .daily_pnl
+    let sealed_pnl = config.account.daily_pnl();
+    let daily = sealed_pnl
         .record
         .as_ref()
         .ok_or_else(|| RecoveryError::DailyPnl("no sealed record".to_owned()))?;
-    let calendar = config
-        .records
-        .daily_pnl
+    let calendar = sealed_pnl
         .calendar
         .as_ref()
         .ok_or_else(|| RecoveryError::DailyPnl("no business-day calendar".to_owned()))?;
     let snapshot = derive_daily_pnl_snapshot(
         daily,
-        &config.records.account,
-        &config.records.daily_pnl.valuations,
+        config.account.records(),
+        &sealed_pnl.valuations,
         calendar,
         &state.positions,
         config.account_id,
@@ -4393,6 +4755,7 @@ impl RiskAuthority {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::control::FileControlStore;
     use risk_engine::{
         RiskPolicy, //
         ValidatedRiskPolicy,
@@ -4411,7 +4774,7 @@ mod tests {
         )])
     }
 
-    fn test_authority() -> RiskAuthority {
+    fn test_policy() -> ValidatedRiskPolicy {
         let raw = RiskPolicy {
             version: "risk-atomic-test".to_owned(),
             allowed_accounts: BTreeSet::from([AccountId::new(1).expect("account")]),
@@ -4439,9 +4802,13 @@ mod tests {
             max_borrow_quantity: None,
             max_financing_cost_paise: None,
         };
+        ValidatedRiskPolicy::from_policy(&raw).expect("policy")
+    }
+
+    fn test_authority() -> RiskAuthority {
         RiskAuthority::new(
             AccountId::new(1).expect("account"),
-            ValidatedRiskPolicy::from_policy(&raw).expect("policy"),
+            test_policy(),
             Vec::new(),
             TradeDate::new(2026, 1, 1).expect("date"),
         )
@@ -4844,5 +5211,332 @@ mod tests {
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
             "the dependency-free digest matches the canonical vector"
         );
+    }
+
+    // Test-only constructors. They live under #[cfg(test)] and are the only
+    // way a test can seal a snapshot without going through the journal reader;
+    // production callers have no equivalent path.
+    fn oms_identity() -> JournalIdentity {
+        JournalIdentity::new(
+            ObservationSource::Oms,
+            AccountId::new(1).expect("account"),
+            OMS_JOURNAL_ID,
+        )
+    }
+
+    fn account_identity() -> JournalIdentity {
+        JournalIdentity::new(
+            ObservationSource::AccountJournal,
+            AccountId::new(1).expect("account"),
+            ACCOUNT_JOURNAL_ID,
+        )
+    }
+
+    fn test_oms(
+        permits: Vec<OmsPermitRecord>,
+        executions: Vec<ExecutionRecoveryRecord>,
+    ) -> VerifiedOmsSnapshot {
+        let derived = bind_recovery_journal(&permits, &executions).expect("valid OMS journal");
+        VerifiedOmsSnapshot {
+            binding: SnapshotBinding {
+                identity: oms_identity(),
+                schema_version: 1,
+                verification_version: RECOVERY_SNAPSHOT_VERSION,
+                record_count: derived.record_count,
+                first_sequence: derived.first_sequence,
+                last_sequence: derived.last_sequence,
+                head_digest: derived.head_digest,
+                state_digest: derived.state_digest,
+                replay_checkpoint: derived.replay_checkpoint,
+            },
+            permits,
+            executions,
+        }
+    }
+
+    fn test_account(
+        records: Vec<AccountRecoveryRecord>,
+        daily_pnl: DailyPnlRecovery,
+    ) -> VerifiedAccountSnapshot {
+        let derived = bind_recovery_journal(&records, &daily_pnl).expect("valid account journal");
+        VerifiedAccountSnapshot {
+            binding: SnapshotBinding {
+                identity: account_identity(),
+                schema_version: 1,
+                verification_version: RECOVERY_SNAPSHOT_VERSION,
+                record_count: derived.record_count,
+                first_sequence: derived.first_sequence,
+                last_sequence: derived.last_sequence,
+                head_digest: derived.head_digest,
+                state_digest: derived.state_digest,
+                replay_checkpoint: derived.replay_checkpoint,
+            },
+            records,
+            daily_pnl,
+        }
+    }
+
+    fn sealed_oms() -> OmsPermitRecord {
+        let mut record = OmsPermitRecord::new(
+            1,
+            IntentId::new(1).expect("intent"),
+            "a".repeat(64),
+            OmsPermitState::Open,
+            0,
+            0,
+        );
+        record.seal(1, genesis_digest());
+        record
+    }
+
+    static NEXT_TEST_PATH: AtomicU64 = AtomicU64::new(1);
+
+    fn unique_path(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "risk-authority-sealed-{label}-{}-{}.jsonl",
+            std::process::id(),
+            NEXT_TEST_PATH.fetch_add(1, Ordering::Relaxed)
+        ))
+    }
+
+    fn write_lines<T: Serialize>(path: &Path, records: &[T]) {
+        let mut text = String::new();
+        for record in records {
+            text.push_str(&serde_json::to_string(record).expect("serialize"));
+            text.push('\n');
+        }
+        std::fs::write(path, text).expect("write journal");
+    }
+
+    struct TestRecoveryFiles {
+        control: PathBuf,
+        decisions: PathBuf,
+        lock: PathBuf,
+    }
+
+    impl TestRecoveryFiles {
+        fn new(label: &str) -> Self {
+            Self {
+                control: unique_path(&format!("{label}-control")),
+                decisions: unique_path(&format!("{label}-decisions")),
+                lock: unique_path(&format!("{label}-lock")),
+            }
+        }
+
+        fn config(
+            &self,
+            oms: VerifiedOmsSnapshot,
+            account: VerifiedAccountSnapshot,
+        ) -> RecoveryConfig {
+            RecoveryConfig {
+                account_id: AccountId::new(1).expect("account"),
+                policy: test_policy(),
+                instruments: Vec::new(),
+                trade_date: TradeDate::new(2026, 1, 1).expect("date"),
+                control: Box::new(FileControlStore::new(&self.control)),
+                decisions: Box::new(FileDecisionStore::new(&self.decisions)),
+                oms,
+                account,
+                sectors: BTreeMap::new(),
+                ownership_path: self.lock.clone(),
+            }
+        }
+
+        fn cleanup(&self) {
+            let _ = std::fs::remove_file(&self.control);
+            let _ = std::fs::remove_file(&self.decisions);
+            let _ = std::fs::remove_file(&self.lock);
+        }
+    }
+
+    #[test]
+    fn snapshot_verifier_rejects_corrupt_journal_data() {
+        let permits = unique_path("corrupt-permits");
+        let executions = unique_path("corrupt-executions");
+        let accounts = unique_path("corrupt-accounts");
+        let pnl = unique_path("corrupt-pnl");
+        let broken_chain = unique_path("broken-chain");
+        std::fs::write(&permits, "{not-json}\n").expect("write corrupt journal");
+        assert!(
+            matches!(
+                VerifiedOmsSnapshot::verify(&permits, &executions, &oms_identity()),
+                Err(RecoveryError::Snapshot(_))
+            ),
+            "an unparseable OMS journal cannot be sealed"
+        );
+
+        let mut out_of_sequence = sealed_oms();
+        out_of_sequence.seal(2, genesis_digest());
+        write_lines(&broken_chain, std::slice::from_ref(&out_of_sequence));
+        assert!(
+            matches!(
+                VerifiedOmsSnapshot::verify(&broken_chain, &executions, &oms_identity()),
+                Err(RecoveryError::Sequence(_))
+            ),
+            "a broken OMS chain cannot be sealed"
+        );
+
+        std::fs::write(&accounts, "{not-json}\n").expect("write corrupt account journal");
+        assert!(
+            matches!(
+                VerifiedAccountSnapshot::verify(&accounts, &pnl, &account_identity()),
+                Err(RecoveryError::Snapshot(_))
+            ),
+            "an unparseable account journal cannot be sealed"
+        );
+        std::fs::write(&pnl, "{not-json}\n").expect("write corrupt pnl bundle");
+        assert!(
+            VerifiedAccountSnapshot::verify(&executions, &pnl, &account_identity()).is_err(),
+            "a corrupt daily pnl bundle cannot be sealed"
+        );
+
+        for path in [&permits, &executions, &accounts, &pnl, &broken_chain] {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
+    #[test]
+    fn snapshot_binding_rejects_wrong_identity_and_version() {
+        let account = AccountId::new(1).expect("account");
+        let base = test_oms(Vec::new(), Vec::new());
+        assert!(
+            base.validate(account).is_ok(),
+            "a correctly bound fixture validates"
+        );
+
+        let mut wrong_account = base.clone();
+        wrong_account.binding.identity.account_id = AccountId::new(9).expect("other account");
+        assert!(
+            matches!(
+                wrong_account.validate(account),
+                Err(RecoveryError::Snapshot(_))
+            ),
+            "a snapshot from another account is rejected"
+        );
+
+        let mut wrong_journal = base.clone();
+        wrong_journal.binding.identity.journal_id = "another-journal".to_owned();
+        assert!(
+            matches!(
+                wrong_journal.validate(account),
+                Err(RecoveryError::Snapshot(_))
+            ),
+            "a snapshot from another journal is rejected"
+        );
+
+        let mut wrong_source = base.clone();
+        wrong_source.binding.identity.source = ObservationSource::AccountJournal;
+        assert!(
+            matches!(
+                wrong_source.validate(account),
+                Err(RecoveryError::Snapshot(_))
+            ),
+            "a snapshot from the wrong owner is rejected"
+        );
+
+        let mut wrong_version = base.clone();
+        wrong_version.binding.verification_version = RECOVERY_SNAPSHOT_VERSION + 1;
+        assert!(
+            matches!(
+                wrong_version.validate(account),
+                Err(RecoveryError::Snapshot(_))
+            ),
+            "an unsupported verification version is rejected"
+        );
+
+        let mut wrong_schema = base;
+        wrong_schema.binding.schema_version = 2;
+        assert!(
+            matches!(
+                wrong_schema.validate(account),
+                Err(RecoveryError::Snapshot(_))
+            ),
+            "an unsupported journal schema is rejected"
+        );
+    }
+
+    #[test]
+    fn snapshot_binding_rejects_count_sequence_head_and_state_mismatches() {
+        let account = AccountId::new(1).expect("account");
+        let base = test_oms(vec![sealed_oms()], Vec::new());
+        assert!(
+            base.validate(account).is_ok(),
+            "a correctly bound fixture validates"
+        );
+
+        type BindingEdit = fn(&mut VerifiedOmsSnapshot);
+        let cases: [(&str, BindingEdit); 6] = [
+            ("record count mismatch", |snapshot| {
+                snapshot.binding.record_count = 2;
+            }),
+            ("first sequence mismatch", |snapshot| {
+                snapshot.binding.first_sequence = 2;
+            }),
+            ("last sequence mismatch", |snapshot| {
+                snapshot.binding.last_sequence = 2;
+            }),
+            ("head digest mismatch", |snapshot| {
+                snapshot.binding.head_digest = "f".repeat(64);
+            }),
+            ("state digest mismatch", |snapshot| {
+                snapshot.binding.state_digest = "f".repeat(64);
+            }),
+            ("replay checkpoint mismatch", |snapshot| {
+                snapshot.binding.replay_checkpoint = Some(RecoveryCheckpoint {
+                    sequence: 1,
+                    digest: "f".repeat(64),
+                });
+            }),
+        ];
+        for (expected, edit) in cases {
+            let mut tampered = base.clone();
+            edit(&mut tampered);
+            assert!(
+                matches!(
+                    tampered.validate(account),
+                    Err(RecoveryError::Snapshot(message)) if message == expected
+                ),
+                "{expected} is detected by re-derivation"
+            );
+        }
+
+        let mut corrupt_records = base;
+        corrupt_records.permits[0].digest = "f".repeat(64);
+        assert!(
+            matches!(
+                corrupt_records.validate(account),
+                Err(RecoveryError::Digest(_))
+            ),
+            "corrupted records are re-verified before the snapshot is trusted"
+        );
+    }
+
+    #[test]
+    fn recover_rejects_foreign_and_tampered_snapshots() {
+        let files = TestRecoveryFiles::new("sealed-reject");
+        let oms = test_oms(Vec::new(), Vec::new());
+
+        let mut foreign = test_account(Vec::new(), DailyPnlRecovery::default());
+        foreign.binding.identity.account_id = AccountId::new(9).expect("other account");
+        let config = files.config(oms.clone(), foreign);
+        assert!(
+            matches!(
+                reconstruct(&config, &BTreeMap::new()),
+                Err(RecoveryError::Snapshot(_))
+            ),
+            "recovery rejects an account snapshot from another account"
+        );
+
+        let mut mismatched = test_account(Vec::new(), DailyPnlRecovery::default());
+        mismatched.binding.head_digest = "f".repeat(64);
+        let config = files.config(oms, mismatched);
+        assert!(
+            matches!(
+                reconstruct(&config, &BTreeMap::new()),
+                Err(RecoveryError::Snapshot(_))
+            ),
+            "recovery rejects a tampered account snapshot binding"
+        );
+        files.cleanup();
     }
 }
