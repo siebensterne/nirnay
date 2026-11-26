@@ -1,0 +1,32 @@
+schema_version = 1
+language_scope = ["rustguide", "rust-coding-guidelines", "cppguide", "pyguide", "shellguide", "jsoncguide"]
+
+[[reference]]
+file = "rustguide.html"
+source = "https://google.github.io/styleguide/rustguide.html"
+sha256 = "89facc927c27c2667effc8e84fafa20c1a5161cf4fea86ea8622a90d6a6422a6"
+
+[[reference]]
+file = "rust-coding-guidelines.html"
+source = "https://docs.kernel.org/rust/coding-guidelines.html"
+sha256 = "e6baf3bb0332610f7513f6e827abbe2a4b134262b1082c587dd650f49780b8ef"
+
+[[reference]]
+file = "cppguide.html"
+source = "https://google.github.io/styleguide/cppguide.html"
+sha256 = "bdac9c1d0b5ddbc7622b696a8f049a6ca172a1dd2190d55b970afd1c15060c63"
+
+[[reference]]
+file = "pyguide.html"
+source = "https://google.github.io/styleguide/pyguide.html"
+sha256 = "c81fe3405693a6b4f6e14d625b7176eab45754eef1ee76baae270abf15fec147"
+
+[[reference]]
+file = "shellguide.html"
+source = "https://google.github.io/styleguide/shellguide.html"
+sha256 = "7a5fe550de49a336fd7a4f8a5fbd78614054925443aa1c3df2bff1a98e593e30"
+
+[[reference]]
+file = "jsoncguide.html"
+source = "https://google.github.io/styleguide/jsoncguide.html"
+sha256 = "be7fdbbf2cca0d00e947ba6efbaef977a84c6b7d1cd371d5e2fceb2abcb23386"
