@@ -111,6 +111,10 @@ jobs:
           python3 scripts/check_no_cross_pollution.py
       - name: Frozen source-ingestion boundary
         run: make freeze-check
+      # A declared research code digest without a verifier is metadata, not
+      # a reproducibility control. This step binds it to the source tree.
+      - name: Declared research code digest
+        run: make research-code-digest-check
 
       - name: Git policy
         run: python3 scripts/check_git_policy.py
