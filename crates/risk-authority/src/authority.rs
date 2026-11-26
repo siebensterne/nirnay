@@ -6335,7 +6335,11 @@ mod tests {
         // existing record stream, not a missing path silently read as empty.
         write_lines(&executions, &Vec::<ExecutionRecoveryRecord>::new());
         std::fs::write(&permits, "{not-json}\n").expect("write corrupt journal");
-        let owner_directory = RecoveryAuthenticity::OwnerDirectory;
+        // Chain-corruption checks use a signing-key posture so the test does
+        // not depend on host-specific /tmp directory ownership semantics.
+        let owner_directory = RecoveryAuthenticity::OwnerSignature(
+            OwnerSigningKey::new(b"unit-owner-key".to_vec()).expect("key"),
+        );
         assert!(
             matches!(
                 VerifiedOmsSnapshot::verify(
