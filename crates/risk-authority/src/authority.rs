@@ -5,7 +5,11 @@
 //! clock, snapshot availability, kill switch and reconciliation state. A caller
 //! supplies only an [`OrderIntent`] and raw observations from registered owner
 //! adapters; it cannot assert a `Healthy` flag, an exposure figure, an account
-//! snapshot, or forge another owner's facts.
+//! snapshot, a P&L figure, or forge another owner's facts.
+//!
+//! Daily P&L is an immutable [`DailyPnlSnapshot`] derived only from sealed
+//! account-journal and valuation records. A missing, stale, contradictory or
+//! foreign snapshot denies new risk; missing P&L is never interpreted as zero.
 //!
 //! Evaluation and reservation happen under a single mutex lock, so two
 //! concurrent callers can never both evaluate against the same stale state.
@@ -64,6 +68,7 @@ use trading_core::{
     OrderIntent,
     Paise,
     Quantity,
+    ReconciliationStatus,
     RiskAssessment,
     Side,
     StrategyId,
@@ -190,6 +195,650 @@ impl Reservation {
     }
 }
 
+/// Which signed money effects the daily-loss limit consumes.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DailyPnlBasis {
+    /// Account-journal realized effects only; open mark-to-market losses do not
+    /// consume the daily-loss budget.
+    RealizedOnly,
+    /// Realized effects plus valuation-derived unrealized P&L. This is the
+    /// production basis: an open mark-to-market loss is a real account loss
+    /// and must consume the daily-loss budget as a booked loss does. Fees,
+    /// funding and FX effects are signed account-journal facts included in
+    /// both bases.
+    RealizedPlusUnrealized,
+}
+
+/// The only accepted daily P&L calculation version. A record carrying any
+/// other version is rejected rather than interpreted with unknown semantics.
+pub const DAILY_PNL_CALCULATION_VERSION: &str = "daily-pnl-v1";
+
+/// Explicit business-day boundary supplied by the calendar owner. No time
+/// zone, exchange or venue is defaulted by the authority: the IANA time-zone
+/// name, the business date and the exact half-open instant window are all
+/// owner facts, verified against the immutable authority trade date.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DailyPnlCalendar {
+    pub time_zone: String,
+    pub business_date: TradeDate,
+    /// Inclusive logical nanosecond at which this business day starts.
+    pub day_start_ns: i64,
+    /// Exclusive logical nanosecond at which the next business day starts.
+    pub next_day_start_ns: i64,
+}
+
+impl DailyPnlCalendar {
+    #[must_use]
+    pub fn new(
+        time_zone: String,
+        business_date: TradeDate,
+        day_start_ns: i64,
+        next_day_start_ns: i64,
+    ) -> Self {
+        Self {
+            time_zone,
+            business_date,
+            day_start_ns,
+            next_day_start_ns,
+        }
+    }
+}
+
+/// Fail-closed daily P&L errors. Every variant denies new risk; none resolves
+/// to a zero P&L.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum DailyPnlError {
+    #[error("daily pnl snapshot is missing")]
+    Missing,
+    #[error("daily pnl publication is not authenticated by the account journal owner")]
+    Unauthorised,
+    #[error("authority state mutex was poisoned while publishing daily pnl")]
+    StatePoisoned,
+    #[error("unsupported daily pnl schema version {0}")]
+    UnsupportedSchema(u32),
+    #[error("unsupported daily pnl calculation version")]
+    UnsupportedCalculationVersion,
+    #[error("daily pnl record belongs to another account")]
+    WrongAccount,
+    #[error("daily pnl record belongs to another business date")]
+    WrongBusinessDate,
+    #[error("invalid daily pnl calendar: {0}")]
+    InvalidCalendar(String),
+    #[error("the authority clock is outside the declared business-day boundary")]
+    OutsideBusinessDay,
+    #[error("daily pnl journal binding is wrong: {0}")]
+    WrongJournal(String),
+    #[error("daily pnl valuation inputs are wrong: {0}")]
+    WrongValuation(String),
+    #[error("daily pnl positions digest disagrees with authoritative positions")]
+    WrongPositions,
+    #[error("daily pnl reconciliation is not matched and evidenced")]
+    WrongReconciliation,
+    #[error("daily pnl component disagrees with the sealed records: {0}")]
+    Contradictory(String),
+    #[error("daily pnl is stale: age {age_ns} ns exceeds {max_age_ns} ns")]
+    Stale { age_ns: u64, max_age_ns: u64 },
+    #[error("daily pnl evidence is dated in the future relative to the authority clock")]
+    Future,
+    #[error("daily pnl money arithmetic overflowed")]
+    Overflow,
+}
+
+/// Immutable P&L evidence. It is built only by the authority from sealed
+/// records; no caller supplies a P&L figure or mutates a snapshot in place.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DailyPnlSnapshot {
+    pub schema_version: u32,
+    pub account_id: AccountId,
+    pub business_date: TradeDate,
+    pub base_currency: String,
+    pub account_journal_sequence: u64,
+    pub account_journal_digest: String,
+    pub positions_digest: String,
+    pub valuation_inputs_digest: String,
+    pub calculation_version: String,
+    pub calendar_digest: String,
+    pub basis: DailyPnlBasis,
+    pub calendar: DailyPnlCalendar,
+    pub realized_paise: i64,
+    pub unrealized_paise: i64,
+    pub fees_paise: i64,
+    pub funding_paise: i64,
+    pub fx_paise: i64,
+    pub reconciliation_status: ReconciliationStatus,
+    pub as_of_ns: i64,
+    pub valuations_as_of_ns: i64,
+}
+
+impl DailyPnlSnapshot {
+    /// Exact signed P&L consumed by the daily-loss limit. Every addition and
+    /// subtraction is checked; an overflow denies risk instead of wrapping.
+    pub fn daily_limit_pnl_paise(&self) -> Result<Paise, DailyPnlError> {
+        let mut total = Paise(self.realized_paise);
+        if self.basis == DailyPnlBasis::RealizedPlusUnrealized {
+            total = total
+                .checked_add(Paise(self.unrealized_paise))
+                .map_err(|_| DailyPnlError::Overflow)?;
+        }
+        total = total
+            .checked_sub(Paise(self.fees_paise))
+            .map_err(|_| DailyPnlError::Overflow)?;
+        total = total
+            .checked_add(Paise(self.funding_paise))
+            .map_err(|_| DailyPnlError::Overflow)?;
+        total = total
+            .checked_add(Paise(self.fx_paise))
+            .map_err(|_| DailyPnlError::Overflow)?;
+        Ok(total)
+    }
+}
+
+/// Owner-sealed P&L attestation. Its money fields are re-derived from the
+/// account and valuation records before a snapshot is built; a mismatching
+/// claim is rejected, not averaged or trusted.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DailyPnlRecord {
+    pub schema_version: u32,
+    pub sequence: u64,
+    pub prev_digest: String,
+    pub digest: String,
+    pub account_id: AccountId,
+    pub business_date: TradeDate,
+    pub base_currency: String,
+    pub account_journal_sequence: u64,
+    pub account_journal_digest: String,
+    pub positions_digest: String,
+    pub valuation_inputs_digest: String,
+    pub calculation_version: String,
+    pub calendar_digest: String,
+    pub basis: DailyPnlBasis,
+    pub realized_paise: i64,
+    pub unrealized_paise: i64,
+    pub fees_paise: i64,
+    pub funding_paise: i64,
+    pub fx_paise: i64,
+    pub reconciliation_status: ReconciliationStatus,
+    pub as_of_ns: i64,
+}
+
+impl DailyPnlRecord {
+    /// Start a record with its identity and basis. Journal, valuation and
+    /// money facts are attached with the explicit builder methods below.
+    #[must_use]
+    pub fn new(
+        account_id: AccountId,
+        business_date: TradeDate,
+        base_currency: String,
+        basis: DailyPnlBasis,
+        calendar: &DailyPnlCalendar,
+        as_of_ns: i64,
+    ) -> Self {
+        Self {
+            schema_version: 1,
+            sequence: 0,
+            prev_digest: GENESIS_DIGEST.to_owned(),
+            digest: String::new(),
+            account_id,
+            business_date,
+            base_currency,
+            account_journal_sequence: 0,
+            account_journal_digest: String::new(),
+            positions_digest: String::new(),
+            valuation_inputs_digest: String::new(),
+            calculation_version: DAILY_PNL_CALCULATION_VERSION.to_owned(),
+            calendar_digest: calendar_digest(calendar),
+            basis,
+            realized_paise: 0,
+            unrealized_paise: 0,
+            fees_paise: 0,
+            funding_paise: 0,
+            fx_paise: 0,
+            reconciliation_status: ReconciliationStatus::Matched,
+            as_of_ns,
+        }
+    }
+
+    #[must_use]
+    pub fn with_journal(mut self, sequence: u64, digest: String) -> Self {
+        self.account_journal_sequence = sequence;
+        self.account_journal_digest = digest;
+        self
+    }
+
+    #[must_use]
+    pub fn with_digests(mut self, positions: String, valuations: String) -> Self {
+        self.positions_digest = positions;
+        self.valuation_inputs_digest = valuations;
+        self
+    }
+
+    #[must_use]
+    pub fn with_components(
+        mut self,
+        realized: i64,
+        unrealized: i64,
+        fees: i64,
+        funding: i64,
+        fx: i64,
+    ) -> Self {
+        self.realized_paise = realized;
+        self.unrealized_paise = unrealized;
+        self.fees_paise = fees;
+        self.funding_paise = funding;
+        self.fx_paise = fx;
+        self
+    }
+
+    #[must_use]
+    pub fn with_reconciliation_status(mut self, status: ReconciliationStatus) -> Self {
+        self.reconciliation_status = status;
+        self
+    }
+
+    /// Assign the exact next sequence and seal the record to its predecessor.
+    pub fn seal(&mut self, sequence: u64, prev_digest: &str) {
+        let (sequence, previous, digest) = seal_fields(sequence, prev_digest, &self.preimage());
+        self.sequence = sequence;
+        self.prev_digest = previous;
+        self.digest = digest;
+    }
+}
+
+impl ChainedRecord for DailyPnlRecord {
+    fn sequence(&self) -> u64 {
+        self.sequence
+    }
+
+    fn prev_digest(&self) -> &str {
+        &self.prev_digest
+    }
+
+    fn digest(&self) -> &str {
+        &self.digest
+    }
+
+    fn preimage(&self) -> String {
+        serde_json::json!({
+            "schema_version": self.schema_version,
+            "account_id": self.account_id,
+            "business_date": self.business_date,
+            "base_currency": self.base_currency,
+            "account_journal_sequence": self.account_journal_sequence,
+            "account_journal_digest": self.account_journal_digest,
+            "positions_digest": self.positions_digest,
+            "valuation_inputs_digest": self.valuation_inputs_digest,
+            "calculation_version": self.calculation_version,
+            "calendar_digest": self.calendar_digest,
+            "basis": self.basis,
+            "realized_paise": self.realized_paise,
+            "unrealized_paise": self.unrealized_paise,
+            "fees_paise": self.fees_paise,
+            "funding_paise": self.funding_paise,
+            "fx_paise": self.fx_paise,
+            "reconciliation_status": self.reconciliation_status,
+            "as_of_ns": self.as_of_ns,
+        })
+        .to_string()
+    }
+}
+
+/// One owner-sealed valuation input: an exact mark and per-unit cost basis for
+/// the authoritative position quantity. Unrealized P&L is recomputed from
+/// these facts, never copied from an observation claim.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ValuationRecord {
+    pub schema_version: u32,
+    pub sequence: u64,
+    pub prev_digest: String,
+    pub digest: String,
+    pub account_id: AccountId,
+    pub instrument_id: InstrumentId,
+    pub quantity: i64,
+    pub mark_paise: i64,
+    pub cost_basis_paise: i64,
+    pub as_of_ns: i64,
+}
+
+impl ValuationRecord {
+    #[must_use]
+    pub fn new(
+        account_id: AccountId,
+        instrument_id: InstrumentId,
+        quantity: i64,
+        mark_paise: i64,
+        cost_basis_paise: i64,
+        as_of_ns: i64,
+    ) -> Self {
+        Self {
+            schema_version: 1,
+            sequence: 0,
+            prev_digest: GENESIS_DIGEST.to_owned(),
+            digest: String::new(),
+            account_id,
+            instrument_id,
+            quantity,
+            mark_paise,
+            cost_basis_paise,
+            as_of_ns,
+        }
+    }
+
+    /// Assign the exact next sequence and seal the record to its predecessor.
+    pub fn seal(&mut self, sequence: u64, prev_digest: &str) {
+        let (sequence, previous, digest) = seal_fields(sequence, prev_digest, &self.preimage());
+        self.sequence = sequence;
+        self.prev_digest = previous;
+        self.digest = digest;
+    }
+}
+
+impl ChainedRecord for ValuationRecord {
+    fn sequence(&self) -> u64 {
+        self.sequence
+    }
+
+    fn prev_digest(&self) -> &str {
+        &self.prev_digest
+    }
+
+    fn digest(&self) -> &str {
+        &self.digest
+    }
+
+    fn preimage(&self) -> String {
+        serde_json::json!({
+            "schema_version": self.schema_version,
+            "account_id": self.account_id,
+            "instrument_id": self.instrument_id,
+            "quantity": self.quantity,
+            "mark_paise": self.mark_paise,
+            "cost_basis_paise": self.cost_basis_paise,
+            "as_of_ns": self.as_of_ns,
+        })
+        .to_string()
+    }
+}
+
+/// The sealed P&L evidence bundle required at startup. All three fields are
+/// mandatory: recovery fails closed when any of them is absent.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DailyPnlRecovery {
+    pub record: Option<DailyPnlRecord>,
+    pub valuations: Vec<ValuationRecord>,
+    pub calendar: Option<DailyPnlCalendar>,
+}
+
+fn calendar_digest(calendar: &DailyPnlCalendar) -> String {
+    serde_json::to_string(calendar)
+        .map(|text| digest::sha256_hex(text.as_bytes()))
+        .unwrap_or_default()
+}
+
+/// Deterministic digest over authoritative positions, exposed so owner-backed
+/// fixtures can bind a P&L record to those positions.
+#[must_use]
+pub fn daily_pnl_positions_digest(positions: &BTreeMap<InstrumentId, i64>) -> String {
+    serde_json::to_string(positions)
+        .map(|text| digest::sha256_hex(text.as_bytes()))
+        .unwrap_or_default()
+}
+
+fn chain_head<T: ChainedRecord>(records: &[T]) -> Result<String, DailyPnlError> {
+    verify_recovery_chain(records).map_err(|error| {
+        DailyPnlError::WrongJournal(format!("chain verification failed: {error}"))
+    })?;
+    Ok(records.last().map_or_else(
+        || GENESIS_DIGEST.to_owned(),
+        |record| record.digest().to_owned(),
+    ))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct AccountPnl {
+    realized: Paise,
+    fees: Paise,
+    funding: Paise,
+    fx: Paise,
+}
+
+/// Sum the signed money effects carried by the sealed account journal. No
+/// figure is read from an owner summary: every component is a record field
+/// covered by the journal's sequence and digest chain.
+fn derive_account_pnl(
+    records: &[AccountRecoveryRecord],
+    expected_account: AccountId,
+) -> Result<AccountPnl, DailyPnlError> {
+    let mut pnl = AccountPnl {
+        realized: Paise(0),
+        fees: Paise(0),
+        funding: Paise(0),
+        fx: Paise(0),
+    };
+    for record in records {
+        if record.schema_version != 1 {
+            return Err(DailyPnlError::UnsupportedSchema(record.schema_version));
+        }
+        if record.account_id != expected_account {
+            return Err(DailyPnlError::WrongAccount);
+        }
+        if record.fees_paise < 0 {
+            return Err(DailyPnlError::Contradictory(
+                "account journal fees must be non-negative".to_owned(),
+            ));
+        }
+        pnl.realized = pnl
+            .realized
+            .checked_add(Paise(record.realized_paise))
+            .map_err(|_| DailyPnlError::Overflow)?;
+        pnl.fees = pnl
+            .fees
+            .checked_add(Paise(record.fees_paise))
+            .map_err(|_| DailyPnlError::Overflow)?;
+        pnl.funding = pnl
+            .funding
+            .checked_add(Paise(record.funding_paise))
+            .map_err(|_| DailyPnlError::Overflow)?;
+        pnl.fx = pnl
+            .fx
+            .checked_add(Paise(record.fx_paise))
+            .map_err(|_| DailyPnlError::Overflow)?;
+    }
+    Ok(pnl)
+}
+
+fn check_pnl_freshness(
+    as_of_ns: i64,
+    now: LogicalNanos,
+    max_age_ns: u64,
+) -> Result<(), DailyPnlError> {
+    let as_of = u64::try_from(as_of_ns).map_err(|_| DailyPnlError::Future)?;
+    if as_of > now.get() {
+        return Err(DailyPnlError::Future);
+    }
+    let age_ns = now.get() - as_of;
+    if age_ns > max_age_ns {
+        return Err(DailyPnlError::Stale { age_ns, max_age_ns });
+    }
+    Ok(())
+}
+
+/// Recompute unrealized P&L from sealed marks and per-unit cost bases. Each
+/// valuation must match the authoritative position exactly; duplicate inputs
+/// and future-dated marks fail closed.
+fn derive_valuations(
+    records: &[ValuationRecord],
+    expected_account: AccountId,
+    positions: &BTreeMap<InstrumentId, i64>,
+    now: LogicalNanos,
+    max_age_ns: u64,
+) -> Result<(Paise, String, i64), DailyPnlError> {
+    let head = chain_head(records)?;
+    let mut unrealized = Paise(0);
+    let mut latest_as_of = 0_i64;
+    let mut seen = BTreeSet::new();
+    for record in records {
+        if record.schema_version != 1 {
+            return Err(DailyPnlError::UnsupportedSchema(record.schema_version));
+        }
+        if record.account_id != expected_account {
+            return Err(DailyPnlError::WrongAccount);
+        }
+        if !seen.insert(record.instrument_id.clone()) {
+            return Err(DailyPnlError::WrongValuation(
+                "duplicate valuation instrument".to_owned(),
+            ));
+        }
+        let position = positions.get(&record.instrument_id).copied().unwrap_or(0);
+        if record.quantity != position {
+            return Err(DailyPnlError::WrongValuation(format!(
+                "valuation quantity for {} disagrees with the account position",
+                record.instrument_id
+            )));
+        }
+        if record.mark_paise < 0 || record.cost_basis_paise < 0 {
+            return Err(DailyPnlError::WrongValuation(
+                "negative mark or cost basis".to_owned(),
+            ));
+        }
+        check_pnl_freshness(record.as_of_ns, now, max_age_ns)?;
+        latest_as_of = latest_as_of.max(record.as_of_ns);
+        let per_unit = Paise(record.mark_paise)
+            .checked_sub(Paise(record.cost_basis_paise))
+            .map_err(|_| DailyPnlError::Overflow)?;
+        unrealized = unrealized
+            .checked_add(
+                per_unit
+                    .checked_scale(record.quantity)
+                    .map_err(|_| DailyPnlError::Overflow)?,
+            )
+            .map_err(|_| DailyPnlError::Overflow)?;
+    }
+    Ok((unrealized, head, latest_as_of))
+}
+
+/// Build the only authoritative daily P&L snapshot: every money component and
+/// every binding digest is either recomputed here or checked against the
+/// sealed records and calendar before the snapshot may exist.
+#[allow(clippy::too_many_arguments)] // every argument is a required binding or checked record input
+fn derive_daily_pnl_snapshot(
+    record: &DailyPnlRecord,
+    accounts: &[AccountRecoveryRecord],
+    valuations: &[ValuationRecord],
+    calendar: &DailyPnlCalendar,
+    positions: &BTreeMap<InstrumentId, i64>,
+    expected_account: AccountId,
+    expected_date: TradeDate,
+    now: LogicalNanos,
+    max_age_ns: u64,
+) -> Result<DailyPnlSnapshot, DailyPnlError> {
+    verify_recovery_chain(std::slice::from_ref(record))
+        .map_err(|error| DailyPnlError::Contradictory(format!("P&L record: {error}")))?;
+    if record.schema_version != 1 {
+        return Err(DailyPnlError::UnsupportedSchema(record.schema_version));
+    }
+    if record.account_id != expected_account {
+        return Err(DailyPnlError::WrongAccount);
+    }
+    if record.calculation_version != DAILY_PNL_CALCULATION_VERSION {
+        return Err(DailyPnlError::UnsupportedCalculationVersion);
+    }
+    if record.base_currency.trim().is_empty() {
+        return Err(DailyPnlError::Contradictory(
+            "base currency is not declared".to_owned(),
+        ));
+    }
+    if calendar.time_zone.trim().is_empty() {
+        return Err(DailyPnlError::InvalidCalendar(
+            "time zone is not declared".to_owned(),
+        ));
+    }
+    if calendar.day_start_ns >= calendar.next_day_start_ns {
+        return Err(DailyPnlError::InvalidCalendar(
+            "business-day window is empty".to_owned(),
+        ));
+    }
+    if calendar.business_date != expected_date || record.business_date != expected_date {
+        return Err(DailyPnlError::WrongBusinessDate);
+    }
+    if record.calendar_digest != calendar_digest(calendar) {
+        return Err(DailyPnlError::InvalidCalendar(
+            "calendar digest does not bind this record".to_owned(),
+        ));
+    }
+    let at = i64::try_from(now.get()).map_err(|_| DailyPnlError::OutsideBusinessDay)?;
+    if at < calendar.day_start_ns || at >= calendar.next_day_start_ns {
+        return Err(DailyPnlError::OutsideBusinessDay);
+    }
+    check_pnl_freshness(record.as_of_ns, now, max_age_ns)?;
+
+    let account_head = chain_head(accounts)?;
+    let account_sequence = u64::try_from(accounts.len())
+        .map_err(|_| DailyPnlError::WrongJournal("length".to_owned()))?;
+    if record.account_journal_sequence != account_sequence
+        || record.account_journal_digest != account_head
+    {
+        return Err(DailyPnlError::WrongJournal(
+            "account journal sequence or digest disagrees".to_owned(),
+        ));
+    }
+    let account_pnl = derive_account_pnl(accounts, expected_account)?;
+    let (unrealized, valuation_head, valuations_as_of) =
+        derive_valuations(valuations, expected_account, positions, now, max_age_ns)?;
+    if record.positions_digest != daily_pnl_positions_digest(positions) {
+        return Err(DailyPnlError::WrongPositions);
+    }
+    if record.valuation_inputs_digest != valuation_head {
+        return Err(DailyPnlError::WrongValuation(
+            "valuation inputs digest disagrees".to_owned(),
+        ));
+    }
+    let components = [
+        ("realized", record.realized_paise, account_pnl.realized.0),
+        ("unrealized", record.unrealized_paise, unrealized.0),
+        ("fees", record.fees_paise, account_pnl.fees.0),
+        ("funding", record.funding_paise, account_pnl.funding.0),
+        ("fx", record.fx_paise, account_pnl.fx.0),
+    ];
+    for (name, claimed, derived) in components {
+        if claimed != derived {
+            return Err(DailyPnlError::Contradictory(format!(
+                "{name} claim does not match sealed records"
+            )));
+        }
+    }
+    if record.reconciliation_status != ReconciliationStatus::Matched {
+        return Err(DailyPnlError::WrongReconciliation);
+    }
+
+    Ok(DailyPnlSnapshot {
+        schema_version: record.schema_version,
+        account_id: record.account_id,
+        business_date: record.business_date,
+        base_currency: record.base_currency.clone(),
+        account_journal_sequence: record.account_journal_sequence,
+        account_journal_digest: record.account_journal_digest.clone(),
+        positions_digest: record.positions_digest.clone(),
+        valuation_inputs_digest: record.valuation_inputs_digest.clone(),
+        calculation_version: record.calculation_version.clone(),
+        calendar_digest: record.calendar_digest.clone(),
+        basis: record.basis,
+        calendar: calendar.clone(),
+        realized_paise: record.realized_paise,
+        unrealized_paise: record.unrealized_paise,
+        fees_paise: record.fees_paise,
+        funding_paise: record.funding_paise,
+        fx_paise: record.fx_paise,
+        reconciliation_status: record.reconciliation_status,
+        as_of_ns: record.as_of_ns,
+        valuations_as_of_ns: valuations_as_of,
+    })
+}
+
 /// Read-only view of authority state for operating evidence and tests.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AuthoritySnapshot {
@@ -214,6 +863,16 @@ pub struct AuthoritySnapshot {
     pub reconciliation_reason: Option<String>,
     /// Durable evidence reference for the current reconciliation latch.
     pub reconciliation_evidence_ref: Option<String>,
+    /// Whether an authoritative daily P&L snapshot has been established.
+    pub daily_pnl_available: bool,
+    /// The explicit basis used by the daily-loss limit, if a snapshot exists.
+    pub daily_pnl_basis: Option<DailyPnlBasis>,
+    /// The exact signed P&L the daily-loss limit evaluates, if established.
+    pub daily_pnl_limit_paise: Option<Paise>,
+    /// Account-journal head bound to the established P&L snapshot.
+    pub daily_pnl_journal_digest: Option<String>,
+    /// Account-journal sequence bound to the established P&L snapshot.
+    pub daily_pnl_journal_sequence: Option<u64>,
 }
 
 /// All mutable account-global facts. Never constructed from caller claims.
@@ -226,7 +885,8 @@ struct AuthorityState {
     account_snapshot_available: bool,
     kill_switch_engaged: bool,
     reconciliation_blocked: bool,
-    daily_pnl: Paise,
+    /// Immutable, owner-derived P&L evidence. `None` denies new risk.
+    daily_pnl: Option<DailyPnlSnapshot>,
     positions: BTreeMap<InstrumentId, i64>,
     pending_buy: BTreeMap<InstrumentId, i64>,
     pending_sell: BTreeMap<InstrumentId, i64>,
@@ -260,7 +920,7 @@ impl Default for AuthorityState {
             account_snapshot_available: false,
             kill_switch_engaged: true,
             reconciliation_blocked: true,
-            daily_pnl: Paise(0),
+            daily_pnl: None,
             positions: BTreeMap::new(),
             pending_buy: BTreeMap::new(),
             pending_sell: BTreeMap::new(),
@@ -728,16 +1388,87 @@ impl RiskAuthority {
         Ok(())
     }
 
-    pub fn set_daily_pnl(&self, pnl: Paise) -> Result<(), AuthorityError> {
-        let mut state = self.lock()?;
-        if state.daily_pnl == pnl {
-            return Ok(());
-        }
+    /// Replace the daily P&L snapshot from sealed owner records. There is no
+    /// unauthenticated P&L setter: the caller must hold the registered account
+    /// journal owner's token, and every figure is re-derived from the supplied
+    /// sealed records before anything is committed.
+    pub fn publish_daily_pnl(
+        &self,
+        token: OwnerToken,
+        record: DailyPnlRecord,
+        accounts: &[AccountRecoveryRecord],
+        valuations: &[ValuationRecord],
+        calendar: &DailyPnlCalendar,
+    ) -> Result<DailyPnlSnapshot, DailyPnlError> {
+        let mut state = self.lock().map_err(|_| DailyPnlError::StatePoisoned)?;
+        self.check_owner_binding(&state, token, ObservationSource::AccountJournal)
+            .map_err(|_| DailyPnlError::Unauthorised)?;
+        let snapshot = derive_daily_pnl_snapshot(
+            &record,
+            accounts,
+            valuations,
+            calendar,
+            &state.positions,
+            self.account_id,
+            self.trade_date,
+            state.now,
+            self.observation_policy.max_account_journal_age_ns,
+        )?;
         let mut candidate = state.clone();
-        candidate.daily_pnl = pnl;
-        candidate.bump_revision()?;
+        candidate.daily_pnl = Some(snapshot.clone());
+        candidate
+            .bump_revision()
+            .map_err(|_| DailyPnlError::Contradictory("daily pnl revision exhausted".to_owned()))?;
         *state = candidate;
-        Ok(())
+        Ok(snapshot)
+    }
+
+    /// Re-validate the established snapshot against the same observations and
+    /// clock used by the reservation. Any contradiction denies new risk; no
+    /// missing or stale value ever resolves to zero.
+    fn validate_daily_pnl_for_evaluation(
+        &self,
+        state: &AuthorityState,
+        observations: &Observations,
+    ) -> Result<Paise, DailyPnlError> {
+        let snapshot = state.daily_pnl.as_ref().ok_or(DailyPnlError::Missing)?;
+        if snapshot.account_id != self.account_id {
+            return Err(DailyPnlError::WrongAccount);
+        }
+        let journal = observations
+            .account_journal
+            .as_ref()
+            .ok_or_else(|| DailyPnlError::WrongJournal("observation missing".to_owned()))?;
+        if journal.payload.head_hash_hex != snapshot.account_journal_digest
+            || journal.payload.record_count != snapshot.account_journal_sequence
+        {
+            return Err(DailyPnlError::WrongJournal(
+                "journal head or sequence disagrees with the snapshot".to_owned(),
+            ));
+        }
+        let reconciliation = observations
+            .reconciliation
+            .as_ref()
+            .ok_or(DailyPnlError::WrongReconciliation)?;
+        if !reconciliation.payload.replay_digest_matched
+            || reconciliation.payload.report.status != ReconciliationStatus::Matched
+            || snapshot.reconciliation_status != reconciliation.payload.report.status
+        {
+            return Err(DailyPnlError::WrongReconciliation);
+        }
+        if snapshot.business_date != self.trade_date
+            || snapshot.calendar.business_date != self.trade_date
+        {
+            return Err(DailyPnlError::WrongBusinessDate);
+        }
+        let at = i64::try_from(state.now.get()).map_err(|_| DailyPnlError::OutsideBusinessDay)?;
+        if at < snapshot.calendar.day_start_ns || at >= snapshot.calendar.next_day_start_ns {
+            return Err(DailyPnlError::OutsideBusinessDay);
+        }
+        let max_age_ns = self.observation_policy.max_account_journal_age_ns;
+        check_pnl_freshness(snapshot.as_of_ns, state.now, max_age_ns)?;
+        check_pnl_freshness(snapshot.valuations_as_of_ns, state.now, max_age_ns)?;
+        snapshot.daily_limit_pnl_paise()
     }
 
     /// Validate one observation's identity, schema and freshness against the
@@ -1080,7 +1811,10 @@ impl RiskAuthority {
         // decision is returned. No caller-owned boolean or reason is accepted.
         self.observe(&mut state, &observations)?;
 
-        let context = self.build_context(&state, &intent, &observations)?;
+        let daily_pnl = self
+            .validate_daily_pnl_for_evaluation(&state, &observations)
+            .map_err(|error| AuthorityError::ControlFailure(format!("daily pnl: {error}")))?;
+        let context = self.build_context(&state, &intent, &observations, daily_pnl)?;
         let assessment = evaluate_risk(&intent, &self.policy, &context);
         if !assessment.accepted {
             // Remembering a rejection is a state change in its own right and
@@ -1101,6 +1835,7 @@ impl RiskAuthority {
         state: &AuthorityState,
         intent: &OrderIntent,
         observations: &Observations,
+        daily_pnl: Paise,
     ) -> Result<RiskContext, AuthorityError> {
         let market = observations
             .market
@@ -1169,7 +1904,7 @@ impl RiskAuthority {
             greeks: market.payload.greeks,
             is_derivative,
             borrow: market.payload.borrow,
-            daily_pnl: state.daily_pnl,
+            daily_pnl,
             open_orders: state.open_orders,
             orders_last_second: state.orders_last_second(),
             session_open: state.session_open,
@@ -1554,6 +2289,20 @@ impl RiskAuthority {
                 .reconciliation_decision
                 .as_ref()
                 .and_then(|decision| decision.evidence_ref.clone()),
+            daily_pnl_available: state.daily_pnl.is_some(),
+            daily_pnl_basis: state.daily_pnl.as_ref().map(|pnl| pnl.basis),
+            daily_pnl_limit_paise: state
+                .daily_pnl
+                .as_ref()
+                .and_then(|pnl| pnl.daily_limit_pnl_paise().ok()),
+            daily_pnl_journal_digest: state
+                .daily_pnl
+                .as_ref()
+                .map(|pnl| pnl.account_journal_digest.clone()),
+            daily_pnl_journal_sequence: state
+                .daily_pnl
+                .as_ref()
+                .map(|pnl| pnl.account_journal_sequence),
         })
     }
 
@@ -1753,6 +2502,8 @@ pub enum RecoveryError {
     Inconsistent(String),
     #[error("startup recovery requires a durable control and decision store")]
     NonDurableStore,
+    #[error("startup recovery cannot establish authoritative daily pnl: {0}")]
+    DailyPnl(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -1962,6 +2713,14 @@ pub struct AccountRecoveryRecord {
     pub account_id: AccountId,
     pub instrument_id: InstrumentId,
     pub quantity_delta: i64,
+    /// Realized P&L booked by this journal event (signed paise).
+    pub realized_paise: i64,
+    /// Fees charged by this event (non-negative paise, subtracted from P&L).
+    pub fees_paise: i64,
+    /// Funding effect of this event (signed paise).
+    pub funding_paise: i64,
+    /// FX effect of this event (signed paise).
+    pub fx_paise: i64,
 }
 
 impl AccountRecoveryRecord {
@@ -1981,7 +2740,28 @@ impl AccountRecoveryRecord {
             account_id,
             instrument_id,
             quantity_delta,
+            realized_paise: 0,
+            fees_paise: 0,
+            funding_paise: 0,
+            fx_paise: 0,
         }
+    }
+
+    /// Attach the account-journal money effects that the daily P&L snapshot
+    /// is derived from. Fees are costs and must be non-negative.
+    #[must_use]
+    pub fn with_pnl_effects(
+        mut self,
+        realized_paise: i64,
+        fees_paise: i64,
+        funding_paise: i64,
+        fx_paise: i64,
+    ) -> Self {
+        self.realized_paise = realized_paise;
+        self.fees_paise = fees_paise;
+        self.funding_paise = funding_paise;
+        self.fx_paise = fx_paise;
+        self
     }
 
     /// Assign the exact next sequence and seal the record to its predecessor.
@@ -2013,6 +2793,10 @@ impl ChainedRecord for AccountRecoveryRecord {
             "account_id": self.account_id,
             "instrument_id": self.instrument_id,
             "quantity_delta": self.quantity_delta,
+            "realized_paise": self.realized_paise,
+            "fees_paise": self.fees_paise,
+            "funding_paise": self.funding_paise,
+            "fx_paise": self.fx_paise,
         })
         .to_string()
     }
@@ -2025,6 +2809,8 @@ impl ChainedRecord for AccountRecoveryRecord {
 pub struct RecoveryRecords {
     pub oms: Vec<OmsPermitRecord>,
     pub account: Vec<AccountRecoveryRecord>,
+    /// Sealed daily P&L evidence. Recovery fails closed when it is absent.
+    pub daily_pnl: DailyPnlRecovery,
 }
 
 /// Complete startup input. All stores are supplied explicitly; there is no
@@ -2655,6 +3441,7 @@ fn reconstruct(
             RecoveryError::Inconsistent("account position delta overflow".to_owned())
         })?;
     }
+    account_positions.retain(|_, quantity| *quantity != 0);
     if account_positions != state.positions {
         return Err(RecoveryError::Inconsistent(
             "account journal positions disagree with the derived fill set".to_owned(),
@@ -2672,6 +3459,35 @@ fn reconstruct(
         );
         state.prune_order_times();
     }
+
+    // Startup never invents a zero P&L. A missing or contradictory sealed
+    // bundle is an explicit recovery failure, so the authority cannot reach a
+    // state where the daily-loss limit silently sees no loss.
+    let daily = config
+        .records
+        .daily_pnl
+        .record
+        .as_ref()
+        .ok_or_else(|| RecoveryError::DailyPnl("no sealed record".to_owned()))?;
+    let calendar = config
+        .records
+        .daily_pnl
+        .calendar
+        .as_ref()
+        .ok_or_else(|| RecoveryError::DailyPnl("no business-day calendar".to_owned()))?;
+    let snapshot = derive_daily_pnl_snapshot(
+        daily,
+        &config.records.account,
+        &config.records.daily_pnl.valuations,
+        calendar,
+        &state.positions,
+        config.account_id,
+        config.trade_date,
+        state.now,
+        ObservationPolicy::default().max_account_journal_age_ns,
+    )
+    .map_err(|error| RecoveryError::DailyPnl(error.to_string()))?;
+    state.daily_pnl = Some(snapshot);
     Ok(state)
 }
 
@@ -3076,11 +3892,48 @@ mod tests {
         }
         let before = authority.state.lock().expect("lock").digest();
 
+        let calendar = DailyPnlCalendar::new(
+            "Asia/Kolkata".to_owned(),
+            TradeDate::new(2026, 1, 1).expect("date"),
+            -86_400_000_000_000,
+            86_400_000_000_000,
+        );
+        let mut account = AccountRecoveryRecord::new(
+            "unit-pnl".to_owned(),
+            AccountId::new(1).expect("account"),
+            InstrumentId::new("nse.cash.test").expect("instrument"),
+            0,
+        );
+        account.seal(1, GENESIS_DIGEST);
+        let mut record = DailyPnlRecord::new(
+            AccountId::new(1).expect("account"),
+            TradeDate::new(2026, 1, 1).expect("date"),
+            "INR".to_owned(),
+            DailyPnlBasis::RealizedPlusUnrealized,
+            &calendar,
+            0,
+        )
+        .with_journal(1, GENESIS_DIGEST.to_owned())
+        .with_digests(
+            daily_pnl_positions_digest(&BTreeMap::new()),
+            GENESIS_DIGEST.to_owned(),
+        );
+        record.seal(1, GENESIS_DIGEST);
+
         let failures = [
             authority.set_now(LogicalNanos::new(1)).err(),
             authority.set_session_open(true).err(),
             authority.set_snapshot_available(true).err(),
-            authority.set_daily_pnl(Paise(1)).err(),
+            authority
+                .publish_daily_pnl(
+                    tokens.account_journal,
+                    record,
+                    std::slice::from_ref(&account),
+                    &[],
+                    &calendar,
+                )
+                .err()
+                .map(|_| AuthorityError::AccountingOverflow("revision".to_owned())),
             authority
                 .set_kill_switch(
                     tokens.operator,
