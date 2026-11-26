@@ -10,6 +10,7 @@ use std::collections::{
 
 use risk_authority::{
     AccountJournalObservation, //
+    AccountRecoveryRecord,
     FeedObservation,
     MarketObservation,
     Observation,
@@ -20,6 +21,13 @@ use risk_authority::{
     OpsObservation,
     ReconciliationObservation,
     RiskAuthority,
+    authority::{
+        DailyPnlBasis, //
+        DailyPnlCalendar,
+        DailyPnlRecord,
+        daily_pnl_positions_digest,
+    },
+    genesis_digest,
 };
 use risk_engine::{
     GreekLimits, //
@@ -212,7 +220,46 @@ fn authority(
         "fixture".to_owned(),
         Some("resolution-fixture".to_owned()),
     )?;
+    publish_zero_daily(&value)?;
     Ok(value)
+}
+
+fn publish_zero_daily(value: &RiskAuthority) -> Result<(), Box<dyn std::error::Error>> {
+    let calendar = DailyPnlCalendar::new(
+        "Asia/Kolkata".to_owned(),
+        date()?,
+        -86_400_000_000_000,
+        86_400_000_000_000,
+    );
+    let mut account = AccountRecoveryRecord::new(
+        "pnl-fixture".to_owned(),
+        AccountId::new(ACCOUNT)?,
+        InstrumentId::new("nse.cash.synctl-a")?,
+        0,
+    );
+    account.seal(1, genesis_digest());
+    let mut record = DailyPnlRecord::new(
+        AccountId::new(ACCOUNT)?,
+        date()?,
+        "INR".to_owned(),
+        DailyPnlBasis::RealizedPlusUnrealized,
+        &calendar,
+        0,
+    )
+    .with_journal(1, account.digest.clone())
+    .with_digests(
+        daily_pnl_positions_digest(&BTreeMap::new()),
+        genesis_digest().to_owned(),
+    );
+    record.seal(1, genesis_digest());
+    value.publish_daily_pnl(
+        value.register_all_owners()?.account_journal,
+        record,
+        std::slice::from_ref(&account),
+        &[],
+        &calendar,
+    )?;
+    Ok(())
 }
 
 fn intent(
@@ -259,7 +306,7 @@ fn observations(
         ask_quantity: Quantity::new(10)?,
         continuity: Continuity::Snapshot,
     };
-    Ok(Observations {
+    let mut observations = Observations {
         market: Some(Observation::new(
             tokens.market,
             ObservationSource::MarketDataKernel,
@@ -364,7 +411,25 @@ fn observations(
                 release_evidence_ref: Some("release-fixture".to_owned()),
             },
         )),
-    })
+    };
+    let snapshot = value.snapshot()?;
+    if let Some(ref digest) = snapshot.daily_pnl_journal_digest {
+        observations
+            .account_journal
+            .as_mut()
+            .expect("journal")
+            .payload
+            .head_hash_hex = digest.clone();
+    }
+    if let Some(sequence) = snapshot.daily_pnl_journal_sequence {
+        observations
+            .account_journal
+            .as_mut()
+            .expect("journal")
+            .payload
+            .record_count = sequence;
+    }
+    Ok(observations)
 }
 
 #[test]

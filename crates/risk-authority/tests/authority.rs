@@ -16,6 +16,7 @@ use std::{
 
 use risk_authority::{
     AccountJournalObservation, //
+    AccountRecoveryRecord,
     AuthorityError,
     FeedObservation,
     FileControlStore,
@@ -31,6 +32,16 @@ use risk_authority::{
     ReconciliationObservation,
     RiskAuthority,
     SequenceGap,
+    authority::{
+        DailyPnlBasis, //
+        DailyPnlCalendar,
+        DailyPnlError,
+        DailyPnlRecord,
+        DailyPnlRecovery,
+        ValuationRecord,
+        daily_pnl_positions_digest,
+    },
+    genesis_digest,
 };
 use risk_engine::{
     RiskPolicy, //
@@ -159,7 +170,7 @@ fn policy() -> Result<ValidatedRiskPolicy, Box<dyn std::error::Error>> {
     Ok(ValidatedRiskPolicy::from_policy(&raw)?)
 }
 
-fn authority() -> Result<RiskAuthority, Box<dyn std::error::Error>> {
+fn bare_authority() -> Result<RiskAuthority, Box<dyn std::error::Error>> {
     let authority = RiskAuthority::new(
         AccountId::new(ACCOUNT)?,
         policy()?,
@@ -172,6 +183,202 @@ fn authority() -> Result<RiskAuthority, Box<dyn std::error::Error>> {
     release_switch(&authority)?;
     clear_reconciliation(&authority)?;
     Ok(authority)
+}
+
+/// Explicit business-day boundary for fixtures. No venue is hardcoded; the
+/// time zone and half-open instant window are owner-supplied facts.
+fn daily_calendar() -> Result<DailyPnlCalendar, Box<dyn std::error::Error>> {
+    Ok(DailyPnlCalendar::new(
+        "Asia/Kolkata".to_owned(),
+        date()?,
+        -86_400_000_000_000,
+        86_400_000_000_000,
+    ))
+}
+
+/// A sealed account-journal event carrying only P&L effects and no position
+/// change; zero-net events are not materialized as positions.
+fn daily_accounts(
+    realized: i64,
+    fees: i64,
+    funding: i64,
+    fx: i64,
+) -> Result<Vec<AccountRecoveryRecord>, Box<dyn std::error::Error>> {
+    let mut record = AccountRecoveryRecord::new(
+        "pnl-fixture".to_owned(),
+        AccountId::new(ACCOUNT)?,
+        instrument_id()?,
+        0,
+    )
+    .with_pnl_effects(realized, fees, funding, fx);
+    record.seal(1, genesis_digest());
+    Ok(vec![record])
+}
+
+fn daily_valuations() -> Vec<ValuationRecord> {
+    Vec::new()
+}
+
+#[allow(clippy::too_many_arguments)] // fixture builder takes the exact sealed record fields
+fn sealed_daily_record(
+    accounts: &[AccountRecoveryRecord],
+    valuations: &[ValuationRecord],
+    calendar: &DailyPnlCalendar,
+    basis: DailyPnlBasis,
+    realized: i64,
+    unrealized: i64,
+    fees: i64,
+    funding: i64,
+    fx: i64,
+) -> Result<DailyPnlRecord, Box<dyn std::error::Error>> {
+    sealed_daily_record_for_positions(
+        &BTreeMap::new(),
+        accounts,
+        valuations,
+        calendar,
+        basis,
+        realized,
+        unrealized,
+        fees,
+        funding,
+        fx,
+    )
+}
+
+#[allow(clippy::too_many_arguments)] // fixture builder takes positions plus the exact sealed fields
+fn sealed_daily_record_for_positions(
+    positions: &BTreeMap<InstrumentId, i64>,
+    accounts: &[AccountRecoveryRecord],
+    valuations: &[ValuationRecord],
+    calendar: &DailyPnlCalendar,
+    basis: DailyPnlBasis,
+    realized: i64,
+    unrealized: i64,
+    fees: i64,
+    funding: i64,
+    fx: i64,
+) -> Result<DailyPnlRecord, Box<dyn std::error::Error>> {
+    let account_head = accounts.last().map_or_else(
+        || genesis_digest().to_owned(),
+        |record| record.digest.clone(),
+    );
+    let valuation_head = valuations.last().map_or_else(
+        || genesis_digest().to_owned(),
+        |record| record.digest.clone(),
+    );
+    let mut record = DailyPnlRecord::new(
+        AccountId::new(ACCOUNT)?,
+        date()?,
+        "INR".to_owned(),
+        basis,
+        calendar,
+        0,
+    )
+    .with_journal(u64::try_from(accounts.len())?, account_head)
+    .with_digests(daily_pnl_positions_digest(positions), valuation_head)
+    .with_components(realized, unrealized, fees, funding, fx);
+    record.seal(1, genesis_digest());
+    Ok(record)
+}
+
+fn publish_daily(
+    authority: &RiskAuthority,
+    record: DailyPnlRecord,
+    accounts: &[AccountRecoveryRecord],
+    valuations: &[ValuationRecord],
+    calendar: &DailyPnlCalendar,
+) -> Result<(), Box<dyn std::error::Error>> {
+    authority.publish_daily_pnl(
+        authority.register_all_owners()?.account_journal,
+        record,
+        accounts,
+        valuations,
+        calendar,
+    )?;
+    Ok(())
+}
+
+fn publish_zero_daily(authority: &RiskAuthority) -> Result<(), Box<dyn std::error::Error>> {
+    let calendar = daily_calendar()?;
+    let accounts = daily_accounts(0, 0, 0, 0)?;
+    let valuations = daily_valuations();
+    let record = sealed_daily_record(
+        &accounts,
+        &valuations,
+        &calendar,
+        DailyPnlBasis::RealizedPlusUnrealized,
+        0,
+        0,
+        0,
+        0,
+        0,
+    )?;
+    publish_daily(authority, record, &accounts, &valuations, &calendar)
+}
+
+fn authority() -> Result<RiskAuthority, Box<dyn std::error::Error>> {
+    let authority = bare_authority()?;
+    publish_zero_daily(&authority)?;
+    Ok(authority)
+}
+
+fn daily_recovery_for_accounts(
+    accounts: &[AccountRecoveryRecord],
+) -> Result<(DailyPnlRecovery, Vec<AccountRecoveryRecord>), Box<dyn std::error::Error>> {
+    let calendar = daily_calendar()?;
+    // Always include one zero-delta journal event so the observation's
+    // account-snapshot evidence remains present even with no fills.
+    let mut journal = accounts.to_vec();
+    let previous = journal.last().map_or_else(
+        || genesis_digest().to_owned(),
+        |record| record.digest.clone(),
+    );
+    let sequence = u64::try_from(journal.len())? + 1;
+    let mut pnl_event = AccountRecoveryRecord::new(
+        "pnl-fixture".to_owned(),
+        AccountId::new(ACCOUNT)?,
+        instrument_id()?,
+        0,
+    );
+    pnl_event.seal(sequence, &previous);
+    journal.push(pnl_event);
+
+    let mut positions: BTreeMap<InstrumentId, i64> = BTreeMap::new();
+    for record in &journal {
+        let position = positions.entry(record.instrument_id.clone()).or_insert(0);
+        *position = (*position)
+            .checked_add(record.quantity_delta)
+            .ok_or("account fixture quantity overflow")?;
+    }
+    positions.retain(|_, quantity| *quantity != 0);
+    let valuations = daily_valuations();
+    let account_head = journal.last().map_or_else(
+        || genesis_digest().to_owned(),
+        |record| record.digest.clone(),
+    );
+    let valuation_head = valuations.last().map_or_else(
+        || genesis_digest().to_owned(),
+        |record| record.digest.clone(),
+    );
+    let mut record = DailyPnlRecord::new(
+        AccountId::new(ACCOUNT)?,
+        date()?,
+        "INR".to_owned(),
+        DailyPnlBasis::RealizedPlusUnrealized,
+        &calendar,
+        0,
+    )
+    .with_journal(u64::try_from(journal.len())?, account_head)
+    .with_digests(daily_pnl_positions_digest(&positions), valuation_head);
+    record.seal(1, genesis_digest());
+    Ok((
+        DailyPnlRecovery {
+            record: Some(record),
+            valuations,
+            calendar: Some(calendar),
+        },
+        journal,
+    ))
 }
 
 fn super_authority() -> Result<RiskAuthority, Box<dyn std::error::Error>> {
@@ -213,6 +420,7 @@ fn fresh_authority_denies_new_risk() -> TestResult {
     );
     release_switch(&authority)?;
     clear_reconciliation(&authority)?;
+    publish_zero_daily(&authority)?;
     let missing = authority
         .evaluate_and_reserve(
             intent(1, 2, PRICE, Side::Buy)?,
@@ -330,7 +538,34 @@ fn feed() -> Result<FeedObservation, Box<dyn std::error::Error>> {
 /// Synthetic ready observations for all six owners. The market payload is
 /// explicitly labelled synthetic; this is a fixture, not operational evidence.
 fn observation(authority: &RiskAuthority) -> Result<Observations, Box<dyn std::error::Error>> {
-    Ok(observations_with(feed()?, authority.register_all_owners()?))
+    observations_for_feed(authority, feed()?)
+}
+
+/// Bind the account-journal observation to the same sealed head that produced
+/// the authority's P&L snapshot; a different head is tested explicitly below.
+fn observations_for_feed(
+    authority: &RiskAuthority,
+    feed: FeedObservation,
+) -> Result<Observations, Box<dyn std::error::Error>> {
+    let mut observations = observations_with(feed, authority.register_all_owners()?);
+    let snapshot = authority.snapshot()?;
+    if let Some(ref digest) = snapshot.daily_pnl_journal_digest {
+        observations
+            .account_journal
+            .as_mut()
+            .expect("journal")
+            .payload
+            .head_hash_hex = digest.clone();
+    }
+    if let Some(sequence) = snapshot.daily_pnl_journal_sequence {
+        observations
+            .account_journal
+            .as_mut()
+            .expect("journal")
+            .payload
+            .record_count = sequence;
+    }
+    Ok(observations)
 }
 
 fn observations_with(feed: FeedObservation, tokens: OwnerTokens) -> Observations {
@@ -564,7 +799,7 @@ fn caller_cannot_supply_feed_health() -> TestResult {
     });
     let result = authority.evaluate_and_reserve(
         intent(1, 2, PRICE, Side::Buy)?,
-        observations_with(gapped, authority.register_all_owners()?),
+        observations_for_feed(&authority, gapped)?,
         None,
     );
     assert!(
@@ -988,7 +1223,7 @@ fn stale_observation_from_each_source_denies() -> TestResult {
     let mut fresh = feed()?;
     fresh.received_at = LogicalNanos::new(2_000_000_000);
     for (index, source) in ObservationSource::ALL.iter().enumerate() {
-        let mut observations = observations_with(fresh.clone(), authority.register_all_owners()?);
+        let mut observations = observations_for_feed(&authority, fresh.clone())?;
         stale_source(&mut observations, *source);
         let result = authority.evaluate_and_reserve(
             intent((index as u64) + 200, 2, PRICE, Side::Buy)?,
@@ -1216,6 +1451,7 @@ fn health_decision_is_inside_one_lock() -> TestResult {
     );
     release_switch(&authority)?;
     clear_reconciliation(&authority)?;
+    publish_zero_daily(&authority)?;
     authority.set_now(LogicalNanos::new(2_000))?;
     let barrier = Arc::new(Barrier::new(2));
     let mut fresh = feed()?;
@@ -1224,7 +1460,7 @@ fn health_decision_is_inside_one_lock() -> TestResult {
     for (id, stale) in [(1_u64, false), (2_u64, true)] {
         let authority = Arc::clone(&authority);
         let barrier = Arc::clone(&barrier);
-        let mut observations = observations_with(fresh.clone(), authority.register_all_owners()?);
+        let mut observations = observations_for_feed(&authority, fresh.clone())?;
         if stale {
             stale_source(&mut observations, ObservationSource::MarketDataKernel);
         }
@@ -1472,13 +1708,11 @@ fn public_mutations_are_revision_aware() -> TestResult {
         "withdrawing the snapshot is versioned"
     );
 
-    authority.set_daily_pnl(Paise(10))?;
-    assert_eq!(authority.revision()?, start + 4, "daily P&L is versioned");
-    authority.set_daily_pnl(Paise(10))?;
+    publish_zero_daily(&authority)?;
     assert_eq!(
         authority.revision()?,
         start + 4,
-        "repeating daily P&L is a no-op"
+        "publishing sealed daily P&L evidence is versioned"
     );
 
     authority.set_now(LogicalNanos::new(1_000))?;
@@ -1575,7 +1809,7 @@ fn stale_revision_is_rejected_after_every_relevant_mutation() -> TestResult {
     })?;
     assert_stale_fence_after("daily pnl", |authority| {
         let before = authority.revision()?;
-        authority.set_daily_pnl(Paise(10))?;
+        publish_zero_daily(authority)?;
         Ok(before)
     })?;
     assert_stale_fence_after("clock", |authority| {
@@ -1746,10 +1980,15 @@ mod recovery_tests {
 
     fn build_recovered(
         lock_path: &std::path::Path,
-        records: RecoveryRecords,
+        mut records: RecoveryRecords,
         control: Box<dyn risk_authority::ControlStore + Send + Sync>,
         decisions: Box<dyn DecisionStore + Send + Sync>,
     ) -> Result<RiskAuthority, Box<dyn std::error::Error>> {
+        if records.daily_pnl.record.is_none() {
+            let (daily, journal) = daily_recovery_for_accounts(&records.account)?;
+            records.daily_pnl = daily;
+            records.account = journal;
+        }
         Ok(RiskAuthority::recover(RecoveryConfig {
             account_id: AccountId::new(ACCOUNT)?,
             policy: policy()?,
@@ -1920,6 +2159,7 @@ mod recovery_tests {
             RecoveryRecords {
                 oms: vec![oms],
                 account: vec![account],
+                ..Default::default()
             },
             c2,
             d2,
@@ -2018,6 +2258,7 @@ mod recovery_tests {
             records: RecoveryRecords {
                 oms: vec![oms],
                 account: Vec::new(),
+                ..Default::default()
             },
             sectors: BTreeMap::new(),
             ownership_path: lock.to_path_buf(),
@@ -2104,6 +2345,7 @@ mod recovery_tests {
             records: RecoveryRecords {
                 oms: vec![filled],
                 account: vec![account],
+                ..Default::default()
             },
             sectors: BTreeMap::new(),
             ownership_path: lock.to_path_buf(),
@@ -2263,6 +2505,7 @@ mod recovery_tests {
             RecoveryRecords {
                 oms: vec![oms],
                 account: Vec::new(),
+                ..Default::default()
             },
             c,
             d,
@@ -2391,6 +2634,98 @@ mod recovery_tests {
         let _ = std::fs::remove_file(&lock);
         Ok(())
     }
+
+    /// Startup cannot invent zero P&L, and a real recovered loss must bind the
+    /// daily-loss limit on the very first reservation after restart.
+    #[test]
+    fn recovery_requires_daily_pnl_and_reconstructs_a_real_loss() -> TestResult {
+        let control = temp_path("control-daily-pnl");
+        let decisions = temp_path("decisions-daily-pnl");
+        let lock = temp_path("lock-daily-pnl");
+        let _ = std::fs::remove_file(&control);
+        let _ = std::fs::remove_file(&decisions);
+        let _ = std::fs::remove_file(&lock);
+
+        let (c1, d1) = file_stores(&control, &decisions);
+        let missing = RiskAuthority::recover(RecoveryConfig {
+            account_id: AccountId::new(ACCOUNT)?,
+            policy: policy()?,
+            instruments: vec![instrument()?],
+            trade_date: date()?,
+            control: c1,
+            decisions: d1,
+            records: RecoveryRecords::default(),
+            sectors: BTreeMap::new(),
+            ownership_path: lock.to_path_buf(),
+        });
+        assert!(
+            matches!(missing, Err(RecoveryError::DailyPnl(_))),
+            "recovery without sealed daily P&L fails closed"
+        );
+
+        let calendar = daily_calendar()?;
+        let mut account = AccountRecoveryRecord::new(
+            "recovered-loss".to_owned(),
+            AccountId::new(ACCOUNT)?,
+            instrument_id()?,
+            0,
+        )
+        .with_pnl_effects(-5_000, 0, 0, 0);
+        account.seal(1, genesis_digest());
+        let mut record = DailyPnlRecord::new(
+            AccountId::new(ACCOUNT)?,
+            date()?,
+            "INR".to_owned(),
+            DailyPnlBasis::RealizedPlusUnrealized,
+            &calendar,
+            0,
+        )
+        .with_journal(1, account.digest.clone())
+        .with_digests(
+            daily_pnl_positions_digest(&BTreeMap::new()),
+            genesis_digest().to_owned(),
+        )
+        .with_components(-5_000, 0, 0, 0, 0);
+        record.seal(1, genesis_digest());
+        let (c2, d2) = file_stores(&control, &decisions);
+        let recovered = build_recovered(
+            &lock,
+            RecoveryRecords {
+                oms: Vec::new(),
+                account: vec![account],
+                daily_pnl: DailyPnlRecovery {
+                    record: Some(record),
+                    valuations: Vec::new(),
+                    calendar: Some(calendar),
+                },
+            },
+            c2,
+            d2,
+        )?;
+        assert!(
+            recovered.snapshot()?.daily_pnl_available,
+            "recovery installed an authoritative P&L snapshot"
+        );
+        release_switch(&recovered)?;
+        clear_reconciliation(&recovered)?;
+        let denied = recovered.evaluate_and_reserve(
+            intent(1, 2, PRICE, Side::Buy)?,
+            observation(&recovered)?,
+            None,
+        );
+        match &denied {
+            Err(error @ AuthorityError::Rejected(_)) => assert!(
+                rejected_check(error, RiskCheck::DailyLossLimit),
+                "a recovered real loss is not silently replaced by zero"
+            ),
+            other => panic!("expected a daily-loss rejection, got {other:?}"),
+        }
+        drop(recovered);
+        let _ = std::fs::remove_file(&control);
+        let _ = std::fs::remove_file(&decisions);
+        let _ = std::fs::remove_file(&lock);
+        Ok(())
+    }
 }
 
 /// Recording a rejected decision mutates authority state, so it is versioned
@@ -2423,4 +2758,530 @@ fn risk_rejection_is_a_versioned_transition() -> TestResult {
         "replaying a rejection does not mutate state"
     );
     Ok(())
+}
+
+/// A missing daily P&L must fail closed: zero is not an authoritative fact.
+#[test]
+fn missing_daily_pnl_is_not_silent_zero() -> TestResult {
+    let authority = RiskAuthority::new(
+        AccountId::new(ACCOUNT)?,
+        policy()?,
+        vec![instrument()?],
+        date()?,
+    );
+    authority.set_session_open(true)?;
+    authority.set_snapshot_available(true)?;
+    release_switch(&authority)?;
+    clear_reconciliation(&authority)?;
+    let result = authority.evaluate_and_reserve(
+        intent(1, 2, PRICE, Side::Buy)?,
+        observation(&authority)?,
+        None,
+    );
+    assert!(
+        result.is_err(),
+        "an authority with no authoritative daily P&L must deny new risk"
+    );
+    Ok(())
+}
+
+/// Below, at and above the configured daily-loss limit are distinct,
+/// falsifiable outcomes of the owner-derived P&L snapshot.
+#[test]
+fn daily_loss_limits_below_at_and_above() -> TestResult {
+    for (loss, accepted) in [(-4_999_i64, true), (-5_000, false), (-5_001, false)] {
+        let authority = bare_authority()?;
+        let calendar = daily_calendar()?;
+        let accounts = daily_accounts(loss, 0, 0, 0)?;
+        let record = sealed_daily_record(
+            &accounts,
+            &[],
+            &calendar,
+            DailyPnlBasis::RealizedPlusUnrealized,
+            loss,
+            0,
+            0,
+            0,
+            0,
+        )?;
+        publish_daily(&authority, record, &accounts, &[], &calendar)?;
+        let result = authority.evaluate_and_reserve(
+            intent(1, 2, PRICE, Side::Buy)?,
+            observation(&authority)?,
+            None,
+        );
+        if accepted {
+            assert!(
+                result.is_ok(),
+                "a loss of {loss} is inside the daily-loss limit"
+            );
+        } else {
+            let error = result.expect_err("a loss at or beyond the limit is rejected");
+            assert!(
+                rejected_check(&error, RiskCheck::DailyLossLimit),
+                "a loss of {loss} is rejected by the daily-loss limit"
+            );
+        }
+        assert_eq!(
+            authority.snapshot()?.daily_pnl_limit_paise,
+            Some(Paise(loss)),
+            "the exact authoritative P&L reaches the limit check"
+        );
+    }
+    Ok(())
+}
+
+/// The daily-limit basis is an explicit record field. With a -4_000 realized
+/// and -1_000 unrealized loss, realized+unrealized is at the -5_000 limit and
+/// is rejected, while realized-only remains inside and is accepted.
+#[test]
+fn daily_limit_basis_is_explicit_and_testable_at_both_boundaries() -> TestResult {
+    for (basis, accepted) in [
+        (DailyPnlBasis::RealizedPlusUnrealized, false),
+        (DailyPnlBasis::RealizedOnly, true),
+    ] {
+        let authority = authority()?;
+        let reservation = authority.evaluate_and_reserve(
+            intent(1, 2, PRICE, Side::Buy)?,
+            observation(&authority)?,
+            None,
+        )?;
+        authority.apply_fill(reservation.intent_id)?;
+        let positions = authority.snapshot()?.positions;
+
+        let calendar = daily_calendar()?;
+        let accounts = daily_accounts(-4_000, 0, 0, 0)?;
+        let mut valuation =
+            ValuationRecord::new(AccountId::new(ACCOUNT)?, instrument_id()?, 2, 500, 1_000, 0);
+        valuation.seal(1, genesis_digest());
+        let valuations = vec![valuation];
+        let record = sealed_daily_record_for_positions(
+            &positions,
+            &accounts,
+            &valuations,
+            &calendar,
+            basis,
+            -4_000,
+            -1_000,
+            0,
+            0,
+            0,
+        )?;
+        publish_daily(&authority, record, &accounts, &valuations, &calendar)?;
+        assert_eq!(
+            authority.snapshot()?.daily_pnl_basis,
+            Some(basis),
+            "the selected basis is visible in authority evidence"
+        );
+        let result = authority.evaluate_and_reserve(
+            intent(2, 1, PRICE, Side::Buy)?,
+            observation(&authority)?,
+            None,
+        );
+        if accepted {
+            assert!(result.is_ok(), "realized-only ignores the open mark loss");
+        } else {
+            let error = result.expect_err("the open mark loss consumes the limit");
+            assert!(
+                rejected_check(&error, RiskCheck::DailyLossLimit),
+                "realized+unrealized rejects at the limit"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Revised valuations must move the limit: a mark cut turns an accepted
+/// realized-only loss into an at-limit rejection under the chosen basis.
+#[test]
+fn revised_valuations_change_the_daily_limit() -> TestResult {
+    let authority = authority()?;
+    let reservation = authority.evaluate_and_reserve(
+        intent(1, 2, PRICE, Side::Buy)?,
+        observation(&authority)?,
+        None,
+    )?;
+    authority.apply_fill(reservation.intent_id)?;
+    let positions = authority.snapshot()?.positions;
+    let calendar = daily_calendar()?;
+    let accounts = daily_accounts(-4_000, 0, 0, 0)?;
+
+    let mut initial = ValuationRecord::new(
+        AccountId::new(ACCOUNT)?,
+        instrument_id()?,
+        2,
+        1_000,
+        1_000,
+        0,
+    );
+    initial.seal(1, genesis_digest());
+    let record = sealed_daily_record_for_positions(
+        &positions,
+        &accounts,
+        &[initial.clone()],
+        &calendar,
+        DailyPnlBasis::RealizedPlusUnrealized,
+        -4_000,
+        0,
+        0,
+        0,
+        0,
+    )?;
+    publish_daily(&authority, record, &accounts, &[initial], &calendar)?;
+    assert!(
+        authority
+            .evaluate_and_reserve(
+                intent(2, 1, PRICE, Side::Buy)?,
+                observation(&authority)?,
+                None,
+            )
+            .is_ok(),
+        "an unchanged mark keeps the loss inside the limit"
+    );
+
+    let mut revised =
+        ValuationRecord::new(AccountId::new(ACCOUNT)?, instrument_id()?, 2, 500, 1_000, 0);
+    revised.seal(1, genesis_digest());
+    let record = sealed_daily_record_for_positions(
+        &positions,
+        &accounts,
+        &[revised.clone()],
+        &calendar,
+        DailyPnlBasis::RealizedPlusUnrealized,
+        -4_000,
+        -1_000,
+        0,
+        0,
+        0,
+    )?;
+    publish_daily(&authority, record, &accounts, &[revised], &calendar)?;
+    let error = authority
+        .evaluate_and_reserve(
+            intent(3, 1, PRICE, Side::Buy)?,
+            observation(&authority)?,
+            None,
+        )
+        .expect_err("the revised mark reaches the daily-loss limit");
+    assert!(
+        rejected_check(&error, RiskCheck::DailyLossLimit),
+        "revised valuation inputs move the daily-loss decision"
+    );
+    Ok(())
+}
+
+/// Corrected fills are a new sealed journal head and must change the limit
+/// outcome without any caller assertion about P&L.
+#[test]
+fn corrected_fills_change_the_daily_limit() -> TestResult {
+    let authority = bare_authority()?;
+    let calendar = daily_calendar()?;
+    let accounts = daily_accounts(-4_000, 0, 0, 0)?;
+    let record = sealed_daily_record(
+        &accounts,
+        &[],
+        &calendar,
+        DailyPnlBasis::RealizedPlusUnrealized,
+        -4_000,
+        0,
+        0,
+        0,
+        0,
+    )?;
+    publish_daily(&authority, record, &accounts, &[], &calendar)?;
+    assert!(
+        authority
+            .evaluate_and_reserve(
+                intent(1, 2, PRICE, Side::Buy)?,
+                observation(&authority)?,
+                None,
+            )
+            .is_ok(),
+        "the first fill set is inside the limit"
+    );
+
+    let corrected = daily_accounts(-5_000, 0, 0, 0)?;
+    let record = sealed_daily_record(
+        &corrected,
+        &[],
+        &calendar,
+        DailyPnlBasis::RealizedPlusUnrealized,
+        -5_000,
+        0,
+        0,
+        0,
+        0,
+    )?;
+    publish_daily(&authority, record, &corrected, &[], &calendar)?;
+    let error = authority
+        .evaluate_and_reserve(
+            intent(2, 2, PRICE, Side::Buy)?,
+            observation(&authority)?,
+            None,
+        )
+        .expect_err("the corrected fill set reaches the limit");
+    assert!(
+        rejected_check(&error, RiskCheck::DailyLossLimit),
+        "corrected journal facts change the accepted decision"
+    );
+    Ok(())
+}
+
+/// A P&L older than the authority-owned journal freshness window denies risk.
+#[test]
+fn stale_daily_pnl_denies_new_risk() -> TestResult {
+    let authority = authority()?;
+    let now = LogicalNanos::new(1_000_000_001);
+    authority.set_now(now)?;
+    let error = authority
+        .evaluate_and_reserve(
+            intent(1, 2, PRICE, Side::Buy)?,
+            observations_for_feed(
+                &authority,
+                FeedObservation {
+                    received_at: now,
+                    ..feed()?
+                },
+            )?,
+            None,
+        )
+        .expect_err("stale P&L is a typed denial");
+    assert!(
+        matches!(&error, AuthorityError::ControlFailure(message) if message.contains("stale")),
+        "the denial names stale P&L rather than treating it as zero"
+    );
+    Ok(())
+}
+
+/// A new business date invalidates both the boundary and the snapshot's date.
+#[test]
+fn new_business_date_invalidates_daily_pnl() -> TestResult {
+    let authority = authority()?;
+    let next_date = TradeDate::new(2026, 10, 29)?;
+    let next_calendar = DailyPnlCalendar::new(
+        "Asia/Kolkata".to_owned(),
+        next_date,
+        86_400_000_000_000,
+        172_800_000_000_000,
+    );
+    let accounts = daily_accounts(0, 0, 0, 0)?;
+    let mut record = DailyPnlRecord::new(
+        AccountId::new(ACCOUNT)?,
+        next_date,
+        "INR".to_owned(),
+        DailyPnlBasis::RealizedPlusUnrealized,
+        &next_calendar,
+        86_400_000_000_000,
+    )
+    .with_journal(1, accounts[0].digest.clone())
+    .with_digests(
+        daily_pnl_positions_digest(&BTreeMap::new()),
+        genesis_digest().to_owned(),
+    );
+    record.seal(1, genesis_digest());
+    let wrong_date = authority.publish_daily_pnl(
+        authority.register_all_owners()?.account_journal,
+        record,
+        &accounts,
+        &[],
+        &next_calendar,
+    );
+    assert!(
+        matches!(wrong_date, Err(DailyPnlError::WrongBusinessDate)),
+        "a snapshot for the next business date cannot be bound to this authority"
+    );
+
+    let now = LogicalNanos::new(86_400_000_000_000);
+    authority.set_now(now)?;
+    let error = authority
+        .evaluate_and_reserve(
+            intent(1, 2, PRICE, Side::Buy)?,
+            observations_for_feed(
+                &authority,
+                FeedObservation {
+                    received_at: now,
+                    ..feed()?
+                },
+            )?,
+            None,
+        )
+        .expect_err("the previous day's snapshot is outside the new boundary");
+    assert!(
+        matches!(&error, AuthorityError::ControlFailure(message) if message.contains("business-day boundary")),
+        "a new business day is an explicit denial"
+    );
+    Ok(())
+}
+
+/// The account ledger head and sequence bound to the snapshot must match the
+/// fresh owner observation and the sealed journal records.
+#[test]
+fn account_ledger_digest_mismatch_denies_new_risk() -> TestResult {
+    let authority = authority()?;
+    let mut observations = observation(&authority)?;
+    observations
+        .account_journal
+        .as_mut()
+        .expect("journal")
+        .payload
+        .head_hash_hex = "e".repeat(64);
+    let error = authority
+        .evaluate_and_reserve(intent(1, 2, PRICE, Side::Buy)?, observations, None)
+        .expect_err("a different ledger head is a typed denial");
+    assert!(
+        matches!(&error, AuthorityError::ControlFailure(message) if message.contains("journal head or sequence")),
+        "the account ledger mismatch is explicit"
+    );
+
+    let calendar = daily_calendar()?;
+    let accounts = daily_accounts(0, 0, 0, 0)?;
+    let mut record = sealed_daily_record(
+        &accounts,
+        &[],
+        &calendar,
+        DailyPnlBasis::RealizedPlusUnrealized,
+        0,
+        0,
+        0,
+        0,
+        0,
+    )?;
+    record = record.with_journal(1, "e".repeat(64));
+    record.seal(1, genesis_digest());
+    let mismatch = authority.publish_daily_pnl(
+        authority.register_all_owners()?.account_journal,
+        record,
+        &accounts,
+        &[],
+        &calendar,
+    );
+    assert!(
+        matches!(mismatch, Err(DailyPnlError::WrongJournal(_))),
+        "publication rejects a digest that is not the sealed journal head"
+    );
+    Ok(())
+}
+
+/// A snapshot and its records must belong to this account, and publication
+/// must be authenticated by the registered account-journal owner.
+#[test]
+fn wrong_account_binding_and_unauthenticated_publication_are_denied() -> TestResult {
+    let authority = authority()?;
+    let calendar = daily_calendar()?;
+    let mut account = AccountRecoveryRecord::new(
+        "foreign".to_owned(),
+        AccountId::new(999)?,
+        instrument_id()?,
+        0,
+    );
+    account.seal(1, genesis_digest());
+    let mut record = DailyPnlRecord::new(
+        AccountId::new(999)?,
+        date()?,
+        "INR".to_owned(),
+        DailyPnlBasis::RealizedPlusUnrealized,
+        &calendar,
+        0,
+    )
+    .with_journal(1, account.digest.clone())
+    .with_digests(
+        daily_pnl_positions_digest(&BTreeMap::new()),
+        genesis_digest().to_owned(),
+    );
+    record.seal(1, genesis_digest());
+    let foreign = authority.publish_daily_pnl(
+        authority.register_all_owners()?.account_journal,
+        record,
+        std::slice::from_ref(&account),
+        &[],
+        &calendar,
+    );
+    assert!(
+        matches!(foreign, Err(DailyPnlError::WrongAccount)),
+        "another account's P&L cannot be installed here"
+    );
+
+    let accounts = daily_accounts(0, 0, 0, 0)?;
+    let record = sealed_daily_record(
+        &accounts,
+        &[],
+        &calendar,
+        DailyPnlBasis::RealizedPlusUnrealized,
+        0,
+        0,
+        0,
+        0,
+        0,
+    )?;
+    let unauthenticated = authority.publish_daily_pnl(
+        authority.register_all_owners()?.ops,
+        record,
+        &accounts,
+        &[],
+        &calendar,
+    );
+    assert!(
+        matches!(unauthenticated, Err(DailyPnlError::Unauthorised)),
+        "a non-journal owner token cannot publish P&L"
+    );
+    Ok(())
+}
+
+/// Reconciliation is a precondition of P&L evidence, not an implied status.
+#[test]
+fn daily_pnl_requires_matched_reconciliation() -> TestResult {
+    let authority = authority()?;
+    let calendar = daily_calendar()?;
+    let accounts = daily_accounts(0, 0, 0, 0)?;
+    let mut record = sealed_daily_record(
+        &accounts,
+        &[],
+        &calendar,
+        DailyPnlBasis::RealizedPlusUnrealized,
+        0,
+        0,
+        0,
+        0,
+        0,
+    )?;
+    record = record.with_reconciliation_status(ReconciliationStatus::Unavailable);
+    record.seal(1, genesis_digest());
+    let unmatched = authority.publish_daily_pnl(
+        authority.register_all_owners()?.account_journal,
+        record,
+        &accounts,
+        &[],
+        &calendar,
+    );
+    assert!(
+        matches!(unmatched, Err(DailyPnlError::WrongReconciliation)),
+        "an unmatched P&L record is rejected at publication"
+    );
+
+    let mut observations = observation(&authority)?;
+    observations
+        .reconciliation
+        .as_mut()
+        .expect("reconciliation")
+        .payload
+        .report
+        .status = ReconciliationStatus::Unavailable;
+    let error = authority
+        .evaluate_and_reserve(intent(1, 2, PRICE, Side::Buy)?, observations, None)
+        .expect_err("a changed reconciliation status is a typed denial");
+    assert!(
+        matches!(&error, AuthorityError::ReconciliationMismatch { .. })
+            || matches!(&error, AuthorityError::ControlFailure(message) if message.contains("reconciliation")),
+        "risk evaluation never uses P&L with unmatched reconciliation"
+    );
+    Ok(())
+}
+
+/// The unowned public P&L setter must not exist in production code.
+#[test]
+fn no_unauthenticated_daily_pnl_setter() {
+    let source = include_str!("../src/authority.rs");
+    assert!(
+        !source.contains("pub fn set_daily_pnl"),
+        "a caller cannot assert a P&L figure directly"
+    );
 }
