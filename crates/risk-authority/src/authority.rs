@@ -839,6 +839,56 @@ fn derive_daily_pnl_snapshot(
     })
 }
 
+/// The reconciled execution state of one partially filled permit. It keeps the
+/// original authorization, the cumulative execution and the remaining leaves
+/// quantity as separate facts; none of them is inferred from the other by
+/// treating a fill as zero or as a whole order.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionExposure {
+    pub original_quantity: i64,
+    pub filled_quantity: i64,
+    pub leaves_quantity: i64,
+    pub filled_notional_paise: Paise,
+    pub average_fill_price_paise: Option<Paise>,
+    pub fees_paise: Paise,
+    pub costs_paise: Paise,
+    pub execution_ids: Vec<String>,
+}
+
+impl ExecutionExposure {
+    fn new(
+        original_quantity: i64,
+        filled_quantity: i64,
+        leaves_quantity: i64,
+        filled_notional_paise: Paise,
+        fees_paise: Paise,
+        costs_paise: Paise,
+        execution_ids: Vec<String>,
+    ) -> Result<Self, RecoveryError> {
+        let average_fill_price_paise = if filled_quantity > 0 && filled_notional_paise.0 > 0 {
+            Some(Paise(filled_notional_paise.0 / filled_quantity))
+        } else if filled_notional_paise.0 < 0 {
+            return Err(RecoveryError::Inconsistent(
+                "a fill has negative notional".to_owned(),
+            ));
+        } else {
+            // A reported fill without a price stays explicitly unpriced.
+            None
+        };
+        Ok(Self {
+            original_quantity,
+            filled_quantity,
+            leaves_quantity,
+            filled_notional_paise,
+            average_fill_price_paise,
+            fees_paise,
+            costs_paise,
+            execution_ids,
+        })
+    }
+}
+
 /// Read-only view of authority state for operating evidence and tests.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AuthoritySnapshot {
@@ -873,6 +923,8 @@ pub struct AuthoritySnapshot {
     pub daily_pnl_journal_digest: Option<String>,
     /// Account-journal sequence bound to the established P&L snapshot.
     pub daily_pnl_journal_sequence: Option<u64>,
+    /// Reconciled execution state of permits that still have leaves quantity.
+    pub executions: BTreeMap<IntentId, ExecutionExposure>,
 }
 
 /// All mutable account-global facts. Never constructed from caller claims.
@@ -901,6 +953,8 @@ struct AuthorityState {
     consumed: BTreeSet<IntentId>,
     /// Permits consumed by the OMS whose terminal outcome is not yet known.
     unresolved: BTreeSet<IntentId>,
+    /// Reconciled partial execution state of still-open permits.
+    executions: BTreeMap<IntentId, ExecutionExposure>,
     next_permit: u64,
     /// The last authored, durably persisted reconciliation decision.
     reconciliation_decision: Option<ReconciliationState>,
@@ -934,6 +988,7 @@ impl Default for AuthorityState {
             decided: BTreeMap::new(),
             consumed: BTreeSet::new(),
             unresolved: BTreeSet::new(),
+            executions: BTreeMap::new(),
             next_permit: 1,
             reconciliation_decision: None,
             owner_tokens: BTreeMap::new(),
@@ -2107,6 +2162,7 @@ impl RiskAuthority {
         candidate.bump_revision()?;
         candidate.reservations.remove(&intent_id);
         candidate.consumed.insert(intent_id);
+        candidate.executions.remove(&intent_id);
         let intent = candidate
             .decided
             .get(&intent_id)
@@ -2200,6 +2256,7 @@ impl RiskAuthority {
         candidate.bump_revision()?;
         candidate.reservations.remove(&intent_id);
         candidate.consumed.insert(intent_id);
+        candidate.executions.remove(&intent_id);
         let intent = candidate
             .decided
             .get(&intent_id)
@@ -2303,6 +2360,7 @@ impl RiskAuthority {
                 .daily_pnl
                 .as_ref()
                 .map(|pnl| pnl.account_journal_sequence),
+            executions: state.executions.clone(),
         })
     }
 
@@ -2636,8 +2694,15 @@ pub struct OmsPermitRecord {
     pub intent_id: IntentId,
     pub permit_digest: String,
     pub state: OmsPermitState,
+    /// FIX `CumQty`: cumulative executed quantity, never a per-report delta.
     pub filled_quantity: i64,
+    /// Cumulative executed notional (paise), including price improvement.
     pub filled_notional: i64,
+    /// Reported FIX `LeavesQty`. Absent means the owner did not report it, in
+    /// which case recovery derives it from `OrderQty - CumQty`. Terminal states
+    /// are exempt from the `OrderQty = CumQty + LeavesQty` requirement.
+    #[serde(default)]
+    pub leaves_quantity: Option<i64>,
 }
 
 impl OmsPermitRecord {
@@ -2661,7 +2726,15 @@ impl OmsPermitRecord {
             state,
             filled_quantity,
             filled_notional,
+            leaves_quantity: None,
         }
+    }
+
+    /// Bind the reported FIX `LeavesQty` to the cumulative execution state.
+    #[must_use]
+    pub fn with_leaves_quantity(mut self, leaves_quantity: i64) -> Self {
+        self.leaves_quantity = Some(leaves_quantity);
+        self
     }
 
     /// Assign the exact next sequence and seal the record to its predecessor.
@@ -2695,6 +2768,133 @@ impl ChainedRecord for OmsPermitRecord {
             "state": self.state,
             "filled_quantity": self.filled_quantity,
             "filled_notional": self.filled_notional,
+            "leaves_quantity": self.leaves_quantity,
+        })
+        .to_string()
+    }
+}
+
+/// How one OMS execution event changed an order. Corrections and trade cancels
+/// reference the execution they supersede; they never invent a new fill.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionEventKind {
+    /// A new cumulative execution (trade) report.
+    Fill,
+    /// A correction that replaces the terms of a previously reported execution.
+    Correct,
+    /// A trade cancel that removes a previously reported execution.
+    TradeCancel,
+}
+
+/// One owner-sealed execution-level fact for a consumed permit. The authority
+/// reconciles the cumulative FIX fields of these reports into a single order
+/// state: duplicate execution identities are idempotent, reports may arrive in
+/// any order, and corrections/trade cancels refer to the execution they change.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionRecoveryRecord {
+    pub schema_version: u32,
+    pub sequence: u64,
+    pub prev_digest: String,
+    pub digest: String,
+    pub permit_id: u64,
+    pub intent_id: IntentId,
+    /// Stable execution identity used for deduplication and correction binding.
+    pub execution_id: String,
+    /// Owner-supplied report order; recovery sorts by it, never by input order.
+    pub report_sequence: u64,
+    pub kind: ExecutionEventKind,
+    /// Execution identity superseded by a correction or trade cancel.
+    pub corrects: Option<String>,
+    /// FIX `OrderQty`: authorized quantity after any order correction.
+    pub order_quantity: i64,
+    /// FIX `CumQty`: cumulative executed quantity after this report.
+    pub cumulative_filled_quantity: i64,
+    /// FIX `LeavesQty`: quantity still working after this report.
+    pub leaves_quantity: i64,
+    /// Cumulative executed notional after this report (paise).
+    pub cumulative_notional_paise: i64,
+    /// Cumulative fees after this report (non-negative paise).
+    pub fees_paise: i64,
+    /// Cumulative other transaction costs after this report (non-negative paise).
+    pub costs_paise: i64,
+}
+
+impl ExecutionRecoveryRecord {
+    #[must_use]
+    #[allow(clippy::too_many_arguments)] // every argument is a required execution fact
+    pub fn new(
+        permit_id: u64,
+        intent_id: IntentId,
+        execution_id: String,
+        report_sequence: u64,
+        kind: ExecutionEventKind,
+        corrects: Option<String>,
+        order_quantity: i64,
+        cumulative_filled_quantity: i64,
+        leaves_quantity: i64,
+        cumulative_notional_paise: i64,
+        fees_paise: i64,
+        costs_paise: i64,
+    ) -> Self {
+        Self {
+            schema_version: 1,
+            sequence: 0,
+            prev_digest: GENESIS_DIGEST.to_owned(),
+            digest: String::new(),
+            permit_id,
+            intent_id,
+            execution_id,
+            report_sequence,
+            kind,
+            corrects,
+            order_quantity,
+            cumulative_filled_quantity,
+            leaves_quantity,
+            cumulative_notional_paise,
+            fees_paise,
+            costs_paise,
+        }
+    }
+
+    /// Assign the exact next sequence and seal the record to its predecessor.
+    pub fn seal(&mut self, sequence: u64, prev_digest: &str) {
+        let (sequence, previous, digest) = seal_fields(sequence, prev_digest, &self.preimage());
+        self.sequence = sequence;
+        self.prev_digest = previous;
+        self.digest = digest;
+    }
+}
+
+impl ChainedRecord for ExecutionRecoveryRecord {
+    fn sequence(&self) -> u64 {
+        self.sequence
+    }
+
+    fn prev_digest(&self) -> &str {
+        &self.prev_digest
+    }
+
+    fn digest(&self) -> &str {
+        &self.digest
+    }
+
+    fn preimage(&self) -> String {
+        serde_json::json!({
+            "schema_version": self.schema_version,
+            "permit_id": self.permit_id,
+            "intent_id": self.intent_id,
+            "execution_id": self.execution_id,
+            "report_sequence": self.report_sequence,
+            "kind": self.kind,
+            "corrects": self.corrects,
+            "order_quantity": self.order_quantity,
+            "cumulative_filled_quantity": self.cumulative_filled_quantity,
+            "leaves_quantity": self.leaves_quantity,
+            "cumulative_notional_paise": self.cumulative_notional_paise,
+            "fees_paise": self.fees_paise,
+            "costs_paise": self.costs_paise,
         })
         .to_string()
     }
@@ -2808,6 +3008,10 @@ impl ChainedRecord for AccountRecoveryRecord {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RecoveryRecords {
     pub oms: Vec<OmsPermitRecord>,
+    /// Execution-level facts behind the OMS cumulative summaries. They are
+    /// independent records: recovery re-verifies their chain, deduplicates
+    /// execution identities and applies corrections before using them.
+    pub executions: Vec<ExecutionRecoveryRecord>,
     pub account: Vec<AccountRecoveryRecord>,
     /// Sealed daily P&L evidence. Recovery fails closed when it is absent.
     pub daily_pnl: DailyPnlRecovery,
@@ -3242,6 +3446,538 @@ where
     }
 }
 
+/// Execution facts that are incomplete rather than contradictory. Recovery
+/// still applies the reported filled quantity, but it cannot certify the money
+/// split, so it authors a reconciliation latch and stays NOT-READY.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct UncertainExecution {
+    reason: String,
+    evidence_ref: String,
+}
+
+#[derive(Clone, Debug)]
+struct EffectiveExecution {
+    execution_id: String,
+    order_quantity: i64,
+    filled_quantity: i64,
+    notional_paise: i64,
+    fees_paise: i64,
+    costs_paise: i64,
+    cancelled: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ExecutionSummary {
+    order_quantity: i64,
+    filled_quantity: i64,
+    leaves_quantity: i64,
+    notional_paise: i64,
+    fees_paise: i64,
+    costs_paise: i64,
+    execution_ids: Vec<String>,
+}
+
+fn latch_reconciliation(
+    state: &mut AuthorityState,
+    head: Option<&ReconciliationState>,
+    reason: String,
+    evidence_ref: String,
+) -> Result<(), RecoveryError> {
+    let revision = match head {
+        Some(record) => record.revision.checked_add(1).ok_or_else(|| {
+            RecoveryError::Inconsistent("reconciliation revision overflow".to_owned())
+        })?,
+        None => 1,
+    };
+    state.reconciliation_blocked = true;
+    state.reconciliation_decision = Some(ReconciliationState::new(
+        true,
+        reason,
+        Some(evidence_ref),
+        revision,
+        i64::try_from(state.now.get()).unwrap_or(i64::MAX),
+    ));
+    Ok(())
+}
+
+fn same_execution(a: &ExecutionRecoveryRecord, b: &ExecutionRecoveryRecord) -> bool {
+    a.permit_id == b.permit_id
+        && a.intent_id == b.intent_id
+        && a.execution_id == b.execution_id
+        && a.report_sequence == b.report_sequence
+        && a.kind == b.kind
+        && a.corrects == b.corrects
+        && a.order_quantity == b.order_quantity
+        && a.cumulative_filled_quantity == b.cumulative_filled_quantity
+        && a.leaves_quantity == b.leaves_quantity
+        && a.cumulative_notional_paise == b.cumulative_notional_paise
+        && a.fees_paise == b.fees_paise
+        && a.costs_paise == b.costs_paise
+}
+
+/// Reduce the cumulative execution reports of one permit to one authoritative
+/// order state. Reports are ordered by `report_sequence`, so input order cannot
+/// change the result; identical execution identities collapse; corrections and
+/// trade cancels supersede the execution they name.
+fn reconcile_executions(
+    records: &[&ExecutionRecoveryRecord],
+    intent_id: &IntentId,
+    authorized_quantity: i64,
+) -> Result<(Option<ExecutionSummary>, Option<UncertainExecution>), RecoveryError> {
+    if records.is_empty() {
+        return Ok((None, None));
+    }
+    let mut unique: BTreeMap<&str, &ExecutionRecoveryRecord> = BTreeMap::new();
+    let mut sequences: BTreeMap<u64, String> = BTreeMap::new();
+    for record in records {
+        if record.schema_version != 1 {
+            return Err(RecoveryError::Inconsistent(format!(
+                "unsupported execution schema {}",
+                record.schema_version
+            )));
+        }
+        if &record.intent_id != intent_id {
+            return Err(RecoveryError::Inconsistent(
+                "an execution report belongs to another intent".to_owned(),
+            ));
+        }
+        if record.execution_id.trim().is_empty() {
+            return Err(RecoveryError::Inconsistent(
+                "an execution report has no execution identity".to_owned(),
+            ));
+        }
+        if record.order_quantity <= 0
+            || record.cumulative_filled_quantity < 0
+            || record.leaves_quantity < 0
+            || record.cumulative_filled_quantity > record.order_quantity
+            || record.cumulative_notional_paise < 0
+            || record.fees_paise < 0
+            || record.costs_paise < 0
+        {
+            return Err(RecoveryError::Inconsistent(format!(
+                "execution {} reports impossible quantities or money",
+                record.execution_id
+            )));
+        }
+        // FIX OrderQty = CumQty + LeavesQty for every non-terminal report.
+        if record
+            .cumulative_filled_quantity
+            .checked_add(record.leaves_quantity)
+            != Some(record.order_quantity)
+        {
+            return Err(RecoveryError::Inconsistent(format!(
+                "execution {} violates OrderQty = CumQty + LeavesQty",
+                record.execution_id
+            )));
+        }
+        match sequences.entry(record.report_sequence) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(record.execution_id.clone());
+            }
+            std::collections::btree_map::Entry::Occupied(entry) => {
+                if entry.get() != &record.execution_id {
+                    return Err(RecoveryError::Inconsistent(format!(
+                        "report sequence {} identifies two executions",
+                        record.report_sequence
+                    )));
+                }
+            }
+        }
+        match unique.entry(&record.execution_id) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(*record);
+            }
+            std::collections::btree_map::Entry::Occupied(entry) => {
+                if !same_execution(entry.get(), record) {
+                    return Err(RecoveryError::Inconsistent(format!(
+                        "execution identity {} has contradictory reports",
+                        record.execution_id
+                    )));
+                }
+            }
+        }
+    }
+
+    let mut ordered: Vec<&ExecutionRecoveryRecord> = unique.values().copied().collect();
+    ordered.sort_by(|a, b| {
+        a.report_sequence
+            .cmp(&b.report_sequence)
+            .then_with(|| a.execution_id.cmp(&b.execution_id))
+    });
+    let mut effective: BTreeMap<String, EffectiveExecution> = BTreeMap::new();
+    let mut filled = 0_i64;
+    let mut notional = 0_i64;
+    let mut fees = 0_i64;
+    let mut costs = 0_i64;
+
+    for record in &ordered {
+        if record.kind != ExecutionEventKind::Fill {
+            continue;
+        }
+        let delta_quantity = record
+            .cumulative_filled_quantity
+            .checked_sub(filled)
+            .ok_or_else(|| RecoveryError::Inconsistent("execution quantity overflow".to_owned()))?;
+        let delta_notional = record
+            .cumulative_notional_paise
+            .checked_sub(notional)
+            .ok_or_else(|| RecoveryError::Inconsistent("execution notional overflow".to_owned()))?;
+        let delta_fees = record
+            .fees_paise
+            .checked_sub(fees)
+            .ok_or_else(|| RecoveryError::Inconsistent("execution fees regression".to_owned()))?;
+        let delta_costs = record
+            .costs_paise
+            .checked_sub(costs)
+            .ok_or_else(|| RecoveryError::Inconsistent("execution costs regression".to_owned()))?;
+        if delta_quantity <= 0 || delta_notional < 0 || delta_fees < 0 || delta_costs < 0 {
+            return Err(RecoveryError::Inconsistent(format!(
+                "execution {} does not add to the cumulative report",
+                record.execution_id
+            )));
+        }
+        effective.insert(
+            record.execution_id.clone(),
+            EffectiveExecution {
+                execution_id: record.execution_id.clone(),
+                order_quantity: record.order_quantity,
+                filled_quantity: delta_quantity,
+                notional_paise: delta_notional,
+                fees_paise: delta_fees,
+                costs_paise: delta_costs,
+                cancelled: false,
+            },
+        );
+        filled = record.cumulative_filled_quantity;
+        notional = record.cumulative_notional_paise;
+        fees = record.fees_paise;
+        costs = record.costs_paise;
+    }
+
+    for record in &ordered {
+        if record.kind == ExecutionEventKind::Fill {
+            continue;
+        }
+        let Some(target_id) = record.corrects.as_deref() else {
+            return Err(RecoveryError::Inconsistent(format!(
+                "execution {} is a correction without a target",
+                record.execution_id
+            )));
+        };
+        let Some(target) = effective.get_mut(target_id) else {
+            return Ok((
+                None,
+                Some(UncertainExecution {
+                    reason: format!(
+                        "execution {} references unknown execution {}",
+                        record.execution_id, target_id
+                    ),
+                    evidence_ref: format!("permit-{}", record.permit_id),
+                }),
+            ));
+        };
+        let other_quantity = filled.checked_sub(target.filled_quantity).ok_or_else(|| {
+            RecoveryError::Inconsistent("execution correction quantity underflow".to_owned())
+        })?;
+        let other_notional = notional.checked_sub(target.notional_paise).ok_or_else(|| {
+            RecoveryError::Inconsistent("execution correction notional underflow".to_owned())
+        })?;
+        let other_fees = fees.checked_sub(target.fees_paise).ok_or_else(|| {
+            RecoveryError::Inconsistent("execution correction fees underflow".to_owned())
+        })?;
+        let other_costs = costs.checked_sub(target.costs_paise).ok_or_else(|| {
+            RecoveryError::Inconsistent("execution correction costs underflow".to_owned())
+        })?;
+        if record.kind == ExecutionEventKind::TradeCancel {
+            if record.cumulative_filled_quantity != other_quantity
+                || record.cumulative_notional_paise != other_notional
+            {
+                return Err(RecoveryError::Inconsistent(format!(
+                    "trade cancel {} disagrees with the remaining executions",
+                    record.execution_id
+                )));
+            }
+            target.filled_quantity = 0;
+            target.notional_paise = 0;
+            target.fees_paise = 0;
+            target.costs_paise = 0;
+            target.cancelled = true;
+        } else {
+            let new_quantity = record
+                .cumulative_filled_quantity
+                .checked_sub(other_quantity)
+                .ok_or_else(|| {
+                    RecoveryError::Inconsistent("corrected quantity underflow".to_owned())
+                })?;
+            let new_notional = record
+                .cumulative_notional_paise
+                .checked_sub(other_notional)
+                .ok_or_else(|| {
+                    RecoveryError::Inconsistent("corrected notional underflow".to_owned())
+                })?;
+            let new_fees = record.fees_paise.checked_sub(other_fees).ok_or_else(|| {
+                RecoveryError::Inconsistent("corrected fees underflow".to_owned())
+            })?;
+            let new_costs = record.costs_paise.checked_sub(other_costs).ok_or_else(|| {
+                RecoveryError::Inconsistent("corrected costs underflow".to_owned())
+            })?;
+            if new_quantity < 0 || new_notional < 0 || new_fees < 0 || new_costs < 0 {
+                return Err(RecoveryError::Inconsistent(format!(
+                    "execution correction {} reports impossible terms",
+                    record.execution_id
+                )));
+            }
+            target.order_quantity = record.order_quantity;
+            target.filled_quantity = new_quantity;
+            target.notional_paise = new_notional;
+            target.fees_paise = new_fees;
+            target.costs_paise = new_costs;
+        }
+        filled = record.cumulative_filled_quantity;
+        notional = record.cumulative_notional_paise;
+        fees = record.fees_paise;
+        costs = record.costs_paise;
+    }
+
+    let mut summary_filled = 0_i64;
+    let mut summary_notional = 0_i64;
+    let mut summary_fees = 0_i64;
+    let mut summary_costs = 0_i64;
+    let mut execution_ids = Vec::new();
+    for execution in effective.values() {
+        if execution.cancelled {
+            continue;
+        }
+        summary_filled = summary_filled
+            .checked_add(execution.filled_quantity)
+            .ok_or_else(|| RecoveryError::Inconsistent("execution quantity overflow".to_owned()))?;
+        summary_notional = summary_notional
+            .checked_add(execution.notional_paise)
+            .ok_or_else(|| RecoveryError::Inconsistent("execution notional overflow".to_owned()))?;
+        summary_fees = summary_fees
+            .checked_add(execution.fees_paise)
+            .ok_or_else(|| RecoveryError::Inconsistent("execution fees overflow".to_owned()))?;
+        summary_costs = summary_costs
+            .checked_add(execution.costs_paise)
+            .ok_or_else(|| RecoveryError::Inconsistent("execution costs overflow".to_owned()))?;
+        execution_ids.push(execution.execution_id.clone());
+    }
+    let order_quantity = ordered
+        .last()
+        .map_or(authorized_quantity, |record| record.order_quantity);
+    let leaves_quantity = order_quantity
+        .checked_sub(summary_filled)
+        .ok_or_else(|| RecoveryError::Inconsistent("leaves quantity underflow".to_owned()))?;
+    if leaves_quantity < 0 {
+        return Err(RecoveryError::Inconsistent(
+            "cumulative executions exceed the order quantity".to_owned(),
+        ));
+    }
+    Ok((
+        Some(ExecutionSummary {
+            order_quantity,
+            filled_quantity: summary_filled,
+            leaves_quantity,
+            notional_paise: summary_notional,
+            fees_paise: summary_fees,
+            costs_paise: summary_costs,
+            execution_ids,
+        }),
+        None,
+    ))
+}
+
+/// Deduct a known filled quantity from the pending bucket of one instrument,
+/// leaving the unexecuted leaves quantity pending.
+fn reduce_pending_quantity(
+    state: &mut AuthorityState,
+    reservation: &Reservation,
+    quantity: i64,
+) -> Result<(), RecoveryError> {
+    if quantity == 0 {
+        return Ok(());
+    }
+    let pending = match reservation.side {
+        Side::Buy => &mut state.pending_buy,
+        Side::Sell => &mut state.pending_sell,
+    };
+    if let std::collections::btree_map::Entry::Occupied(mut entry) =
+        pending.entry(reservation.instrument_id.clone())
+    {
+        let remaining = entry
+            .get()
+            .checked_sub(quantity)
+            .ok_or_else(|| RecoveryError::Inconsistent("pending quantity underflow".to_owned()))?;
+        if remaining <= 0 {
+            entry.remove();
+        } else {
+            *entry.get_mut() = remaining;
+        }
+    }
+    Ok(())
+}
+
+/// Apply the cumulative executed portion of one permit. The filled notional
+/// moves from pending into gross exposure and into the signed position; the
+/// reservation is reduced to the leaves quantity and its unspent notional.
+#[allow(clippy::too_many_arguments)] // every argument is a required reconciliation fact
+fn apply_execution_to_state(
+    state: &mut AuthorityState,
+    decision: &RiskDecisionRecord,
+    sectors: &BTreeMap<InstrumentId, String>,
+    filled_quantity: i64,
+    filled_notional: Paise,
+    leaves_quantity: i64,
+    leaves_notional: Paise,
+    outcome: OmsPermitState,
+    execution: Option<ExecutionExposure>,
+) -> Result<(), RecoveryError> {
+    let authorized_notional = checked_paise(decision.notional_paise)?;
+    if filled_quantity < 0 || leaves_quantity < 0 || filled_notional.0 < 0 || leaves_notional.0 < 0
+    {
+        return Err(RecoveryError::Inconsistent(
+            "an OMS execution reports a negative quantity or notional".to_owned(),
+        ));
+    }
+    let accounted = filled_notional
+        .0
+        .checked_add(leaves_notional.0)
+        .ok_or_else(|| RecoveryError::Inconsistent("execution notional overflow".to_owned()))?;
+    if accounted != authorized_notional.0 {
+        return Err(RecoveryError::Inconsistent(
+            "filled and leaves notional do not cover the authorized notional".to_owned(),
+        ));
+    }
+    let reservation = state
+        .reservations
+        .get(&decision.intent_id)
+        .cloned()
+        .ok_or_else(|| {
+            RecoveryError::Inconsistent("an execution has no matching reservation".to_owned())
+        })?;
+
+    state.pending_gross_exposure_paise = sub_paise(
+        state.pending_gross_exposure_paise,
+        filled_notional,
+        "pending exposure",
+    )?;
+    state.gross_exposure_paise = add_paise(
+        state.gross_exposure_paise,
+        filled_notional,
+        "gross exposure",
+    )?;
+    reduce_pending_quantity(state, &reservation, filled_quantity)?;
+    if filled_quantity > 0 {
+        let signed = match reservation.side {
+            Side::Buy => filled_quantity,
+            Side::Sell => -filled_quantity,
+        };
+        let position = state
+            .positions
+            .entry(reservation.instrument_id.clone())
+            .or_insert(0);
+        let updated = position
+            .checked_add(signed)
+            .ok_or_else(|| RecoveryError::Inconsistent("recovered position overflow".to_owned()))?;
+        if updated == 0 {
+            state.positions.remove(&reservation.instrument_id);
+        } else {
+            *position = updated;
+        }
+    }
+
+    let cover = state
+        .strategy_exposure
+        .get(&reservation.strategy_id)
+        .copied()
+        .unwrap_or(Paise(0));
+    if cover.0 < authorized_notional.0 {
+        return Err(RecoveryError::Inconsistent(
+            "strategy exposure does not cover the recovered execution".to_owned(),
+        ));
+    }
+    if let Some(label) = sectors.get(&reservation.instrument_id) {
+        let cover = state
+            .sector_exposure
+            .get(label)
+            .copied()
+            .unwrap_or(Paise(0));
+        if cover.0 < authorized_notional.0 {
+            return Err(RecoveryError::Inconsistent(
+                "sector exposure does not cover the recovered execution".to_owned(),
+            ));
+        }
+    }
+
+    match outcome {
+        OmsPermitState::Open | OmsPermitState::Unknown => {
+            if leaves_quantity <= 0 {
+                return Err(RecoveryError::Inconsistent(
+                    "an unfinished OMS permit has no leaves quantity".to_owned(),
+                ));
+            }
+            let mut remaining = reservation.clone();
+            remaining.quantity = Quantity::new(leaves_quantity).map_err(|error| {
+                RecoveryError::Inconsistent(format!("invalid leaves quantity: {error}"))
+            })?;
+            remaining.reserved_notional_paise = leaves_notional;
+            state.reservations.insert(decision.intent_id, remaining);
+            if filled_quantity > 0 {
+                let exposure = match execution {
+                    Some(value) => value,
+                    None => ExecutionExposure::new(
+                        reservation.quantity.get(),
+                        filled_quantity,
+                        leaves_quantity,
+                        filled_notional,
+                        Paise(0),
+                        Paise(0),
+                        Vec::new(),
+                    )?,
+                };
+                state.executions.insert(decision.intent_id, exposure);
+            }
+        }
+        OmsPermitState::Filled => {
+            state.pending_gross_exposure_paise = sub_paise(
+                state.pending_gross_exposure_paise,
+                leaves_notional,
+                "pending exposure",
+            )?;
+            state.reservations.remove(&decision.intent_id);
+            state.executions.remove(&decision.intent_id);
+            state.consumed.insert(decision.intent_id);
+            state.open_orders = state
+                .open_orders
+                .checked_sub(1)
+                .ok_or_else(|| RecoveryError::Inconsistent("open orders underflow".to_owned()))?;
+        }
+        OmsPermitState::Cancelled => {
+            state.pending_gross_exposure_paise = sub_paise(
+                state.pending_gross_exposure_paise,
+                leaves_notional,
+                "pending exposure",
+            )?;
+            decrement_recovery_exposure(
+                &mut state.strategy_exposure,
+                &reservation.strategy_id,
+                leaves_notional,
+            )?;
+            if let Some(label) = sectors.get(&reservation.instrument_id) {
+                decrement_recovery_exposure(&mut state.sector_exposure, label, leaves_notional)?;
+            }
+            state.reservations.remove(&decision.intent_id);
+            state.executions.remove(&decision.intent_id);
+            state.consumed.insert(decision.intent_id);
+            state.open_orders = state
+                .open_orders
+                .checked_sub(1)
+                .ok_or_else(|| RecoveryError::Inconsistent("open orders underflow".to_owned()))?;
+        }
+    }
+    Ok(())
+}
+
 fn reconstruct(
     config: &RecoveryConfig,
     sectors: &BTreeMap<InstrumentId, String>,
@@ -3263,6 +3999,7 @@ fn reconstruct(
         .map_err(|error| RecoveryError::DecisionStore(error.to_string()))?;
     verify_recovery_chain(&decisions)?;
     verify_recovery_chain(&config.records.oms)?;
+    verify_recovery_chain(&config.records.executions)?;
     verify_recovery_chain(&config.records.account)?;
 
     let mut state = AuthorityState {
@@ -3340,6 +4077,15 @@ fn reconstruct(
         }
     }
 
+    let mut executions_by_permit: BTreeMap<u64, Vec<&ExecutionRecoveryRecord>> = BTreeMap::new();
+    for execution in &config.records.executions {
+        executions_by_permit
+            .entry(execution.permit_id)
+            .or_default()
+            .push(execution);
+    }
+    let no_executions: &[&ExecutionRecoveryRecord] = &[];
+
     let mut consumed_permits = BTreeSet::new();
     for oms in &config.records.oms {
         if oms.schema_version != 1 {
@@ -3379,47 +4125,170 @@ fn reconstruct(
                 oms.permit_id
             )));
         }
-        let reservation = state.reservations.get(&decision.intent_id).cloned();
+
+        let authorized_quantity = decision.intent.quantity.get();
+        let authorized_notional = checked_paise(decision.notional_paise)?;
+        let ledger = executions_by_permit
+            .get(&oms.permit_id)
+            .map_or(no_executions, Vec::as_slice);
+        let (summary, uncertain) =
+            reconcile_executions(ledger, &decision.intent_id, authorized_quantity)?;
+        let order_quantity = summary
+            .as_ref()
+            .map_or(authorized_quantity, |value| value.order_quantity);
+        if matches!(
+            oms.state,
+            OmsPermitState::Filled | OmsPermitState::Cancelled
+        ) && order_quantity != authorized_quantity
+        {
+            return Err(RecoveryError::Inconsistent(
+                "a terminal OMS permit reports a corrected order quantity".to_owned(),
+            ));
+        }
+        if oms.filled_quantity < 0
+            || oms.filled_quantity > order_quantity
+            || oms.filled_notional < 0
+        {
+            return Err(RecoveryError::Inconsistent(
+                "an OMS permit reports an impossible execution".to_owned(),
+            ));
+        }
+        // The OMS cumulative summary and the execution journal must describe
+        // the same filled quantity and notional; neither is silently preferred.
+        if let Some(found) = &summary
+            && (oms.filled_quantity != found.filled_quantity
+                || oms.filled_notional != found.notional_paise)
+        {
+            return Err(RecoveryError::Inconsistent(format!(
+                "permit {} cumulative execution disagrees with the execution journal",
+                oms.permit_id
+            )));
+        }
+        if oms.filled_notional > authorized_notional.0 {
+            return Err(RecoveryError::Inconsistent(
+                "OMS filled notional exceeds the authorized notional".to_owned(),
+            ));
+        }
+        let filled_quantity = oms.filled_quantity;
+        let filled_notional = Paise(oms.filled_notional);
+        let leaves_quantity = order_quantity
+            .checked_sub(filled_quantity)
+            .ok_or_else(|| RecoveryError::Inconsistent("leaves quantity underflow".to_owned()))?;
+        if leaves_quantity < 0 {
+            return Err(RecoveryError::Inconsistent(
+                "cumulative executions exceed the order quantity".to_owned(),
+            ));
+        }
+        if let Some(reported) = oms.leaves_quantity
+            && matches!(oms.state, OmsPermitState::Open | OmsPermitState::Unknown)
+            && reported != leaves_quantity
+        {
+            return Err(RecoveryError::Inconsistent(format!(
+                "permit {} reports LeavesQty inconsistent with OrderQty and CumQty",
+                oms.permit_id
+            )));
+        }
         match oms.state {
             OmsPermitState::Open => {
-                if oms.filled_quantity < 0 || oms.filled_quantity > decision.intent.quantity.get() {
+                if leaves_quantity <= 0 {
                     return Err(RecoveryError::Inconsistent(
-                        "an open OMS order reports an impossible fill".to_owned(),
+                        "an open OMS permit has no leaves quantity".to_owned(),
                     ));
                 }
             }
             OmsPermitState::Filled => {
-                if oms.filled_quantity != decision.intent.quantity.get()
-                    || oms.filled_notional != decision.notional_paise
-                {
+                if filled_quantity != order_quantity || filled_notional != authorized_notional {
                     return Err(RecoveryError::Inconsistent(
                         "an OMS fill disagrees with the authorized terms".to_owned(),
                     ));
                 }
+            }
+            OmsPermitState::Cancelled | OmsPermitState::Unknown => {}
+        }
+
+        let reservation = state.reservations.get(&decision.intent_id).cloned();
+        let exposure = match &summary {
+            Some(found) if found.filled_quantity > 0 => Some(ExecutionExposure::new(
+                authorized_quantity,
+                found.filled_quantity,
+                found.leaves_quantity,
+                Paise(found.notional_paise),
+                Paise(found.fees_paise),
+                Paise(found.costs_paise),
+                found.execution_ids.clone(),
+            )?),
+            _ => None,
+        };
+        let leaves_notional = Paise(authorized_notional.0 - filled_notional.0);
+        match oms.state {
+            OmsPermitState::Open | OmsPermitState::Unknown => {
+                apply_execution_to_state(
+                    &mut state,
+                    decision,
+                    sectors,
+                    filled_quantity,
+                    filled_notional,
+                    leaves_quantity,
+                    leaves_notional,
+                    oms.state,
+                    exposure,
+                )?;
+            }
+            OmsPermitState::Filled | OmsPermitState::Cancelled => {
+                let expected = if oms.state == OmsPermitState::Filled {
+                    DecisionOutcome::Filled
+                } else {
+                    DecisionOutcome::Released
+                };
                 match reservation {
-                    Some(found) => apply_filled(&mut state, decision, &found, sectors)?,
-                    None if applied.get(&decision.intent_id) == Some(&DecisionOutcome::Filled) => {}
+                    Some(_) => apply_execution_to_state(
+                        &mut state,
+                        decision,
+                        sectors,
+                        filled_quantity,
+                        filled_notional,
+                        leaves_quantity,
+                        leaves_notional,
+                        oms.state,
+                        None,
+                    )?,
+                    None if applied.get(&decision.intent_id) == Some(&expected) => {}
                     None => {
                         return Err(RecoveryError::Inconsistent(
-                            "an OMS fill has no matching reservation".to_owned(),
+                            "an OMS terminal outcome has no matching reservation".to_owned(),
                         ));
                     }
                 }
             }
-            OmsPermitState::Cancelled => match reservation {
-                Some(found) => apply_released(&mut state, decision, &found, sectors)?,
-                None if applied.get(&decision.intent_id) == Some(&DecisionOutcome::Released) => {}
-                None => {
-                    return Err(RecoveryError::Inconsistent(
-                        "an OMS cancellation has no matching reservation".to_owned(),
-                    ));
-                }
-            },
-            OmsPermitState::Unknown => {
-                state.reconciliation_blocked = true;
-                state.unresolved.insert(decision.intent_id);
-            }
         }
+        if let Some(uncertain) = uncertain {
+            latch_reconciliation(
+                &mut state,
+                reconciliation.as_ref(),
+                uncertain.reason,
+                uncertain.evidence_ref,
+            )?;
+        }
+        if filled_quantity > 0 && filled_notional.0 == 0 {
+            latch_reconciliation(
+                &mut state,
+                reconciliation.as_ref(),
+                "an OMS fill reports no notional and cannot be priced".to_owned(),
+                format!("permit-{}", oms.permit_id),
+            )?;
+        }
+        if oms.state == OmsPermitState::Unknown {
+            state.reconciliation_blocked = true;
+            state.unresolved.insert(decision.intent_id);
+        }
+    }
+    if executions_by_permit
+        .keys()
+        .any(|permit| !consumed_permits.contains(permit))
+    {
+        return Err(RecoveryError::Inconsistent(
+            "execution reports reference a permit with no OMS record".to_owned(),
+        ));
     }
 
     let mut account_positions: BTreeMap<InstrumentId, i64> = BTreeMap::new();

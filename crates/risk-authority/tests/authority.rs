@@ -1963,6 +1963,11 @@ mod recovery_tests {
         RecoveryError,
         RecoveryRecords,
         RiskDecisionRecord,
+        authority::{
+            ExecutionEventKind, //
+            ExecutionRecoveryRecord,
+            Reservation,
+        },
         genesis_digest,
     };
     use trading_core::permit_digest;
@@ -2223,6 +2228,1074 @@ mod recovery_tests {
             "the permit counter continues from the recovered stream"
         );
         drop(second);
+        let _ = std::fs::remove_file(&control);
+        let _ = std::fs::remove_file(&decisions);
+        let _ = std::fs::remove_file(&lock);
+        Ok(())
+    }
+
+    /// An OPEN OMS permit may already have executed part of its authorized
+    /// quantity. Recovery must turn that filled part into position exposure and
+    /// keep only the leaves quantity reserved; treating the fill as zero or
+    /// keeping the full order reserved misrepresents both figures.
+    #[test]
+    fn recovery_applies_partial_fill_to_position_and_leaves_reservation() -> TestResult {
+        let control = temp_path("control-partial-fill");
+        let decisions = temp_path("decisions-partial-fill");
+        let lock = temp_path("lock-partial-fill");
+        let _ = std::fs::remove_file(&control);
+        let _ = std::fs::remove_file(&decisions);
+        let _ = std::fs::remove_file(&lock);
+
+        let first = ready_authority(&control, &decisions, &lock)?;
+        let target = intent(1, 4, PRICE, Side::Buy)?;
+        let reservation = first.evaluate_and_reserve(target.clone(), observation(&first)?, None)?;
+        drop(first);
+
+        let digest = permit_digest(
+            reservation.permit_id,
+            &reservation.assessment.policy_version,
+            reservation.snapshot_revision,
+            &target,
+        );
+        let mut oms = OmsPermitRecord::new(
+            reservation.permit_id,
+            reservation.intent_id,
+            digest,
+            OmsPermitState::Open,
+            1,
+            PRICE,
+        );
+        oms.seal(1, genesis_digest());
+        let mut account = AccountRecoveryRecord::new(
+            "partial-fill-1".to_owned(),
+            AccountId::new(ACCOUNT)?,
+            instrument_id()?,
+            1,
+        );
+        account.seal(1, genesis_digest());
+
+        let (c, d) = file_stores(&control, &decisions);
+        let recovered = build_recovered(
+            &lock,
+            RecoveryRecords {
+                oms: vec![oms],
+                account: vec![account],
+                ..Default::default()
+            },
+            c,
+            d,
+        )?;
+        let snapshot = recovered.snapshot()?;
+        assert_eq!(
+            snapshot.positions.get(&instrument_id()?).copied(),
+            Some(1),
+            "the executed part becomes a position on restart"
+        ); // first fill
+        assert_eq!(
+            snapshot.gross_exposure_paise,
+            Paise(PRICE),
+            "the executed notional becomes gross exposure"
+        ); // execution evidence
+        assert_eq!(
+            snapshot.pending_gross_exposure_paise,
+            Paise(3 * PRICE),
+            "only the leaves notional stays reserved"
+        ); // execution evidence
+        let retained = recovered.reservation(reservation.intent_id)?;
+        assert_eq!(
+            retained.quantity.get(),
+            3,
+            "the open permit reserves only the leaves quantity"
+        ); // execution evidence
+        assert_eq!(
+            retained.reserved_notional_paise,
+            Paise(3 * PRICE),
+            "the open permit reserves only the leaves notional"
+        ); // execution evidence
+        assert_eq!(snapshot.open_orders, 1, "the permit is still open");
+
+        drop(recovered);
+        let _ = std::fs::remove_file(&control);
+        let _ = std::fs::remove_file(&decisions);
+        let _ = std::fs::remove_file(&lock);
+        Ok(())
+    }
+
+    /// Issue one durable permit and release its authority so a restart can be
+    /// driven from the recorded decision stream.
+    fn consumed_permit(
+        control: &std::path::Path,
+        decisions: &std::path::Path,
+        lock: &std::path::Path,
+        quantity: i64,
+    ) -> Result<(OrderIntent, Reservation), Box<dyn std::error::Error>> {
+        let first = ready_authority(control, decisions, lock)?;
+        let target = intent(1, quantity, PRICE, Side::Buy)?;
+        let reservation = first.evaluate_and_reserve(target.clone(), observation(&first)?, None)?;
+        drop(first);
+        Ok((target, reservation))
+    }
+
+    fn digest_for(target: &OrderIntent, reservation: &Reservation) -> String {
+        permit_digest(
+            reservation.permit_id,
+            &reservation.assessment.policy_version,
+            reservation.snapshot_revision,
+            target,
+        )
+    }
+
+    fn oms_record(
+        reservation: &Reservation,
+        digest: String,
+        state: OmsPermitState,
+        filled: i64,
+        notional: i64,
+        leaves: Option<i64>,
+    ) -> OmsPermitRecord {
+        let mut record = OmsPermitRecord::new(
+            reservation.permit_id,
+            reservation.intent_id,
+            digest,
+            state,
+            filled,
+            notional,
+        );
+        if let Some(leaves) = leaves {
+            record = record.with_leaves_quantity(leaves);
+        }
+        record.seal(1, genesis_digest());
+        record
+    }
+
+    #[allow(clippy::too_many_arguments)] // fixture mirrors every execution fact under test
+    fn exec_record(
+        reservation: &Reservation,
+        id: &str,
+        report_sequence: u64,
+        kind: ExecutionEventKind,
+        corrects: Option<&str>,
+        cum_quantity: i64,
+        leaves: i64,
+        cum_notional: i64,
+        fees: i64,
+        costs: i64,
+    ) -> ExecutionRecoveryRecord {
+        ExecutionRecoveryRecord::new(
+            reservation.permit_id,
+            reservation.intent_id,
+            id.to_owned(),
+            report_sequence,
+            kind,
+            corrects.map(str::to_owned),
+            reservation.quantity.get(),
+            cum_quantity,
+            leaves,
+            cum_notional,
+            fees,
+            costs,
+        )
+    }
+
+    fn seal_executions(records: Vec<ExecutionRecoveryRecord>) -> Vec<ExecutionRecoveryRecord> {
+        let mut sealed = records;
+        let mut previous = genesis_digest().to_owned();
+        for (index, record) in sealed.iter_mut().enumerate() {
+            record.seal(
+                u64::try_from(index + 1).expect("fixture sequence"),
+                &previous,
+            );
+            previous = record.digest.clone();
+        }
+        sealed
+    }
+
+    fn inconsistent(error: Box<dyn std::error::Error>) -> bool {
+        matches!(
+            error.downcast::<RecoveryError>(),
+            Ok(error) if matches!(*error, RecoveryError::Inconsistent(_))
+        )
+    }
+
+    fn account_delta(
+        quantity: i64,
+    ) -> Result<Vec<AccountRecoveryRecord>, Box<dyn std::error::Error>> {
+        let mut record = AccountRecoveryRecord::new(
+            "execution-delta".to_owned(),
+            AccountId::new(ACCOUNT)?,
+            instrument_id()?,
+            quantity,
+        );
+        record.seal(1, genesis_digest());
+        Ok(vec![record])
+    }
+
+    /// Whether the recovered authority still grants a permit for a known-good
+    /// probe intent. Used to prove a restart reproduces the same risk result.
+    fn risk_probe(authority: &RiskAuthority) -> Result<bool, Box<dyn std::error::Error>> {
+        authority.register_all_owners()?;
+        Ok(authority
+            .evaluate_and_reserve(
+                intent(9, 1, PRICE, Side::Buy)?,
+                observation(authority)?,
+                None,
+            )
+            .is_ok())
+    }
+
+    #[test]
+    fn recovery_replays_partial_fill_then_fill_then_cancel_across_restarts() -> TestResult {
+        let control = temp_path("control-lifecycle");
+        let decisions = temp_path("decisions-lifecycle");
+        let lock = temp_path("lock-lifecycle");
+        let _ = std::fs::remove_file(&control);
+        let _ = std::fs::remove_file(&decisions);
+        let _ = std::fs::remove_file(&lock);
+        let (target, reservation) = consumed_permit(&control, &decisions, &lock, 4)?;
+        let digest = digest_for(&target, &reservation);
+        let first_fill = exec_record(
+            &reservation,
+            "exec-1",
+            1,
+            ExecutionEventKind::Fill,
+            None,
+            1,
+            3,
+            PRICE,
+            10,
+            5,
+        );
+        let second_fill = exec_record(
+            &reservation,
+            "exec-2",
+            2,
+            ExecutionEventKind::Fill,
+            None,
+            2,
+            2,
+            2 * PRICE,
+            20,
+            10,
+        );
+
+        let (c1, d1) = file_stores(&control, &decisions);
+        let stage1 = build_recovered(
+            &lock,
+            RecoveryRecords {
+                oms: vec![oms_record(
+                    &reservation,
+                    digest.clone(),
+                    OmsPermitState::Open,
+                    1,
+                    PRICE,
+                    Some(3),
+                )],
+                executions: seal_executions(vec![first_fill.clone()]),
+                account: account_delta(1)?,
+                ..Default::default()
+            },
+            c1,
+            d1,
+        )?;
+        let snapshot = stage1.snapshot()?;
+        assert_eq!(
+            snapshot.positions.get(&instrument_id()?).copied(),
+            Some(1),
+            "the reconstructed position equals the executed quantity"
+        ); // direct position // restart position
+        assert_eq!(
+            snapshot.gross_exposure_paise,
+            Paise(PRICE),
+            "gross exposure equals the executed notional"
+        );
+        assert_eq!(
+            snapshot.pending_gross_exposure_paise,
+            Paise(3 * PRICE),
+            "gross exposure equals the executed notional"
+        );
+        assert_eq!(
+            snapshot
+                .executions
+                .get(&reservation.intent_id)
+                .map(|value| value.filled_quantity),
+            Some(1),
+            "the first execution is visible as cumulative filled quantity"
+        );
+        drop(stage1);
+
+        let (c2, d2) = file_stores(&control, &decisions);
+        let stage2 = build_recovered(
+            &lock,
+            RecoveryRecords {
+                oms: vec![oms_record(
+                    &reservation,
+                    digest.clone(),
+                    OmsPermitState::Open,
+                    2,
+                    2 * PRICE,
+                    Some(2),
+                )],
+                executions: seal_executions(vec![first_fill.clone(), second_fill.clone()]),
+                account: account_delta(2)?,
+                ..Default::default()
+            },
+            c2,
+            d2,
+        )?;
+        let snapshot = stage2.snapshot()?;
+        assert_eq!(
+            snapshot.positions.get(&instrument_id()?).copied(),
+            Some(2),
+            "the reconstructed position equals the executed quantity"
+        );
+        assert_eq!(
+            snapshot.gross_exposure_paise,
+            Paise(2 * PRICE),
+            "gross exposure equals the executed notional"
+        );
+        assert_eq!(
+            snapshot.pending_gross_exposure_paise,
+            Paise(2 * PRICE),
+            "gross exposure equals the executed notional"
+        );
+        assert_eq!(
+            stage2.reservation(reservation.intent_id)?.quantity.get(),
+            2,
+            "the second fill further reduces the leaves reservation"
+        );
+        assert_eq!(
+            snapshot
+                .executions
+                .get(&reservation.intent_id)
+                .map(|value| value.execution_ids.clone()),
+            Some(vec!["exec-1".to_owned(), "exec-2".to_owned()]),
+            "execution identities are deduplicated and canonically ordered"
+        ); // both execution ids
+        drop(stage2);
+
+        // A terminal cancellation keeps the executed part as exposure and
+        // releases only the unexecuted remainder. Reported LeavesQty may be
+        // non-zero here: terminal states are exempt from the FIX identity.
+        let (c3, d3) = file_stores(&control, &decisions);
+        let stage3 = build_recovered(
+            &lock,
+            RecoveryRecords {
+                oms: vec![oms_record(
+                    &reservation,
+                    digest.clone(),
+                    OmsPermitState::Cancelled,
+                    2,
+                    2 * PRICE,
+                    Some(2),
+                )],
+                executions: seal_executions(vec![first_fill.clone(), second_fill.clone()]),
+                account: account_delta(2)?,
+                ..Default::default()
+            },
+            c3,
+            d3,
+        )?;
+        let restarted = stage3.snapshot()?;
+        assert_eq!(
+            restarted.positions.get(&instrument_id()?).copied(),
+            Some(2),
+            "the reconstructed position equals the executed quantity"
+        );
+        assert_eq!(
+            restarted.gross_exposure_paise,
+            Paise(2 * PRICE),
+            "gross exposure equals the executed notional"
+        ); // execution evidence
+        assert_eq!(
+            restarted.pending_gross_exposure_paise,
+            Paise(0),
+            "gross exposure equals the executed notional"
+        ); // execution evidence
+        assert_eq!(restarted.reservation_count, 0, "the remainder is released");
+        assert_eq!(
+            restarted.open_orders, 0,
+            "the permit lifecycle is reflected in the open order count"
+        ); // execution evidence
+        let restarted_probe = risk_probe(&stage3)?;
+
+        // One uninterrupted restart with the complete journal must reproduce
+        // the same position, reservation, exposure and risk result.
+        let other_control = temp_path("control-lifecycle-direct");
+        let other_decisions = temp_path("decisions-lifecycle-direct");
+        let other_lock = temp_path("lock-lifecycle-direct");
+        let _ = std::fs::remove_file(&other_control);
+        let _ = std::fs::remove_file(&other_decisions);
+        let _ = std::fs::remove_file(&other_lock);
+        let (direct_target, direct_reservation) =
+            consumed_permit(&other_control, &other_decisions, &other_lock, 4)?;
+        let (c4, d4) = file_stores(&other_control, &other_decisions);
+        let direct = build_recovered(
+            &other_lock,
+            RecoveryRecords {
+                oms: vec![oms_record(
+                    &direct_reservation,
+                    digest_for(&direct_target, &direct_reservation),
+                    OmsPermitState::Cancelled,
+                    2,
+                    2 * PRICE,
+                    Some(2),
+                )],
+                executions: seal_executions(vec![first_fill, second_fill]),
+                account: account_delta(2)?,
+                ..Default::default()
+            },
+            c4,
+            d4,
+        )?;
+        let direct_snapshot = direct.snapshot()?;
+        assert_eq!(
+            direct_snapshot.positions, restarted.positions,
+            "the reconstructed position equals the executed quantity"
+        ); // execution evidence
+        assert_eq!(
+            direct_snapshot.gross_exposure_paise, restarted.gross_exposure_paise,
+            "gross exposure equals the executed notional"
+        );
+        assert_eq!(
+            direct_snapshot.pending_gross_exposure_paise, restarted.pending_gross_exposure_paise,
+            "gross exposure equals the executed notional"
+        );
+        assert_eq!(
+            direct_snapshot.reservation_count, restarted.reservation_count,
+            "the permit count matches the terminal outcome"
+        );
+        assert_eq!(
+            direct_snapshot.executions, restarted.executions,
+            "the reconciled execution exposure is exact"
+        );
+        assert_eq!(
+            risk_probe(&direct)?,
+            restarted_probe,
+            "the risk result is identical"
+        );
+
+        drop(stage3);
+        drop(direct);
+        for path in [
+            &control,
+            &decisions,
+            &lock,
+            &other_control,
+            &other_decisions,
+            &other_lock,
+        ] {
+            let _ = std::fs::remove_file(path);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn recovery_deduplicates_executions_and_orders_reports_by_sequence() -> TestResult {
+        let control = temp_path("control-exec-order");
+        let decisions = temp_path("decisions-exec-order");
+        let lock = temp_path("lock-exec-order");
+        let _ = std::fs::remove_file(&control);
+        let _ = std::fs::remove_file(&decisions);
+        let _ = std::fs::remove_file(&lock);
+        let (target, reservation) = consumed_permit(&control, &decisions, &lock, 4)?;
+        let digest = digest_for(&target, &reservation);
+        let first = exec_record(
+            &reservation,
+            "exec-1",
+            1,
+            ExecutionEventKind::Fill,
+            None,
+            1,
+            3,
+            PRICE,
+            0,
+            0,
+        );
+        let second = exec_record(
+            &reservation,
+            "exec-2",
+            2,
+            ExecutionEventKind::Fill,
+            None,
+            2,
+            2,
+            2 * PRICE,
+            0,
+            0,
+        );
+
+        let (c1, d1) = file_stores(&control, &decisions);
+        let duplicate = build_recovered(
+            &lock,
+            RecoveryRecords {
+                oms: vec![oms_record(
+                    &reservation,
+                    digest.clone(),
+                    OmsPermitState::Open,
+                    1,
+                    PRICE,
+                    Some(3),
+                )],
+                executions: seal_executions(vec![first.clone(), first.clone()]),
+                account: account_delta(1)?,
+                ..Default::default()
+            },
+            c1,
+            d1,
+        )?;
+        let exposures = duplicate.snapshot()?.executions;
+        assert_eq!(
+            exposures
+                .get(&reservation.intent_id)
+                .map(|value| value.execution_ids.clone()),
+            Some(vec!["exec-1".to_owned()]),
+            "a replayed execution identity is counted once"
+        ); // duplicate identity
+        drop(duplicate);
+
+        let mut conflicting = first.clone();
+        conflicting.cumulative_notional_paise = 2 * PRICE;
+        let (c2, d2) = file_stores(&control, &decisions);
+        let conflict = build_recovered(
+            &lock,
+            RecoveryRecords {
+                oms: vec![oms_record(
+                    &reservation,
+                    digest.clone(),
+                    OmsPermitState::Open,
+                    1,
+                    PRICE,
+                    Some(3),
+                )],
+                executions: seal_executions(vec![first.clone(), conflicting]),
+                account: account_delta(1)?,
+                ..Default::default()
+            },
+            c2,
+            d2,
+        );
+        assert!(
+            conflict.err().is_some_and(inconsistent),
+            "one execution identity with two different facts fails closed"
+        );
+
+        let (c3, d3) = file_stores(&control, &decisions);
+        let reordered = build_recovered(
+            &lock,
+            RecoveryRecords {
+                oms: vec![oms_record(
+                    &reservation,
+                    digest,
+                    OmsPermitState::Open,
+                    2,
+                    2 * PRICE,
+                    Some(2),
+                )],
+                executions: seal_executions(vec![second, first]),
+                account: account_delta(2)?,
+                ..Default::default()
+            },
+            c3,
+            d3,
+        )?;
+        let snapshot = reordered.snapshot()?;
+        assert_eq!(
+            snapshot.positions.get(&instrument_id()?).copied(),
+            Some(2),
+            "the reconstructed position equals the executed quantity"
+        ); // execution evidence
+        assert_eq!(
+            snapshot
+                .executions
+                .get(&reservation.intent_id)
+                .map(|value| value.execution_ids.clone()),
+            Some(vec!["exec-1".to_owned(), "exec-2".to_owned()]),
+            "report order in the journal does not change the reconciled set"
+        ); // execution evidence
+        assert_eq!(
+            reordered.reservation(reservation.intent_id)?.quantity.get(),
+            2,
+            "leaves quantity follows CumQty, not the last report seen"
+        ); // execution evidence
+        drop(reordered);
+        let _ = std::fs::remove_file(&control);
+        let _ = std::fs::remove_file(&decisions);
+        let _ = std::fs::remove_file(&lock);
+        Ok(())
+    }
+
+    #[test]
+    fn recovery_applies_execution_correction_and_trade_cancel() -> TestResult {
+        let control = temp_path("control-exec-correct");
+        let decisions = temp_path("decisions-exec-correct");
+        let lock = temp_path("lock-exec-correct");
+        let _ = std::fs::remove_file(&control);
+        let _ = std::fs::remove_file(&decisions);
+        let _ = std::fs::remove_file(&lock);
+        let (target, reservation) = consumed_permit(&control, &decisions, &lock, 4)?;
+        let digest = digest_for(&target, &reservation);
+        let fill = exec_record(
+            &reservation,
+            "exec-1",
+            1,
+            ExecutionEventKind::Fill,
+            None,
+            1,
+            3,
+            PRICE,
+            10,
+            5,
+        );
+        let correction = exec_record(
+            &reservation,
+            "exec-2",
+            2,
+            ExecutionEventKind::Correct,
+            Some("exec-1"),
+            1,
+            3,
+            900,
+            5,
+            2,
+        );
+        let (c1, d1) = file_stores(&control, &decisions);
+        let corrected = build_recovered(
+            &lock,
+            RecoveryRecords {
+                oms: vec![oms_record(
+                    &reservation,
+                    digest.clone(),
+                    OmsPermitState::Open,
+                    1,
+                    900,
+                    Some(3),
+                )],
+                executions: seal_executions(vec![fill.clone(), correction]),
+                account: account_delta(1)?,
+                ..Default::default()
+            },
+            c1,
+            d1,
+        )?;
+        let exposure = corrected.snapshot()?.executions;
+        let exposure = exposure
+            .get(&reservation.intent_id)
+            .expect("corrected exposure");
+        assert_eq!(
+            exposure.filled_quantity, 1,
+            "cumulative filled and remaining leaves quantities stay distinct"
+        );
+        assert_eq!(
+            exposure.leaves_quantity, 3,
+            "cumulative filled and remaining leaves quantities stay distinct"
+        );
+        assert_eq!(
+            exposure.filled_notional_paise,
+            Paise(900),
+            "the reconstructed risk state matches the durable execution facts"
+        );
+        assert_eq!(
+            exposure.average_fill_price_paise,
+            Some(Paise(900)),
+            "average fill price is derived from cumulative executed notional"
+        );
+        assert_eq!(
+            exposure.fees_paise,
+            Paise(5),
+            "corrected fees replace the original claim"
+        );
+        assert_eq!(
+            exposure.costs_paise,
+            Paise(2),
+            "corrected costs are kept distinct"
+        );
+        assert_eq!(
+            exposure.execution_ids,
+            vec!["exec-1".to_owned()],
+            "execution identities are deduplicated and canonically ordered"
+        );
+        assert_eq!(
+            corrected.snapshot()?.gross_exposure_paise,
+            Paise(900),
+            "gross exposure equals the executed notional"
+        );
+        drop(corrected);
+
+        let cancel = exec_record(
+            &reservation,
+            "exec-3",
+            3,
+            ExecutionEventKind::TradeCancel,
+            Some("exec-1"),
+            0,
+            4,
+            0,
+            0,
+            0,
+        );
+        let (c2, d2) = file_stores(&control, &decisions);
+        let cancelled = build_recovered(
+            &lock,
+            RecoveryRecords {
+                oms: vec![oms_record(
+                    &reservation,
+                    digest,
+                    OmsPermitState::Open,
+                    0,
+                    0,
+                    Some(4),
+                )],
+                executions: seal_executions(vec![fill, cancel]),
+                account: account_delta(0)?,
+                ..Default::default()
+            },
+            c2,
+            d2,
+        )?;
+        let snapshot = cancelled.snapshot()?;
+        assert!(
+            !snapshot.positions.contains_key(&instrument_id()?),
+            "a trade cancel removes the execution from the position"
+        );
+        assert_eq!(
+            snapshot.pending_gross_exposure_paise,
+            Paise(4 * PRICE),
+            "gross exposure equals the executed notional"
+        );
+        assert!(
+            snapshot.executions.is_empty(),
+            "no partial fill survives its trade cancel"
+        );
+        assert_eq!(
+            cancelled.reservation(reservation.intent_id)?.quantity.get(),
+            4,
+            "the reservation retains only the leaves quantity"
+        );
+        drop(cancelled);
+        let _ = std::fs::remove_file(&control);
+        let _ = std::fs::remove_file(&decisions);
+        let _ = std::fs::remove_file(&lock);
+        Ok(())
+    }
+
+    #[test]
+    fn recovery_latches_reconciliation_for_unreconcilable_partial_fills() -> TestResult {
+        let control = temp_path("control-exec-uncertain");
+        let decisions = temp_path("decisions-exec-uncertain");
+        let lock = temp_path("lock-exec-uncertain");
+        let _ = std::fs::remove_file(&control);
+        let _ = std::fs::remove_file(&decisions);
+        let _ = std::fs::remove_file(&lock);
+        let (target, reservation) = consumed_permit(&control, &decisions, &lock, 4)?;
+        let digest = digest_for(&target, &reservation);
+
+        // A fill with no notional cannot be priced. Recovery still books the
+        // executed quantity and shrinks the reservation, but stays NOT-READY.
+        let (c1, d1) = file_stores(&control, &decisions);
+        let unpriced = build_recovered(
+            &lock,
+            RecoveryRecords {
+                oms: vec![oms_record(
+                    &reservation,
+                    digest.clone(),
+                    OmsPermitState::Open,
+                    1,
+                    0,
+                    Some(3),
+                )],
+                account: account_delta(1)?,
+                ..Default::default()
+            },
+            c1,
+            d1,
+        )?;
+        let snapshot = unpriced.snapshot()?;
+        assert!(
+            snapshot.reconciliation_blocked,
+            "uncertain money latches reconciliation"
+        );
+        assert!(
+            snapshot
+                .reconciliation_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("no notional")),
+            "the latch carries an authored reason"
+        );
+        assert_eq!(
+            snapshot.positions.get(&instrument_id()?).copied(),
+            Some(1),
+            "the reconstructed position equals the executed quantity"
+        );
+        assert_eq!(
+            unpriced.reservation(reservation.intent_id)?.quantity.get(),
+            3,
+            "the reservation retains only the leaves quantity"
+        );
+        assert!(
+            !risk_probe(&unpriced)?,
+            "a NOT-READY authority denies new risk"
+        );
+        drop(unpriced);
+
+        // A correction that references an unknown execution is also uncertain,
+        // never silently ignored; the reported fill is still accounted for.
+        let orphan = exec_record(
+            &reservation,
+            "exec-orphan",
+            1,
+            ExecutionEventKind::Correct,
+            Some("exec-missing"),
+            1,
+            3,
+            PRICE,
+            0,
+            0,
+        );
+        let (c2, d2) = file_stores(&control, &decisions);
+        let uncertain = build_recovered(
+            &lock,
+            RecoveryRecords {
+                oms: vec![oms_record(
+                    &reservation,
+                    digest,
+                    OmsPermitState::Open,
+                    1,
+                    PRICE,
+                    Some(3),
+                )],
+                executions: seal_executions(vec![orphan]),
+                account: account_delta(1)?,
+                ..Default::default()
+            },
+            c2,
+            d2,
+        )?;
+        let snapshot = uncertain.snapshot()?;
+        assert!(
+            snapshot.reconciliation_blocked,
+            "uncertain execution latches reconciliation with an authored reason"
+        );
+        assert!(
+            snapshot
+                .reconciliation_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("unknown execution")),
+            "uncertain execution latches reconciliation with an authored reason"
+        );
+        assert_eq!(
+            snapshot.positions.get(&instrument_id()?).copied(),
+            Some(1),
+            "the reconstructed position equals the executed quantity"
+        );
+        assert_eq!(
+            uncertain.reservation(reservation.intent_id)?.quantity.get(),
+            3,
+            "the reservation retains only the leaves quantity"
+        );
+        drop(uncertain);
+        let _ = std::fs::remove_file(&control);
+        let _ = std::fs::remove_file(&decisions);
+        let _ = std::fs::remove_file(&lock);
+        Ok(())
+    }
+
+    #[test]
+    fn recovery_rejects_partial_execution_contradictions_and_allows_terminal_exceptions()
+    -> TestResult {
+        let control = temp_path("control-exec-contradiction");
+        let decisions = temp_path("decisions-exec-contradiction");
+        let lock = temp_path("lock-exec-contradiction");
+        let _ = std::fs::remove_file(&control);
+        let _ = std::fs::remove_file(&decisions);
+        let _ = std::fs::remove_file(&lock);
+        let (target, reservation) = consumed_permit(&control, &decisions, &lock, 4)?;
+        let digest = digest_for(&target, &reservation);
+        let fill = exec_record(
+            &reservation,
+            "exec-1",
+            1,
+            ExecutionEventKind::Fill,
+            None,
+            1,
+            3,
+            PRICE,
+            0,
+            0,
+        );
+
+        let (c1, d1) = file_stores(&control, &decisions);
+        let account_disagreement = build_recovered(
+            &lock,
+            RecoveryRecords {
+                oms: vec![oms_record(
+                    &reservation,
+                    digest.clone(),
+                    OmsPermitState::Open,
+                    1,
+                    PRICE,
+                    Some(3),
+                )],
+                account: account_delta(2)?,
+                ..Default::default()
+            },
+            c1,
+            d1,
+        );
+        assert!(
+            account_disagreement.err().is_some_and(inconsistent),
+            "an account position disagreeing with OMS cumulative quantity fails closed"
+        );
+
+        let (c2, d2) = file_stores(&control, &decisions);
+        let journal_disagreement = build_recovered(
+            &lock,
+            RecoveryRecords {
+                oms: vec![oms_record(
+                    &reservation,
+                    digest.clone(),
+                    OmsPermitState::Open,
+                    1,
+                    PRICE,
+                    Some(3),
+                )],
+                executions: seal_executions(vec![fill.clone()]),
+                account: account_delta(2)?,
+                ..Default::default()
+            },
+            c2,
+            d2,
+        );
+        assert!(
+            journal_disagreement.err().is_some_and(inconsistent),
+            "an OMS summary disagreeing with the execution journal fails closed"
+        );
+
+        let (c3, d3) = file_stores(&control, &decisions);
+        let broken_leaves = build_recovered(
+            &lock,
+            RecoveryRecords {
+                oms: vec![oms_record(
+                    &reservation,
+                    digest.clone(),
+                    OmsPermitState::Open,
+                    1,
+                    PRICE,
+                    Some(2),
+                )],
+                account: account_delta(1)?,
+                ..Default::default()
+            },
+            c3,
+            d3,
+        );
+        assert!(
+            broken_leaves.err().is_some_and(inconsistent),
+            "OrderQty = CumQty + LeavesQty is enforced on an open permit"
+        );
+
+        let mut broken_execution = fill.clone();
+        broken_execution.leaves_quantity = 2;
+        let (c4, d4) = file_stores(&control, &decisions);
+        let broken_execution = build_recovered(
+            &lock,
+            RecoveryRecords {
+                oms: vec![oms_record(
+                    &reservation,
+                    digest.clone(),
+                    OmsPermitState::Open,
+                    1,
+                    PRICE,
+                    Some(3),
+                )],
+                executions: seal_executions(vec![broken_execution]),
+                account: account_delta(1)?,
+                ..Default::default()
+            },
+            c4,
+            d4,
+        );
+        assert!(
+            broken_execution.err().is_some_and(inconsistent),
+            "an execution report violating the FIX identity fails closed"
+        );
+
+        // Terminal states are exempt: a cancellation may still report leaves,
+        // and a full fill may carry a stale leaves figure.
+        let (c5, d5) = file_stores(&control, &decisions);
+        let cancelled = build_recovered(
+            &lock,
+            RecoveryRecords {
+                oms: vec![oms_record(
+                    &reservation,
+                    digest.clone(),
+                    OmsPermitState::Cancelled,
+                    1,
+                    PRICE,
+                    Some(3),
+                )],
+                account: account_delta(1)?,
+                ..Default::default()
+            },
+            c5,
+            d5,
+        )?;
+        let snapshot = cancelled.snapshot()?;
+        assert_eq!(
+            snapshot.positions.get(&instrument_id()?).copied(),
+            Some(1),
+            "the reconstructed position equals the executed quantity"
+        );
+        assert_eq!(
+            snapshot.pending_gross_exposure_paise,
+            Paise(0),
+            "gross exposure equals the executed notional"
+        );
+        assert_eq!(
+            snapshot.reservation_count, 0,
+            "the permit count matches the terminal outcome"
+        );
+        drop(cancelled);
+
+        let (c6, d6) = file_stores(&control, &decisions);
+        let filled = build_recovered(
+            &lock,
+            RecoveryRecords {
+                oms: vec![oms_record(
+                    &reservation,
+                    digest,
+                    OmsPermitState::Filled,
+                    4,
+                    4 * PRICE,
+                    Some(2),
+                )],
+                account: account_delta(4)?,
+                ..Default::default()
+            },
+            c6,
+            d6,
+        )?;
+        let snapshot = filled.snapshot()?;
+        assert_eq!(
+            snapshot.positions.get(&instrument_id()?).copied(),
+            Some(4),
+            "the reconstructed position equals the executed quantity"
+        );
+        assert_eq!(
+            snapshot.gross_exposure_paise,
+            Paise(4 * PRICE),
+            "gross exposure equals the executed notional"
+        );
+        assert_eq!(
+            snapshot.pending_gross_exposure_paise,
+            Paise(0),
+            "gross exposure equals the executed notional"
+        );
+        assert_eq!(
+            snapshot.reservation_count, 0,
+            "the permit count matches the terminal outcome"
+        );
+        drop(filled);
         let _ = std::fs::remove_file(&control);
         let _ = std::fs::remove_file(&decisions);
         let _ = std::fs::remove_file(&lock);
@@ -2692,6 +3765,7 @@ mod recovery_tests {
             &lock,
             RecoveryRecords {
                 oms: Vec::new(),
+                executions: Vec::new(),
                 account: vec![account],
                 daily_pnl: DailyPnlRecovery {
                     record: Some(record),
