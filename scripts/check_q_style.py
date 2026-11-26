@@ -20,11 +20,11 @@ Use --self-test for adversarial unit tests.
 
 from __future__ import annotations
 
-import tomllib
 import os
 import re
 import subprocess
 import sys
+import tomllib
 import unittest
 from pathlib import Path
 from typing import Any
@@ -163,13 +163,13 @@ class QStyleTests(unittest.TestCase):
     """Adversarial tests for the q style rules, config and diff parser."""
 
     def test_config_is_binding(self) -> None:
-        """The JSON contract drives the checker's live constants."""
+        """The TOML contract drives the checker's live constants."""
         self.assertEqual(MAX_COLUMNS, 100)
         self.assertEqual(CONFIG["enforcement"]["waivers"], "none")
 
     def test_config_rejects_waivers(self) -> None:
         """A contract with waivers is rejected at load time."""
-        data = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+        data = tomllib.loads(CONFIG_PATH.read_text(encoding="utf-8"))
         data["enforcement"]["waivers"] = "allowed"
         with self.assertRaises(ValueError):
             validate_config(data)
