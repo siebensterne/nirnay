@@ -13,9 +13,26 @@ pub mod error;
 pub mod observation;
 
 pub use authority::{
-    AuthoritySnapshot, //
+    AccountRecoveryRecord, //
+    AuthorityOwnership,
+    AuthoritySnapshot,
+    ChainedRecord,
+    DecisionOutcome,
+    DecisionStore,
+    DecisionStoreError,
+    FileDecisionStore,
+    GENESIS_DIGEST,
+    InMemoryDecisionStore,
+    OmsPermitRecord,
+    OmsPermitState,
+    RecoveryConfig,
+    RecoveryError,
+    RecoveryRecords,
     Reservation,
     RiskAuthority,
+    RiskDecisionRecord,
+    genesis_digest,
+    verify_recovery_chain,
 };
 pub use control::{
     ControlError, //
@@ -23,6 +40,7 @@ pub use control::{
     FileControlStore,
     KillSwitchState,
     NoopControlStore,
+    ReconciliationState,
 };
 pub use error::{
     AuthorityError, //

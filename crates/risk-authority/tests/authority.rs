@@ -1710,6 +1710,689 @@ fn observation_derived_changes_advance_revision() -> TestResult {
     Ok(())
 }
 
+mod recovery_tests {
+    use super::*;
+    use risk_authority::{
+        AccountRecoveryRecord, //
+        ControlError,
+        ControlStore,
+        DecisionOutcome,
+        DecisionStore,
+        FileControlStore,
+        FileDecisionStore,
+        InMemoryDecisionStore,
+        KillSwitchState,
+        NoopControlStore,
+        OmsPermitRecord,
+        OmsPermitState,
+        RecoveryConfig,
+        RecoveryError,
+        RecoveryRecords,
+        RiskDecisionRecord,
+        genesis_digest,
+    };
+    use trading_core::permit_digest;
+
+    fn temp_path(label: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "nirnay-recovery-{label}-{}-{}.jsonl",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ))
+    }
+
+    fn build_recovered(
+        lock_path: &std::path::Path,
+        records: RecoveryRecords,
+        control: Box<dyn risk_authority::ControlStore + Send + Sync>,
+        decisions: Box<dyn DecisionStore + Send + Sync>,
+    ) -> Result<RiskAuthority, Box<dyn std::error::Error>> {
+        Ok(RiskAuthority::recover(RecoveryConfig {
+            account_id: AccountId::new(ACCOUNT)?,
+            policy: policy()?,
+            instruments: vec![instrument()?],
+            trade_date: date()?,
+            control,
+            decisions,
+            records,
+            sectors: BTreeMap::new(),
+            ownership_path: lock_path.to_path_buf(),
+        })?)
+    }
+
+    fn file_stores(
+        control_path: &std::path::Path,
+        decision_path: &std::path::Path,
+    ) -> (
+        Box<dyn risk_authority::ControlStore + Send + Sync>,
+        Box<dyn DecisionStore + Send + Sync>,
+    ) {
+        (
+            Box::new(FileControlStore::new(control_path)),
+            Box::new(FileDecisionStore::new(decision_path)),
+        )
+    }
+
+    #[test]
+    fn file_control_store_rejects_duplicate_and_regressing_revisions() -> TestResult {
+        let path = temp_path("control-revision");
+        let _ = std::fs::remove_file(&path);
+        let store = FileControlStore::new(&path);
+        let first = KillSwitchState {
+            enabled: true,
+            actor_id: "owner".to_owned(),
+            reason: "start".to_owned(),
+            revision: 1,
+            at_ns: 0,
+        };
+        store.append_kill_switch(&first)?;
+
+        let mut duplicate = first.clone();
+        duplicate.enabled = false;
+        assert!(
+            matches!(
+                store.append_kill_switch(&duplicate),
+                Err(ControlError::Corrupt(_))
+            ),
+            "a duplicate revision is rejected rather than silently replacing the record"
+        );
+        let mut regression = first.clone();
+        regression.revision = 0;
+        assert!(
+            matches!(
+                store.append_kill_switch(&regression),
+                Err(ControlError::Corrupt(_))
+            ),
+            "a regressing revision is rejected"
+        );
+        assert_eq!(
+            store.load_kill_switch()?,
+            Some(first),
+            "only the exact first record remains authoritative"
+        );
+        let _ = std::fs::remove_file(&path);
+        Ok(())
+    }
+
+    #[test]
+    fn control_store_corruption_is_an_explicit_startup_error() -> TestResult {
+        let path = temp_path("control-corrupt");
+        std::fs::write(&path, "{not-json}\n")?;
+        let authority = RiskAuthority::new_with_control_store(
+            AccountId::new(ACCOUNT)?,
+            policy()?,
+            vec![instrument()?],
+            date()?,
+            Box::new(FileControlStore::new(&path)),
+        );
+        assert!(
+            authority.startup_error().is_some(),
+            "an unreadable control store is a typed startup error"
+        );
+        assert!(
+            authority.kill_switch_engaged()?,
+            "the authority still fails closed engaged"
+        );
+        let denied = authority.evaluate_and_reserve(
+            intent(1, 2, PRICE, Side::Buy)?,
+            observation(&authority)?,
+            None,
+        );
+        assert!(
+            matches!(denied, Err(AuthorityError::ControlFailure(_))),
+            "new risk is denied while the control store is unavailable"
+        );
+        let _ = std::fs::remove_file(&path);
+        Ok(())
+    }
+
+    #[test]
+    fn recovery_reconstructs_reservations_exposures_and_positions() -> TestResult {
+        let control = temp_path("control-recovery");
+        let decisions = temp_path("decisions-recovery");
+        let lock = temp_path("lock-recovery");
+        let _ = std::fs::remove_file(&control);
+        let _ = std::fs::remove_file(&decisions);
+        let _ = std::fs::remove_file(&lock);
+
+        let (c1, d1) = file_stores(&control, &decisions);
+        let first = build_recovered(&lock, RecoveryRecords::default(), c1, d1)?;
+        assert!(
+            first.snapshot()?.kill_switch_engaged,
+            "recovery starts engaged without a persisted release"
+        );
+        let tokens = first.register_all_owners()?;
+        first.set_kill_switch(
+            tokens.operator,
+            false,
+            "operator".to_owned(),
+            "documented release".to_owned(),
+            Some("release-evidence".to_owned()),
+        )?;
+        first.set_session_open(true)?;
+        first.set_snapshot_available(true)?;
+        first.set_reconciliation_blocked(
+            tokens.reconciliation,
+            false,
+            "verified replay".to_owned(),
+            Some("reconciliation-evidence".to_owned()),
+        )?;
+        let reservation = first.evaluate_and_reserve(
+            intent(1, 2, PRICE, Side::Buy)?,
+            observation(&first)?,
+            None,
+        )?;
+        assert_eq!(
+            reservation.permit_id, 1,
+            "the first issued permit is numbered from one"
+        );
+        drop(first);
+
+        let permit_digest = permit_digest(
+            reservation.permit_id,
+            &reservation.assessment.policy_version,
+            reservation.snapshot_revision,
+            &intent(1, 2, PRICE, Side::Buy)?,
+        );
+        let mut oms = OmsPermitRecord::new(
+            reservation.permit_id,
+            reservation.intent_id,
+            permit_digest,
+            OmsPermitState::Filled,
+            reservation.quantity.get(),
+            reservation.reserved_notional_paise.0,
+        );
+        oms.seal(1, genesis_digest());
+        let mut account = AccountRecoveryRecord::new(
+            "account-event-1".to_owned(),
+            AccountId::new(ACCOUNT)?,
+            instrument_id()?,
+            reservation.quantity.get(),
+        );
+        account.seal(1, genesis_digest());
+
+        let (c2, d2) = file_stores(&control, &decisions);
+        let second = build_recovered(
+            &lock,
+            RecoveryRecords {
+                oms: vec![oms],
+                account: vec![account],
+            },
+            c2,
+            d2,
+        )?;
+        let snapshot = second.snapshot()?;
+        assert_eq!(
+            snapshot.positions.get(&instrument_id()?).copied(),
+            Some(reservation.quantity.get()),
+            "the verified account journal reconstructs the position"
+        );
+        assert_eq!(
+            snapshot.gross_exposure_paise,
+            Paise(2_000),
+            "a consumed and filled permit moves pending exposure into gross"
+        );
+        assert_eq!(
+            snapshot.pending_gross_exposure_paise,
+            Paise(0),
+            "no pending exposure survives a verified fill"
+        );
+        assert_eq!(
+            snapshot.open_orders, 0,
+            "a verified fill closes the pending order"
+        );
+        assert!(
+            !snapshot.kill_switch_engaged,
+            "the durably released kill switch is restored"
+        );
+        assert!(
+            !snapshot.reconciliation_blocked,
+            "the authenticated reconciliation resolution is restored"
+        );
+        assert_eq!(
+            snapshot.reconciliation_reason.as_deref(),
+            Some("verified replay"),
+            "the reconciliation reason is restored rather than discarded"
+        );
+        assert_eq!(
+            snapshot.reconciliation_evidence_ref.as_deref(),
+            Some("reconciliation-evidence"),
+            "the reconciliation evidence reference is restored"
+        );
+
+        let replay = second.evaluate_and_reserve(
+            intent(1, 2, PRICE, Side::Buy)?,
+            observation(&second)?,
+            None,
+        );
+        assert!(
+            matches!(replay, Err(AuthorityError::AlreadyConsumed(_))),
+            "a recovered consumed intent cannot issue a second permit"
+        );
+
+        let next = second.evaluate_and_reserve(
+            intent(2, 2, PRICE, Side::Buy)?,
+            observation(&second)?,
+            None,
+        )?;
+        assert_eq!(
+            next.permit_id, 2,
+            "the permit counter continues from the recovered stream"
+        );
+        drop(second);
+        let _ = std::fs::remove_file(&control);
+        let _ = std::fs::remove_file(&decisions);
+        let _ = std::fs::remove_file(&lock);
+        Ok(())
+    }
+
+    #[test]
+    fn recovery_rejects_broken_sequences_digests_and_position_mismatch() -> TestResult {
+        let control = temp_path("control-negative");
+        let decisions = temp_path("decisions-negative");
+        let lock = temp_path("lock-negative");
+        let _ = std::fs::remove_file(&control);
+        let _ = std::fs::remove_file(&decisions);
+        let _ = std::fs::remove_file(&lock);
+
+        let mut oms = OmsPermitRecord::new(
+            1,
+            IntentId::new(1)?,
+            "a".repeat(64),
+            OmsPermitState::Open,
+            2,
+            2_000,
+        );
+        oms.seal(2, genesis_digest());
+        let (c1, d1) = file_stores(&control, &decisions);
+        let gap = RiskAuthority::recover(RecoveryConfig {
+            account_id: AccountId::new(ACCOUNT)?,
+            policy: policy()?,
+            instruments: vec![instrument()?],
+            trade_date: date()?,
+            control: c1,
+            decisions: d1,
+            records: RecoveryRecords {
+                oms: vec![oms],
+                account: Vec::new(),
+            },
+            sectors: BTreeMap::new(),
+            ownership_path: lock.to_path_buf(),
+        });
+        assert!(
+            matches!(gap, Err(RecoveryError::Sequence(_))),
+            "a non-contiguous OMS journal sequence fails startup closed"
+        );
+
+        let mut decision = RiskDecisionRecord::new(
+            intent(1, 2, PRICE, Side::Buy)?,
+            DecisionOutcome::Accepted,
+            1,
+            2_000,
+            1,
+            0,
+        );
+        decision.seal(1, genesis_digest());
+        let mut tampered = decision.clone();
+        tampered.digest = "f".repeat(64);
+        std::fs::write(
+            &decisions,
+            format!("{}\n", serde_json::to_string(&tampered)?),
+        )?;
+        let (c2, d2) = file_stores(&control, &decisions);
+        let digest_failure = RiskAuthority::recover(RecoveryConfig {
+            account_id: AccountId::new(ACCOUNT)?,
+            policy: policy()?,
+            instruments: vec![instrument()?],
+            trade_date: date()?,
+            control: c2,
+            decisions: d2,
+            records: RecoveryRecords::default(),
+            sectors: BTreeMap::new(),
+            ownership_path: lock.to_path_buf(),
+        });
+        assert!(
+            matches!(digest_failure, Err(RecoveryError::DecisionStore(_))),
+            "a broken decision digest chain fails startup closed"
+        );
+
+        let _ = std::fs::remove_file(&decisions);
+        let store = FileDecisionStore::new(&decisions);
+        let accepted = RiskDecisionRecord::new(
+            intent(1, 2, PRICE, Side::Buy)?,
+            DecisionOutcome::Accepted,
+            1,
+            2_000,
+            1,
+            0,
+        );
+        store.append_decision(&accepted)?;
+        let sealed = store.load_decisions()?.remove(0);
+        let expected_digest = permit_digest(
+            sealed.permit_id,
+            "risk-v1",
+            sealed.revision,
+            &intent(1, 2, PRICE, Side::Buy)?,
+        );
+        let mut filled = OmsPermitRecord::new(
+            sealed.permit_id,
+            sealed.intent_id,
+            expected_digest,
+            OmsPermitState::Filled,
+            2,
+            2_000,
+        );
+        filled.seal(1, genesis_digest());
+        let mut account = AccountRecoveryRecord::new(
+            "account-event".to_owned(),
+            AccountId::new(ACCOUNT)?,
+            instrument_id()?,
+            3,
+        );
+        account.seal(1, genesis_digest());
+        let (c3, d3) = file_stores(&control, &decisions);
+        let mismatch = RiskAuthority::recover(RecoveryConfig {
+            account_id: AccountId::new(ACCOUNT)?,
+            policy: policy()?,
+            instruments: vec![instrument()?],
+            trade_date: date()?,
+            control: c3,
+            decisions: d3,
+            records: RecoveryRecords {
+                oms: vec![filled],
+                account: vec![account],
+            },
+            sectors: BTreeMap::new(),
+            ownership_path: lock.to_path_buf(),
+        });
+        assert!(
+            matches!(mismatch, Err(RecoveryError::Inconsistent(_))),
+            "an account position that disagrees with the derived fill fails startup closed"
+        );
+
+        let _ = std::fs::remove_file(&control);
+        let _ = std::fs::remove_file(&decisions);
+        let _ = std::fs::remove_file(&lock);
+        Ok(())
+    }
+
+    #[test]
+    fn noop_control_store_is_not_a_durable_startup_default() -> TestResult {
+        let lock = temp_path("lock-noop");
+        let _ = std::fs::remove_file(&lock);
+        let failures = RiskAuthority::recover(RecoveryConfig {
+            account_id: AccountId::new(ACCOUNT)?,
+            policy: policy()?,
+            instruments: vec![instrument()?],
+            trade_date: date()?,
+            control: Box::new(NoopControlStore),
+            decisions: Box::new(InMemoryDecisionStore::new()),
+            records: RecoveryRecords::default(),
+            sectors: BTreeMap::new(),
+            ownership_path: lock.to_path_buf(),
+        });
+        assert!(
+            matches!(failures, Err(RecoveryError::NonDurableStore)),
+            "an in-memory control store cannot establish durable startup state"
+        );
+        let simulation = RiskAuthority::new_simulation(
+            AccountId::new(ACCOUNT)?,
+            policy()?,
+            vec![instrument()?],
+            date()?,
+        );
+        assert!(
+            simulation.is_simulation(),
+            "the simulation constructor is explicitly labelled"
+        );
+        let _ = std::fs::remove_file(&lock);
+        Ok(())
+    }
+
+    #[test]
+    fn reconciliation_reason_and_evidence_survive_restart() -> TestResult {
+        let path = temp_path("control-reconciliation");
+        let _ = std::fs::remove_file(&path);
+        let first = RiskAuthority::new_with_control_store(
+            AccountId::new(ACCOUNT)?,
+            policy()?,
+            vec![instrument()?],
+            date()?,
+            Box::new(FileControlStore::new(&path)),
+        );
+        let tokens = first.register_all_owners()?;
+        first.set_reconciliation_blocked(
+            tokens.reconciliation,
+            false,
+            "evidence reviewed".to_owned(),
+            Some("evidence-ref".to_owned()),
+        )?;
+        assert_eq!(
+            first.reconciliation_decision().map(|value| value.reason),
+            Some("evidence reviewed".to_owned()),
+            "the authored reason is available in memory"
+        );
+        drop(first);
+
+        let second = RiskAuthority::new_with_control_store(
+            AccountId::new(ACCOUNT)?,
+            policy()?,
+            vec![instrument()?],
+            date()?,
+            Box::new(FileControlStore::new(&path)),
+        );
+        assert!(
+            !second.snapshot()?.reconciliation_blocked,
+            "the persisted resolution is restored across a restart"
+        );
+        assert_eq!(
+            second
+                .reconciliation_decision()
+                .and_then(|value| value.evidence_ref),
+            Some("evidence-ref".to_owned()),
+            "the persisted evidence reference is audible after a restart"
+        );
+        let _ = std::fs::remove_file(&path);
+        Ok(())
+    }
+
+    fn ready_authority(
+        control: &std::path::Path,
+        decisions: &std::path::Path,
+        lock: &std::path::Path,
+    ) -> Result<RiskAuthority, Box<dyn std::error::Error>> {
+        let (c, d) = file_stores(control, decisions);
+        let value = build_recovered(lock, RecoveryRecords::default(), c, d)?;
+        let tokens = value.register_all_owners()?;
+        value.set_kill_switch(
+            tokens.operator,
+            false,
+            "operator".to_owned(),
+            "documented release".to_owned(),
+            Some("release-evidence".to_owned()),
+        )?;
+        value.set_session_open(true)?;
+        value.set_snapshot_available(true)?;
+        value.set_reconciliation_blocked(
+            tokens.reconciliation,
+            false,
+            "verified replay".to_owned(),
+            Some("reconciliation-evidence".to_owned()),
+        )?;
+        Ok(value)
+    }
+
+    #[test]
+    fn recovery_latches_unresolved_oms_permits() -> TestResult {
+        let control = temp_path("control-unresolved");
+        let decisions = temp_path("decisions-unresolved");
+        let lock = temp_path("lock-unresolved");
+        let _ = std::fs::remove_file(&control);
+        let _ = std::fs::remove_file(&decisions);
+        let _ = std::fs::remove_file(&lock);
+
+        let first = ready_authority(&control, &decisions, &lock)?;
+        let reservation = first.evaluate_and_reserve(
+            intent(1, 2, PRICE, Side::Buy)?,
+            observation(&first)?,
+            None,
+        )?;
+        drop(first);
+
+        let digest = permit_digest(
+            reservation.permit_id,
+            &reservation.assessment.policy_version,
+            reservation.snapshot_revision,
+            &intent(1, 2, PRICE, Side::Buy)?,
+        );
+        let mut oms = OmsPermitRecord::new(
+            reservation.permit_id,
+            reservation.intent_id,
+            digest.clone(),
+            OmsPermitState::Unknown,
+            0,
+            0,
+        );
+        oms.seal(1, genesis_digest());
+        let (c, d) = file_stores(&control, &decisions);
+        let second = build_recovered(
+            &lock,
+            RecoveryRecords {
+                oms: vec![oms],
+                account: Vec::new(),
+            },
+            c,
+            d,
+        )?;
+        let snapshot = second.snapshot()?;
+        assert_eq!(
+            snapshot.unresolved_permits, 1,
+            "an UNKNOWN OMS outcome stays determinable after restart"
+        );
+        assert!(
+            snapshot.reconciliation_blocked,
+            "an unresolved permit latches reconciliation"
+        );
+        assert_eq!(
+            snapshot.reservation_count, 1,
+            "the unsettled reservation is retained"
+        );
+        let recovered = second.reservation(reservation.intent_id)?;
+        assert_eq!(
+            second.permit_digest(&recovered, &intent(1, 2, PRICE, Side::Buy)?)?,
+            digest,
+            "the recovered permit still binds the exact authorized intent"
+        );
+        let tokens = second.register_all_owners()?;
+        second.set_reconciliation_blocked(
+            tokens.reconciliation,
+            false,
+            "broker evidence resolved the unknown order".to_owned(),
+            Some("resolution-evidence".to_owned()),
+        )?;
+        assert!(
+            !second.snapshot()?.reconciliation_blocked,
+            "an authenticated resolution clears the latch"
+        );
+        assert_eq!(
+            second.snapshot()?.unresolved_permits,
+            1,
+            "the recovered unresolved fact remains visible"
+        );
+        drop(second);
+        let _ = std::fs::remove_file(&control);
+        let _ = std::fs::remove_file(&decisions);
+        let _ = std::fs::remove_file(&lock);
+        Ok(())
+    }
+
+    #[test]
+    fn recovery_remembers_rejected_intents() -> TestResult {
+        let control = temp_path("control-rejected");
+        let decisions = temp_path("decisions-rejected");
+        let lock = temp_path("lock-rejected");
+        let _ = std::fs::remove_file(&control);
+        let _ = std::fs::remove_file(&decisions);
+        let _ = std::fs::remove_file(&lock);
+
+        let first = ready_authority(&control, &decisions, &lock)?;
+        let oversized = intent(1, 11, PRICE, Side::Buy)?;
+        let rejected = first.evaluate_and_reserve(oversized.clone(), observation(&first)?, None);
+        assert!(
+            matches!(rejected, Err(AuthorityError::Rejected(_))),
+            "the oversized intent is rejected"
+        );
+        drop(first);
+
+        let (c, d) = file_stores(&control, &decisions);
+        let second = build_recovered(&lock, RecoveryRecords::default(), c, d)?;
+        let replay = second.evaluate_and_reserve(oversized, observation(&second)?, None);
+        assert!(
+            matches!(replay, Err(AuthorityError::PreviouslyRejected(_))),
+            "the durable rejection survives the restart"
+        );
+        drop(second);
+        let _ = std::fs::remove_file(&control);
+        let _ = std::fs::remove_file(&decisions);
+        let _ = std::fs::remove_file(&lock);
+        Ok(())
+    }
+
+    #[test]
+    fn recovery_requires_exclusive_and_readable_state() -> TestResult {
+        let control = temp_path("control-exclusive");
+        let decisions = temp_path("decisions-exclusive");
+        let lock = temp_path("lock-exclusive");
+        let _ = std::fs::remove_file(&control);
+        let _ = std::fs::remove_file(&decisions);
+        let _ = std::fs::remove_file(&lock);
+
+        let first = ready_authority(&control, &decisions, &lock)?;
+        let (c, d) = file_stores(&control, &decisions);
+        let competing = RiskAuthority::recover(RecoveryConfig {
+            account_id: AccountId::new(ACCOUNT)?,
+            policy: policy()?,
+            instruments: vec![instrument()?],
+            trade_date: date()?,
+            control: c,
+            decisions: d,
+            records: RecoveryRecords::default(),
+            sectors: BTreeMap::new(),
+            ownership_path: lock.to_path_buf(),
+        });
+        assert!(
+            matches!(competing, Err(RecoveryError::StateOwnership(_))),
+            "a second startup cannot own the same authority state"
+        );
+        drop(first);
+
+        std::fs::write(&control, "{broken\n")?;
+        let (c2, d2) = file_stores(&control, &decisions);
+        let corrupt = RiskAuthority::recover(RecoveryConfig {
+            account_id: AccountId::new(ACCOUNT)?,
+            policy: policy()?,
+            instruments: vec![instrument()?],
+            trade_date: date()?,
+            control: c2,
+            decisions: d2,
+            records: RecoveryRecords::default(),
+            sectors: BTreeMap::new(),
+            ownership_path: lock.to_path_buf(),
+        });
+        assert!(
+            matches!(corrupt, Err(RecoveryError::Control(_))),
+            "a corrupt control store is an explicit startup error"
+        );
+        let _ = std::fs::remove_file(&control);
+        let _ = std::fs::remove_file(&decisions);
+        let _ = std::fs::remove_file(&lock);
+        Ok(())
+    }
+}
+
 /// Recording a rejected decision mutates authority state, so it is versioned
 /// once and an idempotent replay of that decision is a no-op.
 #[test]
