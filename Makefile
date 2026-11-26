@@ -15,6 +15,10 @@
 #   bundle-verify   verify that same zip and its extracted BUNDLE_DIR
 #   tools           install the pinned Python tools
 # Gate scope is defined by the targets below and by the task runner.
+# Gate steps must not leave Python bytecode in the source tree: the generated
+# path gate inspects ignored untracked files as well as tracked ones.
+export PYTHONDONTWRITEBYTECODE := 1
+export PYTEST_ADDOPTS := $(strip $(PYTEST_ADDOPTS) -p no:cacheprovider)
 
 .PHONY: help ci assure check check-static lint test perf bench-ingress bench-risk-oms freeze-check synthetic-market-policy-check shellcheck-check generated-paths-check pollution-check style rust-style source-style python-ruff-style q-style standards-check style-gate python-format-check rust-test python-test python-check cpp-test cpp-format-check schema-check verify-local fmt constraints sbom supply-chain wheels packaging-test bundle bundle-verify git-policy kdb-analyze archive-verify tools
 

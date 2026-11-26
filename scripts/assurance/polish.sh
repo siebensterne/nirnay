@@ -16,6 +16,11 @@
 # taken before phase 0 so setup steps are covered too.
 set -euo pipefail
 
+# The generated-path gate inspects ignored untracked files, so the gate itself
+# must not leave Python bytecode or a pytest cache in the source tree.
+export PYTHONDONTWRITEBYTECODE=1
+export PYTEST_ADDOPTS="${PYTEST_ADDOPTS:-} -p no:cacheprovider"
+
 source "$(dirname "${BASH_SOURCE[0]}")/gate.sh"
 gate_cd_root
 

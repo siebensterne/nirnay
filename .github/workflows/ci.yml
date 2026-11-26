@@ -73,6 +73,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       NIRNAY_STYLE_BASE: origin/main
+      PYTHONDONTWRITEBYTECODE: "1"
     steps:
       # Full history is required so the added-lines gates can diff against main.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
