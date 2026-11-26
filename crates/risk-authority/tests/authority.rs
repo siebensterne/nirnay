@@ -2006,6 +2006,9 @@ mod recovery_tests {
     };
     use trading_core::permit_digest;
 
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+
     fn temp_path(label: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!(
             "nirnay-recovery-{label}-{}-{}.jsonl",
