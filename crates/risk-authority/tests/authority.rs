@@ -4052,8 +4052,13 @@ mod recovery_tests {
         let control = temp_path("control-foreign-snapshot");
         let decisions = temp_path("decisions-foreign-snapshot");
         let lock = temp_path("lock-foreign-snapshot");
-        let permits = temp_path("foreign-permits");
-        let executions = temp_path("foreign-executions");
+        // OwnerDirectory requires an owner-controlled journal directory; the
+        // shared system temp directory is group/world writable on CI hosts.
+        let journal_root = temp_root("foreign-snapshot-journals");
+        #[cfg(unix)]
+        std::fs::set_permissions(&journal_root, std::fs::Permissions::from_mode(0o700))?;
+        let permits = journal_root.join("foreign-permits.jsonl");
+        let executions = journal_root.join("foreign-executions.jsonl");
         for path in [&control, &decisions, &lock, &permits, &executions] {
             let _ = std::fs::remove_file(path);
         }
@@ -4065,7 +4070,7 @@ mod recovery_tests {
             &permits,
             &executions,
             &JournalIdentity::new(ObservationSource::Oms, AccountId::new(99)?, OMS_JOURNAL_ID),
-            &RecoveryAuthenticity::OwnerSignature(owner_key()),
+            &RecoveryAuthenticity::OwnerDirectory,
         )?;
         let (c1, d1) = file_stores(&control, &decisions);
         let wrong_account = RiskAuthority::recover(RecoveryConfig {
@@ -4093,7 +4098,7 @@ mod recovery_tests {
                 AccountId::new(ACCOUNT)?,
                 "some-other-journal",
             ),
-            &RecoveryAuthenticity::OwnerSignature(owner_key()),
+            &RecoveryAuthenticity::OwnerDirectory,
         )?;
         let (c2, d2) = file_stores(&control, &decisions);
         let wrong_journal = RiskAuthority::recover(RecoveryConfig {
