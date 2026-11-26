@@ -2510,7 +2510,7 @@ mod digest {
         0xc67178f2,
     ];
 
-    pub fn sha256_hex(bytes: &[u8]) -> String {
+    fn sha256(bytes: &[u8]) -> [u8; 32] {
         let mut message = bytes.to_vec();
         let bit_len = (message.len() as u64).wrapping_mul(8);
         message.push(0x80);
@@ -2580,11 +2580,64 @@ mod digest {
             state[6] = state[6].wrapping_add(g);
             state[7] = state[7].wrapping_add(h);
         }
-        let mut output = String::with_capacity(64);
-        for word in state {
-            output.push_str(&format!("{word:08x}"));
+        let mut output = [0_u8; 32];
+        for (chunk, word) in output.as_chunks_mut::<4>().0.iter_mut().zip(state) {
+            chunk.copy_from_slice(&word.to_be_bytes());
         }
         output
+    }
+
+    pub fn sha256_hex(bytes: &[u8]) -> String {
+        let mut output = String::with_capacity(64);
+        for byte in sha256(bytes) {
+            output.push_str(&format!("{byte:02x}"));
+        }
+        output
+    }
+
+    /// Domain-separated HMAC-SHA-256. An unkeyed chain digest cannot stand in
+    /// for an owner signature: without the key an attacker cannot forge a
+    /// binding over a different identity, head or schema.
+    pub fn hmac_sha256_hex(key: &[u8], message: &[u8]) -> String {
+        const BLOCK: usize = 64;
+        let mut ipad = [0x36_u8; BLOCK];
+        let mut opad = [0x5c_u8; BLOCK];
+        if key.len() > BLOCK {
+            let digest = sha256(key);
+            for (slot, byte) in ipad.iter_mut().zip(digest.iter()) {
+                *slot ^= byte;
+            }
+            for (slot, byte) in opad.iter_mut().zip(digest.iter()) {
+                *slot ^= byte;
+            }
+        } else {
+            for (index, byte) in key.iter().enumerate() {
+                ipad[index] ^= byte;
+                opad[index] ^= byte;
+            }
+        }
+        let mut inner = Vec::with_capacity(BLOCK.saturating_add(message.len()));
+        inner.extend_from_slice(&ipad);
+        inner.extend_from_slice(message);
+        let inner_digest = sha256(&inner);
+        let mut outer = Vec::with_capacity(BLOCK.saturating_add(inner_digest.len()));
+        outer.extend_from_slice(&opad);
+        outer.extend_from_slice(&inner_digest);
+        sha256_hex(&outer)
+    }
+
+    /// Compare two fixed-width hex signatures without an early exit.
+    pub fn constant_time_eq(left: &str, right: &str) -> bool {
+        let left = left.as_bytes();
+        let right = right.as_bytes();
+        if left.len() != right.len() {
+            return false;
+        }
+        let mut difference = 0_u8;
+        for (a, b) in left.iter().zip(right) {
+            difference |= a ^ b;
+        }
+        difference == 0
     }
 }
 
@@ -2650,10 +2703,14 @@ pub enum RecoveryError {
     DecisionStore(String),
     #[error("exclusive authority state ownership unavailable: {0}")]
     StateOwnership(String),
+    #[error("required recovery journal is missing: {0}")]
+    JournalMissing(PathBuf),
     #[error("recovery journal sequence is not contiguous: {0}")]
     Sequence(String),
     #[error("recovery journal digest continuity failed: {0}")]
     Digest(String),
+    #[error("recovery journal authenticity check failed: {0}")]
+    Authenticity(String),
     #[error("derived risk state disagrees with identified records: {0}")]
     Inconsistent(String),
     #[error("verified recovery snapshot was rejected: {0}")]
@@ -3164,6 +3221,586 @@ impl JournalIdentity {
     }
 }
 
+// --- Owner authenticity -----------------------------------------------------
+//
+// An unkeyed SHA-256 chain proves only that a sequence of records is internally
+// consistent: anyone who can write the journal can rewrite the whole chain.
+// Startup therefore requires an owner authenticity model. It is selected in
+// code by the owner of the startup process, never inferred from journal content
+// and never taken from a record the journal itself carries.
+
+/// Fixed journal names under an owner-controlled root. The startup loader joins
+/// these itself; application code never passes a journal path to it.
+pub const OMS_PERMITS_FILE: &str = "oms_permits.jsonl";
+pub const OMS_EXECUTIONS_FILE: &str = "oms_executions.jsonl";
+pub const ACCOUNT_JOURNAL_FILE: &str = "account_journal.jsonl";
+pub const DAILY_PNL_FILE: &str = "daily_pnl.json";
+pub const OMS_ANCHOR_FILE: &str = "oms_anchor.json";
+pub const ACCOUNT_ANCHOR_FILE: &str = "account_anchor.json";
+pub const BINDING_SUFFIX: &str = ".auth";
+
+const BINDING_DOMAIN: &str = "nirnay-recovery-binding-v1";
+const ANCHOR_DOMAIN: &str = "nirnay-recovery-anchor-v1";
+const AUTHENTICITY_SCHEMA: u32 = 1;
+
+/// Owner-held secret used to sign recovery bindings. A symmetric key lets the
+/// dependency-free verifier compute an HMAC-SHA-256; the secret never appears
+/// in a record and is never derived from journal content.
+#[derive(Clone, PartialEq, Eq)]
+pub struct OwnerSigningKey {
+    secret: Vec<u8>,
+}
+
+impl std::fmt::Debug for OwnerSigningKey {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("OwnerSigningKey { redacted }")
+    }
+}
+
+impl OwnerSigningKey {
+    /// An empty secret is rejected so a binding can never be signed with zero
+    /// effective key material.
+    pub fn new(secret: impl Into<Vec<u8>>) -> Result<Self, RecoveryError> {
+        let secret = secret.into();
+        if secret.is_empty() {
+            return Err(RecoveryError::Authenticity(
+                "owner signing key is empty".to_owned(),
+            ));
+        }
+        Ok(Self { secret })
+    }
+
+    #[must_use]
+    pub fn sign(&self, domain: &str, message: &str) -> String {
+        let mut preimage =
+            Vec::with_capacity(domain.len().saturating_add(message.len()).saturating_add(1));
+        preimage.extend_from_slice(domain.as_bytes());
+        preimage.push(0);
+        preimage.extend_from_slice(message.as_bytes());
+        digest::hmac_sha256_hex(&self.secret, &preimage)
+    }
+
+    fn matches(&self, domain: &str, message: &str, signature: &str) -> bool {
+        digest::constant_time_eq(&self.sign(domain, message), signature)
+    }
+}
+
+/// How startup establishes that a journal is owner-authentic rather than merely
+/// self-consistent. The model is code-selected; a journal cannot choose it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RecoveryAuthenticity {
+    /// Owner HMAC signatures over identity, sequence, head digest and schema.
+    OwnerSignature(OwnerSigningKey),
+    /// OS owner identity, owner-only write permissions, real files and a real
+    /// owner-controlled directory; symlinks and foreign directories fail.
+    OwnerDirectory,
+    /// Both mechanisms must pass. This is the production posture.
+    Strict(OwnerSigningKey),
+}
+
+impl RecoveryAuthenticity {
+    #[must_use]
+    fn key(&self) -> Option<&OwnerSigningKey> {
+        match self {
+            Self::OwnerSignature(key) | Self::Strict(key) => Some(key),
+            Self::OwnerDirectory => None,
+        }
+    }
+
+    #[must_use]
+    fn requires_os_owner(&self) -> bool {
+        matches!(self, Self::OwnerDirectory | Self::Strict(_))
+    }
+}
+
+fn source_tag(source: ObservationSource) -> String {
+    serde_json::to_value(source)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .unwrap_or_default()
+}
+
+fn sidecar_path(path: &Path) -> PathBuf {
+    let mut sidecar = path.to_path_buf();
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("journal");
+    sidecar.set_file_name(format!("{name}{BINDING_SUFFIX}"));
+    sidecar
+}
+
+fn read_auth_json<T: serde::de::DeserializeOwned>(
+    path: &Path,
+    what: &str,
+) -> Result<T, RecoveryError> {
+    let file = File::open(path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            RecoveryError::Authenticity(format!("{what} is missing: {}", path.display()))
+        } else {
+            RecoveryError::Authenticity(format!("{what} is unreadable: {error}"))
+        }
+    })?;
+    serde_json::from_reader(std::io::BufReader::new(file))
+        .map_err(|error| RecoveryError::Authenticity(format!("{what} is corrupt: {error}")))
+}
+
+fn read_required_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, RecoveryError> {
+    let file = File::open(path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            RecoveryError::JournalMissing(path.to_path_buf())
+        } else {
+            RecoveryError::Snapshot(format!("record {}: {error}", path.display()))
+        }
+    })?;
+    serde_json::from_reader(std::io::BufReader::new(file))
+        .map_err(|error| RecoveryError::Snapshot(format!("record {}: {error}", path.display())))
+}
+
+/// Owner-side check: the directory and every journal file must be real objects
+/// owned by one uid, with no group/other write bit and no symlink component at
+/// the file itself. Only Unix exposes owner identity without a dependency.
+#[cfg(unix)]
+fn check_owner_journal_paths(paths: &[&Path]) -> Result<(), RecoveryError> {
+    use std::os::unix::fs::MetadataExt;
+
+    let mut owner_uid: Option<u32> = None;
+    for path in paths {
+        let directory = path.parent().unwrap_or_else(|| Path::new("."));
+        let directory_meta = std::fs::symlink_metadata(directory).map_err(|error| {
+            RecoveryError::Authenticity(format!("journal directory is unreadable: {error}"))
+        })?;
+        if !directory_meta.file_type().is_dir() || directory_meta.file_type().is_symlink() {
+            return Err(RecoveryError::Authenticity(
+                "journal directory is not an owner-controlled real directory".to_owned(),
+            ));
+        }
+        if directory_meta.mode() & 0o022 != 0 {
+            return Err(RecoveryError::Authenticity(
+                "journal directory is group- or world-writable".to_owned(),
+            ));
+        }
+        let meta = match std::fs::symlink_metadata(path) {
+            Ok(meta) => meta,
+            // Let the reader report a missing required journal with its own
+            // typed failure instead of masking it as an authenticity error.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(RecoveryError::Authenticity(format!(
+                    "journal object is unreadable: {error}"
+                )));
+            }
+        };
+        if meta.file_type().is_symlink() {
+            return Err(RecoveryError::Authenticity(format!(
+                "journal path is a symlink: {}",
+                path.display()
+            )));
+        }
+        if !meta.file_type().is_file() {
+            return Err(RecoveryError::Authenticity(format!(
+                "journal path is not a regular file: {}",
+                path.display()
+            )));
+        }
+        if meta.mode() & 0o022 != 0 {
+            return Err(RecoveryError::Authenticity(format!(
+                "journal file is group- or world-writable: {}",
+                path.display()
+            )));
+        }
+        if directory_meta.uid() != meta.uid() {
+            return Err(RecoveryError::Authenticity(format!(
+                "journal file is not owned by the directory owner: {}",
+                path.display()
+            )));
+        }
+        match owner_uid {
+            None => owner_uid = Some(meta.uid()),
+            Some(uid) if uid == meta.uid() => {}
+            Some(_) => {
+                return Err(RecoveryError::Authenticity(
+                    "journal files have mixed owners".to_owned(),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn check_owner_journal_paths(_paths: &[&Path]) -> Result<(), RecoveryError> {
+    Err(RecoveryError::Authenticity(
+        "OS owner authenticity requires a Unix platform".to_owned(),
+    ))
+}
+
+#[cfg(unix)]
+fn check_owner_directory(path: &Path) -> Result<(), RecoveryError> {
+    use std::os::unix::fs::MetadataExt;
+
+    let meta = std::fs::symlink_metadata(path).map_err(|error| {
+        RecoveryError::Authenticity(format!("journal root is unreadable: {error}"))
+    })?;
+    if !meta.file_type().is_dir() || meta.file_type().is_symlink() {
+        return Err(RecoveryError::Authenticity(
+            "journal root is not an owner-controlled real directory".to_owned(),
+        ));
+    }
+    if meta.mode() & 0o022 != 0 {
+        return Err(RecoveryError::Authenticity(
+            "journal root is group- or world-writable".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn check_owner_directory(_path: &Path) -> Result<(), RecoveryError> {
+    Err(RecoveryError::Authenticity(
+        "OS owner authenticity requires a Unix platform".to_owned(),
+    ))
+}
+
+/// Keyed binding sidecar for one journal. It is written by the owner, not by
+/// the authority, and covers the identity, sequence, head digest, schema and
+/// the full state digest of the replayed journal.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecoveryBindingRecord {
+    pub schema_version: u32,
+    pub source: String,
+    pub account_id: AccountId,
+    pub journal_id: String,
+    pub record_count: u64,
+    pub first_sequence: u64,
+    pub last_sequence: u64,
+    pub head_digest: String,
+    pub state_digest: String,
+    pub signature: String,
+}
+
+impl RecoveryBindingRecord {
+    #[allow(clippy::too_many_arguments)] // every argument is a signed binding fact
+    fn preimage(
+        schema_version: u32,
+        source: &str,
+        account_id: AccountId,
+        journal_id: &str,
+        record_count: u64,
+        first_sequence: u64,
+        last_sequence: u64,
+        head_digest: &str,
+        state_digest: &str,
+    ) -> String {
+        serde_json::json!({
+            "schema_version": schema_version,
+            "source": source,
+            "account_id": account_id,
+            "journal_id": journal_id,
+            "record_count": record_count,
+            "first_sequence": first_sequence,
+            "last_sequence": last_sequence,
+            "head_digest": head_digest,
+            "state_digest": state_digest,
+        })
+        .to_string()
+    }
+
+    /// Owner-side seal. The caller must hold the owner key; no authority state
+    /// or private derivation is exposed to create this record.
+    #[allow(clippy::too_many_arguments)] // every argument is a required binding fact
+    pub fn seal(
+        key: &OwnerSigningKey,
+        identity: &JournalIdentity,
+        record_count: u64,
+        first_sequence: u64,
+        last_sequence: u64,
+        head_digest: &str,
+        state_digest: &str,
+    ) -> Result<Self, RecoveryError> {
+        let source = source_tag(identity.source);
+        let message = Self::preimage(
+            AUTHENTICITY_SCHEMA,
+            &source,
+            identity.account_id,
+            &identity.journal_id,
+            record_count,
+            first_sequence,
+            last_sequence,
+            head_digest,
+            state_digest,
+        );
+        Ok(Self {
+            schema_version: AUTHENTICITY_SCHEMA,
+            source,
+            account_id: identity.account_id,
+            journal_id: identity.journal_id.clone(),
+            record_count,
+            first_sequence,
+            last_sequence,
+            head_digest: head_digest.to_owned(),
+            state_digest: state_digest.to_owned(),
+            signature: key.sign(BINDING_DOMAIN, &message),
+        })
+    }
+
+    fn verify(
+        &self,
+        key: &OwnerSigningKey,
+        identity: &JournalIdentity,
+        derived: &DerivedBinding,
+    ) -> Result<(), RecoveryError> {
+        if self.schema_version != AUTHENTICITY_SCHEMA {
+            return Err(RecoveryError::Authenticity(
+                "unsupported owner binding schema".to_owned(),
+            ));
+        }
+        if self.source != source_tag(identity.source)
+            || self.account_id != identity.account_id
+            || self.journal_id != identity.journal_id
+        {
+            return Err(RecoveryError::Authenticity(
+                "owner signature is bound to another journal identity".to_owned(),
+            ));
+        }
+        if self.record_count != derived.record_count
+            || self.first_sequence != derived.first_sequence
+            || self.last_sequence != derived.last_sequence
+            || self.head_digest != derived.head_digest
+            || self.state_digest != derived.state_digest
+        {
+            return Err(RecoveryError::Authenticity(
+                "owner signature does not bind the replayed journal".to_owned(),
+            ));
+        }
+        let message = Self::preimage(
+            self.schema_version,
+            &self.source,
+            self.account_id,
+            &self.journal_id,
+            self.record_count,
+            self.first_sequence,
+            self.last_sequence,
+            &self.head_digest,
+            &self.state_digest,
+        );
+        if !key.matches(BINDING_DOMAIN, &message, &self.signature) {
+            return Err(RecoveryError::Authenticity(
+                "owner signature is forged or altered".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Independently protected terminal-head anchor. It is stored outside the
+/// journal, so replacing a journal with an older but internally valid prefix
+/// cannot hide a rollback. `counter` is only advanced by the owner when the
+/// terminal head is intentionally moved forward.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecoveryAnchor {
+    pub schema_version: u32,
+    pub counter: u64,
+    pub source: String,
+    pub account_id: AccountId,
+    pub journal_id: String,
+    pub sequence: u64,
+    pub head_digest: String,
+    pub signature: String,
+}
+
+impl RecoveryAnchor {
+    fn preimage(
+        schema_version: u32,
+        counter: u64,
+        source: &str,
+        account_id: AccountId,
+        journal_id: &str,
+        sequence: u64,
+        head_digest: &str,
+    ) -> String {
+        serde_json::json!({
+            "schema_version": schema_version,
+            "counter": counter,
+            "source": source,
+            "account_id": account_id,
+            "journal_id": journal_id,
+            "sequence": sequence,
+            "head_digest": head_digest,
+        })
+        .to_string()
+    }
+
+    /// Owner-side anchor for an OS-owner-controlled directory. It carries no
+    /// keyed signature; protection comes from the directory's owner-only write
+    /// permission, which the loader verifies before trusting it.
+    #[must_use]
+    pub fn for_owner_directory(
+        identity: &JournalIdentity,
+        counter: u64,
+        sequence: u64,
+        head_digest: &str,
+    ) -> Self {
+        Self {
+            schema_version: AUTHENTICITY_SCHEMA,
+            counter,
+            source: source_tag(identity.source),
+            account_id: identity.account_id,
+            journal_id: identity.journal_id.clone(),
+            sequence,
+            head_digest: head_digest.to_owned(),
+            signature: String::new(),
+        }
+    }
+
+    /// Owner-side seal of a terminal head. `counter` must be non-zero and is
+    /// advanced monotonically by the owner; the authority checks that the
+    /// anchor matches the exact head it re-derived from the journal.
+    pub fn seal(
+        key: &OwnerSigningKey,
+        identity: &JournalIdentity,
+        counter: u64,
+        sequence: u64,
+        head_digest: &str,
+    ) -> Result<Self, RecoveryError> {
+        if counter == 0 {
+            return Err(RecoveryError::Authenticity(
+                "anchor counter must be non-zero".to_owned(),
+            ));
+        }
+        let source = source_tag(identity.source);
+        let message = Self::preimage(
+            AUTHENTICITY_SCHEMA,
+            counter,
+            &source,
+            identity.account_id,
+            &identity.journal_id,
+            sequence,
+            head_digest,
+        );
+        Ok(Self {
+            schema_version: AUTHENTICITY_SCHEMA,
+            counter,
+            source,
+            account_id: identity.account_id,
+            journal_id: identity.journal_id.clone(),
+            sequence,
+            head_digest: head_digest.to_owned(),
+            signature: key.sign(ANCHOR_DOMAIN, &message),
+        })
+    }
+
+    fn check(
+        &self,
+        identity: &JournalIdentity,
+        checkpoint: &RecoveryCheckpoint,
+        authenticity: &RecoveryAuthenticity,
+    ) -> Result<(), RecoveryError> {
+        if self.schema_version != AUTHENTICITY_SCHEMA {
+            return Err(RecoveryError::Authenticity(
+                "unsupported terminal anchor schema".to_owned(),
+            ));
+        }
+        if self.counter == 0 {
+            return Err(RecoveryError::Authenticity(
+                "terminal anchor counter is not monotonic".to_owned(),
+            ));
+        }
+        if self.source != source_tag(identity.source)
+            || self.account_id != identity.account_id
+            || self.journal_id != identity.journal_id
+        {
+            return Err(RecoveryError::Authenticity(
+                "terminal anchor belongs to another journal identity".to_owned(),
+            ));
+        }
+        if self.counter < checkpoint.sequence {
+            return Err(RecoveryError::Authenticity(
+                "terminal anchor counter regressed behind the journal head".to_owned(),
+            ));
+        }
+        if self.sequence != checkpoint.sequence || self.head_digest != checkpoint.digest {
+            return Err(RecoveryError::Authenticity(
+                "journal rolled back behind its independently protected terminal head".to_owned(),
+            ));
+        }
+        if let Some(key) = authenticity.key() {
+            let message = Self::preimage(
+                self.schema_version,
+                self.counter,
+                &self.source,
+                self.account_id,
+                &self.journal_id,
+                self.sequence,
+                &self.head_digest,
+            );
+            if !key.matches(ANCHOR_DOMAIN, &message, &self.signature) {
+                return Err(RecoveryError::Authenticity(
+                    "terminal anchor signature is forged or altered".to_owned(),
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Owner-side helper that derives the exact binding facts the verifier will
+/// recompute, then signs them. It mirrors `bind_recovery_journal` so an owner
+/// can seal a journal without duplicating the derivation or reading authority
+/// internals.
+pub fn recovery_binding_record<T, S>(
+    key: &OwnerSigningKey,
+    identity: &JournalIdentity,
+    records: &[T],
+    supplement: &S,
+) -> Result<RecoveryBindingRecord, RecoveryError>
+where
+    T: ChainedRecord + Serialize,
+    S: Serialize,
+{
+    let derived = bind_recovery_journal(records, supplement)?;
+    RecoveryBindingRecord::seal(
+        key,
+        identity,
+        derived.record_count,
+        derived.first_sequence,
+        derived.last_sequence,
+        &derived.head_digest,
+        &derived.state_digest,
+    )
+}
+
+fn enforce_os_authenticity(
+    journal_paths: &[&Path],
+    binding_path: &Path,
+    authenticity: &RecoveryAuthenticity,
+) -> Result<(), RecoveryError> {
+    if authenticity.requires_os_owner() {
+        check_owner_journal_paths(journal_paths)?;
+        // In an OS-owner-only posture there is no keyed sidecar. If one is
+        // present it must still be owner-controlled; it is never required.
+        if std::fs::symlink_metadata(binding_path).is_ok() {
+            check_owner_journal_paths(&[binding_path])?;
+        }
+    }
+    Ok(())
+}
+
+fn enforce_key_authenticity(
+    binding_path: &Path,
+    identity: &JournalIdentity,
+    derived: &DerivedBinding,
+    authenticity: &RecoveryAuthenticity,
+) -> Result<(), RecoveryError> {
+    if let Some(key) = authenticity.key() {
+        let record: RecoveryBindingRecord = read_auth_json(binding_path, "owner binding sidecar")?;
+        record.verify(key, identity, derived)?;
+    }
+    Ok(())
+}
+
 /// Replay checkpoint a verified snapshot was reconstructed from. `None` means
 /// the verifier replayed the whole journal from the genesis digest.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -3199,14 +3836,20 @@ struct DerivedBinding {
     replay_checkpoint: Option<RecoveryCheckpoint>,
 }
 
+/// Read a required journal. A missing path is a distinct typed failure: it must
+/// never be silently converted into a valid empty journal. An empty journal is
+/// represented by a file that exists and contains no records; the caller binds
+/// that fact with the same signature and chain checks as any other prefix.
 fn read_recovery_journal<T: serde::de::DeserializeOwned>(
     path: &Path,
 ) -> Result<Vec<T>, RecoveryError> {
-    if !path.exists() {
-        return Ok(Vec::new());
-    }
-    let file = File::open(path)
-        .map_err(|error| RecoveryError::Snapshot(format!("journal {}: {error}", path.display())))?;
+    let file = File::open(path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            RecoveryError::JournalMissing(path.to_path_buf())
+        } else {
+            RecoveryError::Snapshot(format!("journal {}: {error}", path.display()))
+        }
+    })?;
     let mut records = Vec::new();
     for (index, line) in std::io::BufReader::new(file).lines().enumerate() {
         let line = line
@@ -3349,23 +3992,37 @@ pub struct VerifiedOmsSnapshot {
 
 impl VerifiedOmsSnapshot {
     /// Read and verify the owner's OMS journal from durable files, then seal a
-    /// snapshot bound to the supplied expected identity. Both streams must have
-    /// exact sequence and digest continuity.
+    /// snapshot bound to `expected`. Both streams must have exact sequence and
+    /// digest continuity, and the selected owner authenticity model must pass.
+    /// Callers that want paths discovered for them use [`RecoveryJournalRoot::load`].
     pub fn verify(
         permits_path: impl AsRef<Path>,
         executions_path: impl AsRef<Path>,
         expected: &JournalIdentity,
+        authenticity: &RecoveryAuthenticity,
     ) -> Result<Self, RecoveryError> {
         if expected.source != ObservationSource::Oms || expected.journal_id.trim().is_empty() {
             return Err(RecoveryError::Snapshot(
                 "invalid OMS journal identity".to_owned(),
             ));
         }
-        let permits: Vec<OmsPermitRecord> = read_recovery_journal(permits_path.as_ref())?;
-        let executions: Vec<ExecutionRecoveryRecord> =
-            read_recovery_journal(executions_path.as_ref())?;
+        let permits_path = permits_path.as_ref();
+        let executions_path = executions_path.as_ref();
+        enforce_os_authenticity(
+            &[permits_path, executions_path],
+            &sidecar_path(permits_path),
+            authenticity,
+        )?;
+        let permits: Vec<OmsPermitRecord> = read_recovery_journal(permits_path)?;
+        let executions: Vec<ExecutionRecoveryRecord> = read_recovery_journal(executions_path)?;
         verify_recovery_chain(&executions)?;
         let derived = bind_recovery_journal(&permits, &executions)?;
+        enforce_key_authenticity(
+            &sidecar_path(permits_path),
+            expected,
+            &derived,
+            authenticity,
+        )?;
         let binding = SnapshotBinding {
             identity: expected.clone(),
             schema_version: 1,
@@ -3392,6 +4049,15 @@ impl VerifiedOmsSnapshot {
         &self.executions
     }
 
+    /// The independently anchored terminal head of this journal.
+    #[must_use]
+    pub fn terminal_head(&self) -> RecoveryCheckpoint {
+        RecoveryCheckpoint {
+            sequence: self.binding.last_sequence,
+            digest: self.binding.head_digest.clone(),
+        }
+    }
+
     pub(crate) fn validate(&self, account_id: AccountId) -> Result<(), RecoveryError> {
         check_snapshot_identity(
             &self.binding,
@@ -3416,11 +4082,13 @@ pub struct VerifiedAccountSnapshot {
 
 impl VerifiedAccountSnapshot {
     /// Read and verify the owner's account journal and its sealed daily P&L
-    /// bundle from durable files, then bind the snapshot to `expected`.
+    /// bundle from durable files, then bind the snapshot to `expected`. Both
+    /// files are required and the selected owner authenticity model must pass.
     pub fn verify(
         accounts_path: impl AsRef<Path>,
         daily_pnl_path: impl AsRef<Path>,
         expected: &JournalIdentity,
+        authenticity: &RecoveryAuthenticity,
     ) -> Result<Self, RecoveryError> {
         if expected.source != ObservationSource::AccountJournal
             || expected.journal_id.trim().is_empty()
@@ -3429,18 +4097,22 @@ impl VerifiedAccountSnapshot {
                 "invalid account journal identity".to_owned(),
             ));
         }
-        let records: Vec<AccountRecoveryRecord> = read_recovery_journal(accounts_path.as_ref())?;
-        let daily_pnl: DailyPnlRecovery = if daily_pnl_path.as_ref().exists() {
-            let text = std::fs::read_to_string(daily_pnl_path.as_ref()).map_err(|error| {
-                RecoveryError::Snapshot(format!("daily pnl read failure: {error}"))
-            })?;
-            serde_json::from_str(&text).map_err(|error| {
-                RecoveryError::Snapshot(format!("daily pnl bundle is corrupt: {error}"))
-            })?
-        } else {
-            DailyPnlRecovery::default()
-        };
+        let accounts_path = accounts_path.as_ref();
+        let daily_pnl_path = daily_pnl_path.as_ref();
+        enforce_os_authenticity(
+            &[accounts_path, daily_pnl_path],
+            &sidecar_path(accounts_path),
+            authenticity,
+        )?;
+        let records: Vec<AccountRecoveryRecord> = read_recovery_journal(accounts_path)?;
+        let daily_pnl: DailyPnlRecovery = read_required_json(daily_pnl_path)?;
         let derived = bind_recovery_journal(&records, &daily_pnl)?;
+        enforce_key_authenticity(
+            &sidecar_path(accounts_path),
+            expected,
+            &derived,
+            authenticity,
+        )?;
         let binding = SnapshotBinding {
             identity: expected.clone(),
             schema_version: 1,
@@ -3467,6 +4139,15 @@ impl VerifiedAccountSnapshot {
         &self.daily_pnl
     }
 
+    /// The independently anchored terminal head of this journal.
+    #[must_use]
+    pub fn terminal_head(&self) -> RecoveryCheckpoint {
+        RecoveryCheckpoint {
+            sequence: self.binding.last_sequence,
+            digest: self.binding.head_digest.clone(),
+        }
+    }
+
     pub(crate) fn validate(&self, account_id: AccountId) -> Result<(), RecoveryError> {
         check_snapshot_identity(
             &self.binding,
@@ -3476,6 +4157,79 @@ impl VerifiedAccountSnapshot {
         )?;
         let derived = bind_recovery_journal(&self.records, &self.daily_pnl)?;
         check_derived_binding(&self.binding, &derived)
+    }
+}
+
+/// Owner-controlled journal root. Application code supplies only the directory
+/// the owner provisioned and the code-selected authenticity model; it cannot
+/// choose which files are treated as authoritative journals. All journal,
+/// binding-sidecar and terminal-anchor names are fixed here.
+#[derive(Clone, Debug)]
+pub struct RecoveryJournalRoot {
+    root: PathBuf,
+    authenticity: RecoveryAuthenticity,
+}
+
+impl RecoveryJournalRoot {
+    #[must_use]
+    pub fn new(root: impl Into<PathBuf>, authenticity: RecoveryAuthenticity) -> Self {
+        Self {
+            root: root.into(),
+            authenticity,
+        }
+    }
+
+    #[must_use]
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// Load both owner journals from paths derived from this root, enforce the
+    /// configured authenticity model, and reject a journal whose terminal head
+    /// does not match its independently protected anchor. An empty journal is
+    /// valid only when the file exists, is signed and is anchored at genesis.
+    pub fn load(
+        &self,
+        account_id: AccountId,
+    ) -> Result<(VerifiedOmsSnapshot, VerifiedAccountSnapshot), RecoveryError> {
+        if self.authenticity.requires_os_owner() {
+            check_owner_directory(&self.root)?;
+        }
+        let permits = self.root.join(OMS_PERMITS_FILE);
+        let executions = self.root.join(OMS_EXECUTIONS_FILE);
+        let accounts = self.root.join(ACCOUNT_JOURNAL_FILE);
+        let daily_pnl = self.root.join(DAILY_PNL_FILE);
+        let oms_anchor = self.root.join(OMS_ANCHOR_FILE);
+        let account_anchor = self.root.join(ACCOUNT_ANCHOR_FILE);
+
+        let oms_expected = JournalIdentity::new(ObservationSource::Oms, account_id, OMS_JOURNAL_ID);
+        let account_expected = JournalIdentity::new(
+            ObservationSource::AccountJournal,
+            account_id,
+            ACCOUNT_JOURNAL_ID,
+        );
+        let oms =
+            VerifiedOmsSnapshot::verify(&permits, &executions, &oms_expected, &self.authenticity)?;
+        let account = VerifiedAccountSnapshot::verify(
+            &accounts,
+            &daily_pnl,
+            &account_expected,
+            &self.authenticity,
+        )?;
+
+        if self.authenticity.requires_os_owner() {
+            check_owner_journal_paths(&[oms_anchor.as_path(), account_anchor.as_path()])?;
+        }
+        let oms_anchor_record: RecoveryAnchor = read_auth_json(&oms_anchor, "terminal anchor")?;
+        let account_anchor_record: RecoveryAnchor =
+            read_auth_json(&account_anchor, "terminal anchor")?;
+        oms_anchor_record.check(&oms_expected, &oms.terminal_head(), &self.authenticity)?;
+        account_anchor_record.check(
+            &account_expected,
+            &account.terminal_head(),
+            &self.authenticity,
+        )?;
+        Ok((oms, account))
     }
 }
 
@@ -5347,6 +6101,93 @@ mod tests {
         );
     }
 
+    #[test]
+    fn missing_journal_is_a_typed_failure_but_an_existing_empty_journal_is_not() {
+        let missing = unique_path("missing-journal");
+        let empty = unique_path("empty-journal");
+        let _ = std::fs::remove_file(&missing);
+        assert!(
+            matches!(
+                read_recovery_journal::<OmsPermitRecord>(&missing),
+                Err(RecoveryError::JournalMissing(path)) if path == missing
+            ),
+            "an absent required journal never collapses into an empty journal"
+        );
+
+        write_lines(&empty, &Vec::<OmsPermitRecord>::new());
+        assert_eq!(
+            read_recovery_journal::<OmsPermitRecord>(&empty).expect("existing empty journal"),
+            Vec::<OmsPermitRecord>::new(),
+            "an existing journal with no records is a valid empty journal"
+        );
+        verify_recovery_chain(&Vec::<OmsPermitRecord>::new())
+            .expect("an empty chain verifies from the genesis digest");
+
+        let _ = std::fs::remove_file(&empty);
+    }
+
+    #[test]
+    fn owner_signature_is_bound_to_identity_sequence_head_and_schema() {
+        let key = OwnerSigningKey::new(b"unit-owner-key".to_vec()).expect("key");
+        let identity = oms_identity();
+        let derived =
+            bind_recovery_journal(&[sealed_oms()], &Vec::<ExecutionRecoveryRecord>::new())
+                .expect("derived binding");
+        let binding = RecoveryBindingRecord::seal(
+            &key,
+            &identity,
+            derived.record_count,
+            derived.first_sequence,
+            derived.last_sequence,
+            &derived.head_digest,
+            &derived.state_digest,
+        )
+        .expect("seal");
+        binding
+            .verify(&key, &identity, &derived)
+            .expect("a correctly signed binding verifies");
+
+        let mut forged_identity = identity.clone();
+        forged_identity.journal_id = "some-other-journal".to_owned();
+        assert!(
+            matches!(
+                binding.verify(&key, &forged_identity, &derived),
+                Err(RecoveryError::Authenticity(_))
+            ),
+            "a signature cannot be replayed under another journal identity"
+        );
+
+        let other_key = OwnerSigningKey::new(b"attacker-key".to_vec()).expect("key");
+        assert!(
+            matches!(
+                binding.verify(&other_key, &identity, &derived),
+                Err(RecoveryError::Authenticity(_))
+            ),
+            "a signature made with another key is rejected"
+        );
+
+        let mut advanced = derived.clone();
+        advanced.last_sequence = 2;
+        assert!(
+            matches!(
+                binding.verify(&key, &identity, &advanced),
+                Err(RecoveryError::Authenticity(_))
+            ),
+            "a signature does not authorize a different sequence"
+        );
+
+        assert_eq!(
+            digest::hmac_sha256_hex(b"key", b"hello"),
+            digest::hmac_sha256_hex(b"key", b"hello"),
+            "the keyed digest is deterministic"
+        );
+        assert_ne!(
+            digest::hmac_sha256_hex(b"key", b"hello"),
+            digest::hmac_sha256_hex(b"other", b"hello"),
+            "the keyed digest depends on the key"
+        );
+    }
+
     // Test-only constructors. They live under #[cfg(test)] and are the only
     // way a test can seal a snapshot without going through the journal reader;
     // production callers have no equivalent path.
@@ -5490,10 +6331,23 @@ mod tests {
         let accounts = unique_path("corrupt-accounts");
         let pnl = unique_path("corrupt-pnl");
         let broken_chain = unique_path("broken-chain");
+        // A required companion journal still has to exist; it is an empty,
+        // existing record stream, not a missing path silently read as empty.
+        write_lines(&executions, &Vec::<ExecutionRecoveryRecord>::new());
         std::fs::write(&permits, "{not-json}\n").expect("write corrupt journal");
+        // Chain-corruption checks use a signing-key posture so the test does
+        // not depend on host-specific /tmp directory ownership semantics.
+        let owner_directory = RecoveryAuthenticity::OwnerSignature(
+            OwnerSigningKey::new(b"unit-owner-key".to_vec()).expect("key"),
+        );
         assert!(
             matches!(
-                VerifiedOmsSnapshot::verify(&permits, &executions, &oms_identity()),
+                VerifiedOmsSnapshot::verify(
+                    &permits,
+                    &executions,
+                    &oms_identity(),
+                    &owner_directory
+                ),
                 Err(RecoveryError::Snapshot(_))
             ),
             "an unparseable OMS journal cannot be sealed"
@@ -5504,7 +6358,12 @@ mod tests {
         write_lines(&broken_chain, std::slice::from_ref(&out_of_sequence));
         assert!(
             matches!(
-                VerifiedOmsSnapshot::verify(&broken_chain, &executions, &oms_identity()),
+                VerifiedOmsSnapshot::verify(
+                    &broken_chain,
+                    &executions,
+                    &oms_identity(),
+                    &owner_directory
+                ),
                 Err(RecoveryError::Sequence(_))
             ),
             "a broken OMS chain cannot be sealed"
@@ -5513,14 +6372,25 @@ mod tests {
         std::fs::write(&accounts, "{not-json}\n").expect("write corrupt account journal");
         assert!(
             matches!(
-                VerifiedAccountSnapshot::verify(&accounts, &pnl, &account_identity()),
+                VerifiedAccountSnapshot::verify(
+                    &accounts,
+                    &pnl,
+                    &account_identity(),
+                    &owner_directory
+                ),
                 Err(RecoveryError::Snapshot(_))
             ),
             "an unparseable account journal cannot be sealed"
         );
         std::fs::write(&pnl, "{not-json}\n").expect("write corrupt pnl bundle");
         assert!(
-            VerifiedAccountSnapshot::verify(&executions, &pnl, &account_identity()).is_err(),
+            VerifiedAccountSnapshot::verify(
+                &executions,
+                &pnl,
+                &account_identity(),
+                &owner_directory
+            )
+            .is_err(),
             "a corrupt daily pnl bundle cannot be sealed"
         );
 

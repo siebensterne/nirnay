@@ -10,6 +10,7 @@ use std::{
     sync::{
         Arc, //
         Barrier,
+        atomic::{AtomicU64, Ordering},
     },
     thread,
 };
@@ -1963,10 +1964,14 @@ fn observation_derived_changes_advance_revision() -> TestResult {
 mod recovery_tests {
     use super::*;
     use risk_authority::{
+        ACCOUNT_ANCHOR_FILE, //
+        ACCOUNT_JOURNAL_FILE,
         ACCOUNT_JOURNAL_ID,
-        AccountRecoveryRecord, //
+        AccountRecoveryRecord,
+        BINDING_SUFFIX,
         ControlError,
         ControlStore,
+        DAILY_PNL_FILE,
         DecisionOutcome,
         DecisionStore,
         FileControlStore,
@@ -1975,11 +1980,19 @@ mod recovery_tests {
         JournalIdentity,
         KillSwitchState,
         NoopControlStore,
+        OMS_ANCHOR_FILE,
+        OMS_EXECUTIONS_FILE,
         OMS_JOURNAL_ID,
+        OMS_PERMITS_FILE,
         OmsPermitRecord,
         OmsPermitState,
+        OwnerSigningKey,
+        RecoveryAnchor,
+        RecoveryAuthenticity,
+        RecoveryBindingRecord,
         RecoveryConfig,
         RecoveryError,
+        RecoveryJournalRoot,
         RiskDecisionRecord,
         VerifiedAccountSnapshot,
         VerifiedOmsSnapshot,
@@ -1989,8 +2002,12 @@ mod recovery_tests {
             Reservation,
         },
         genesis_digest,
+        recovery_binding_record,
     };
     use trading_core::permit_digest;
+
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
 
     fn temp_path(label: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!(
@@ -2001,6 +2018,21 @@ mod recovery_tests {
                 .expect("clock")
                 .as_nanos()
         ))
+    }
+
+    static NEXT_ROOT: AtomicU64 = AtomicU64::new(1);
+
+    /// Explicit, uniquely named owner-controlled directory: every fixture that
+    /// exercises startup loading names its root and its authenticity model.
+    fn temp_root(label: &str) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "nirnay-recovery-root-{label}-{}-{}",
+            std::process::id(),
+            NEXT_ROOT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("owner-controlled fixture root");
+        root
     }
 
     /// Raw fixture shape. It is sealed into opaque snapshots before recovery;
@@ -2034,6 +2066,11 @@ mod recovery_tests {
         )
     }
 
+    fn owner_key() -> OwnerSigningKey {
+        OwnerSigningKey::new(b"nirnay-test-owner-signing-key-20261127".to_vec())
+            .expect("test owner key")
+    }
+
     fn write_json_lines<T: serde::Serialize>(
         path: &std::path::Path,
         records: &[T],
@@ -2049,8 +2086,113 @@ mod recovery_tests {
         std::fs::write(path, text).map_err(|error| RecoveryError::Snapshot(error.to_string()))
     }
 
+    fn write_json<T: serde::Serialize>(
+        path: &std::path::Path,
+        value: &T,
+    ) -> Result<(), RecoveryError> {
+        let text = serde_json::to_string(value)
+            .map_err(|error| RecoveryError::Snapshot(error.to_string()))?;
+        std::fs::write(path, text).map_err(|error| RecoveryError::Snapshot(error.to_string()))
+    }
+
+    fn oms_head(records: &[OmsPermitRecord]) -> (u64, String) {
+        records
+            .last()
+            .map_or((0, genesis_digest().to_owned()), |record| {
+                (record.sequence, record.digest.clone())
+            })
+    }
+
+    fn account_head(records: &[AccountRecoveryRecord]) -> (u64, String) {
+        records
+            .last()
+            .map_or((0, genesis_digest().to_owned()), |record| {
+                (record.sequence, record.digest.clone())
+            })
+    }
+
+    /// Fixture owner action: lay down the four required files and both
+    /// independently protected terminal anchors under an owner-controlled root.
+    fn write_owner_root(
+        root: &std::path::Path,
+        records: &FixtureRecords,
+    ) -> Result<(), RecoveryError> {
+        write_json_lines(&root.join(OMS_PERMITS_FILE), &records.oms)?;
+        write_json_lines(&root.join(OMS_EXECUTIONS_FILE), &records.executions)?;
+        write_json_lines(&root.join(ACCOUNT_JOURNAL_FILE), &records.account)?;
+        write_json(&root.join(DAILY_PNL_FILE), &records.daily_pnl)?;
+        let (oms_sequence, oms_digest) = oms_head(&records.oms);
+        let (account_sequence, account_digest) = account_head(&records.account);
+        write_json(
+            &root.join(OMS_ANCHOR_FILE),
+            &RecoveryAnchor::for_owner_directory(
+                &oms_identity(),
+                oms_sequence.max(1),
+                oms_sequence,
+                &oms_digest,
+            ),
+        )?;
+        write_json(
+            &root.join(ACCOUNT_ANCHOR_FILE),
+            &RecoveryAnchor::for_owner_directory(
+                &account_identity(),
+                account_sequence.max(1),
+                account_sequence,
+                &account_digest,
+            ),
+        )
+    }
+
+    /// Fixture owner action: add keyed binding sidecars and signed anchors so
+    /// the strict authenticity model can be exercised explicitly.
+    fn write_signed_root(
+        root: &std::path::Path,
+        records: &FixtureRecords,
+        key: &OwnerSigningKey,
+    ) -> Result<(), RecoveryError> {
+        write_owner_root(root, records)?;
+        let oms_binding: RecoveryBindingRecord =
+            recovery_binding_record(key, &oms_identity(), &records.oms, &records.executions)?;
+        let account_binding: RecoveryBindingRecord = recovery_binding_record(
+            key,
+            &account_identity(),
+            &records.account,
+            &records.daily_pnl,
+        )?;
+        write_json(
+            &root.join(format!("{OMS_PERMITS_FILE}{BINDING_SUFFIX}")),
+            &oms_binding,
+        )?;
+        write_json(
+            &root.join(format!("{ACCOUNT_JOURNAL_FILE}{BINDING_SUFFIX}")),
+            &account_binding,
+        )?;
+        let (oms_sequence, oms_digest) = oms_head(&records.oms);
+        let (account_sequence, account_digest) = account_head(&records.account);
+        write_json(
+            &root.join(OMS_ANCHOR_FILE),
+            &RecoveryAnchor::seal(
+                key,
+                &oms_identity(),
+                oms_sequence.max(1),
+                oms_sequence,
+                &oms_digest,
+            )?,
+        )?;
+        write_json(
+            &root.join(ACCOUNT_ANCHOR_FILE),
+            &RecoveryAnchor::seal(
+                key,
+                &account_identity(),
+                account_sequence.max(1),
+                account_sequence,
+                &account_digest,
+            )?,
+        )
+    }
+
     /// Act as the two journal owners: write the durable journals, run the
-    /// authority's verifier, and hand startup only the sealed snapshots.
+    /// authority's startup loader, and hand startup only the sealed snapshots.
     fn verified_records_inner(
         mut records: FixtureRecords,
         fill_pnl: bool,
@@ -2061,27 +2203,312 @@ mod recovery_tests {
             records.daily_pnl = daily;
             records.account = journal;
         }
-        let permits = temp_path("fixture-permits");
-        let executions = temp_path("fixture-executions");
-        let accounts = temp_path("fixture-accounts");
-        let pnl = temp_path("fixture-pnl");
-        write_json_lines(&permits, &records.oms)?;
-        write_json_lines(&executions, &records.executions)?;
-        write_json_lines(&accounts, &records.account)?;
-        let pnl_text = serde_json::to_string(&records.daily_pnl)
-            .map_err(|error| RecoveryError::Snapshot(error.to_string()))?;
-        std::fs::write(&pnl, pnl_text)
-            .map_err(|error| RecoveryError::Snapshot(error.to_string()))?;
-        let oms = VerifiedOmsSnapshot::verify(&permits, &executions, &oms_identity())?;
-        let account = VerifiedAccountSnapshot::verify(&accounts, &pnl, &account_identity())?;
-        for path in [&permits, &executions, &accounts, &pnl] {
-            let _ = std::fs::remove_file(path);
-        }
+        let root = temp_root("fixture");
+        write_owner_root(&root, &records)?;
+        let (oms, account) = RecoveryJournalRoot::new(&root, RecoveryAuthenticity::OwnerDirectory)
+            .load(AccountId::new(ACCOUNT).expect("account"))?;
+        let _ = std::fs::remove_dir_all(&root);
         Ok(VerifiedFixtures { oms, account })
     }
 
     fn verified_records(records: FixtureRecords) -> Result<VerifiedFixtures, RecoveryError> {
         verified_records_inner(records, true)
+    }
+
+    // --- H7/H8: required journals and owner authenticity -------------------
+
+    #[test]
+    fn startup_load_rejects_a_missing_required_journal() -> TestResult {
+        let root = temp_root("missing-required-journal");
+        write_owner_root(&root, &FixtureRecords::default())?;
+        let missing = root.join(OMS_PERMITS_FILE);
+        std::fs::remove_file(&missing)?;
+        let result = RecoveryJournalRoot::new(&root, RecoveryAuthenticity::OwnerDirectory)
+            .load(AccountId::new(ACCOUNT)?);
+        assert!(
+            matches!(result, Err(RecoveryError::JournalMissing(path)) if path == missing),
+            "a missing required journal is a typed startup failure, not an empty journal"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+        Ok(())
+    }
+
+    #[test]
+    fn an_existing_valid_empty_journal_loads_under_both_authenticity_models() -> TestResult {
+        let key = owner_key();
+        for (label, authenticity) in [
+            ("owner-directory", RecoveryAuthenticity::OwnerDirectory),
+            ("owner-signature", RecoveryAuthenticity::Strict(key.clone())),
+        ] {
+            let root = temp_root(&format!("empty-{label}"));
+            write_signed_root(&root, &FixtureRecords::default(), &key)?;
+            let (oms, account) =
+                RecoveryJournalRoot::new(&root, authenticity).load(AccountId::new(ACCOUNT)?)?;
+            assert_eq!(oms.terminal_head().sequence, 0, "empty OMS head is genesis");
+            assert_eq!(
+                oms.terminal_head().digest,
+                genesis_digest(),
+                "empty OMS head is genesis"
+            );
+            assert_eq!(
+                account.terminal_head().sequence,
+                0,
+                "empty account head is genesis"
+            );
+            let _ = std::fs::remove_dir_all(&root);
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn symlinked_and_non_regular_journal_paths_are_rejected() -> TestResult {
+        let root = temp_root("symlink-and-file-type");
+        let outside = temp_path("symlink-target");
+        let records = FixtureRecords::default();
+        write_owner_root(&root, &records)?;
+        write_json_lines(&outside, &records.oms)?;
+        let permits = root.join(OMS_PERMITS_FILE);
+
+        std::fs::remove_file(&permits)?;
+        std::os::unix::fs::symlink(&outside, &permits)?;
+        let result = RecoveryJournalRoot::new(&root, RecoveryAuthenticity::OwnerDirectory)
+            .load(AccountId::new(ACCOUNT)?);
+        assert!(
+            matches!(result, Err(RecoveryError::Authenticity(_))),
+            "a symlink is not an owner-controlled journal file"
+        );
+
+        std::fs::remove_file(&permits)?;
+        std::fs::create_dir(&permits)?;
+        let result = RecoveryJournalRoot::new(&root, RecoveryAuthenticity::OwnerDirectory)
+            .load(AccountId::new(ACCOUNT)?);
+        assert!(
+            matches!(result, Err(RecoveryError::Authenticity(_))),
+            "a directory is not a journal file"
+        );
+
+        std::fs::remove_dir(&permits)?;
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_file(&outside);
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_group_or_world_writable_journal_directory_is_rejected() -> TestResult {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = temp_root("untrusted-directory");
+        write_owner_root(&root, &FixtureRecords::default())?;
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o777))?;
+        let result = RecoveryJournalRoot::new(&root, RecoveryAuthenticity::Strict(owner_key()))
+            .load(AccountId::new(ACCOUNT)?);
+        assert!(
+            matches!(result, Err(RecoveryError::Authenticity(_))),
+            "an owner-controlled root may not be group- or world-writable"
+        );
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))?;
+        let _ = std::fs::remove_dir_all(&root);
+        Ok(())
+    }
+
+    #[test]
+    fn forged_identity_and_foreign_key_bindings_are_rejected() -> TestResult {
+        let key = owner_key();
+        let root = temp_root("forged-identity");
+        write_signed_root(&root, &FixtureRecords::default(), &key)?;
+        let strict = RecoveryAuthenticity::Strict(key.clone());
+
+        // A caller-supplied identity cannot override the owner's signature.
+        let forged =
+            JournalIdentity::new(ObservationSource::Oms, AccountId::new(99)?, OMS_JOURNAL_ID);
+        let result = VerifiedOmsSnapshot::verify(
+            root.join(OMS_PERMITS_FILE),
+            root.join(OMS_EXECUTIONS_FILE),
+            &forged,
+            &strict,
+        );
+        assert!(
+            matches!(result, Err(RecoveryError::Authenticity(_))),
+            "a caller-supplied identity cannot replace the signed journal identity"
+        );
+
+        // A key the owner never held cannot authenticate a valid chain.
+        let attacker = RecoveryAuthenticity::Strict(
+            OwnerSigningKey::new(b"attacker-key".to_vec()).expect("attacker key"),
+        );
+        let result = RecoveryJournalRoot::new(&root, attacker).load(AccountId::new(ACCOUNT)?);
+        assert!(
+            matches!(result, Err(RecoveryError::Authenticity(_))),
+            "a valid unkeyed chain from an untrusted signer is rejected"
+        );
+
+        // Editing a signed binding after the fact fails the keyed check.
+        let sidecar = root.join(format!("{OMS_PERMITS_FILE}{BINDING_SUFFIX}"));
+        let mut binding: RecoveryBindingRecord =
+            serde_json::from_str(&std::fs::read_to_string(&sidecar)?)?;
+        binding.journal_id = "some-other-journal".to_owned();
+        write_json(&sidecar, &binding)?;
+        let result = RecoveryJournalRoot::new(&root, strict).load(AccountId::new(ACCOUNT)?);
+        assert!(
+            matches!(result, Err(RecoveryError::Authenticity(_))),
+            "a forged identity in a binding sidecar is rejected"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_valid_chain_from_an_untrusted_directory_is_rejected() -> TestResult {
+        use std::os::unix::fs::PermissionsExt;
+
+        let trusted = temp_root("valid-chain-source");
+        let untrusted = temp_root("valid-chain-copy");
+        let records = FixtureRecords::default();
+        write_owner_root(&trusted, &records)?;
+        for name in [OMS_PERMITS_FILE, OMS_EXECUTIONS_FILE] {
+            std::fs::copy(trusted.join(name), untrusted.join(name))?;
+        }
+        std::fs::set_permissions(&untrusted, std::fs::Permissions::from_mode(0o777))?;
+        let result = VerifiedOmsSnapshot::verify(
+            untrusted.join(OMS_PERMITS_FILE),
+            untrusted.join(OMS_EXECUTIONS_FILE),
+            &oms_identity(),
+            &RecoveryAuthenticity::OwnerDirectory,
+        );
+        assert!(
+            matches!(result, Err(RecoveryError::Authenticity(_))),
+            "an identical valid chain in an untrusted directory is not authoritative"
+        );
+        std::fs::set_permissions(&untrusted, std::fs::Permissions::from_mode(0o700))?;
+        let _ = std::fs::remove_dir_all(&trusted);
+        let _ = std::fs::remove_dir_all(&untrusted);
+        Ok(())
+    }
+
+    #[test]
+    fn rollback_to_an_older_but_valid_head_is_rejected() -> TestResult {
+        let key = owner_key();
+        let root = temp_root("rollback-older-head");
+        let mut first = OmsPermitRecord::new(
+            1,
+            IntentId::new(1).expect("intent"),
+            "a".repeat(64),
+            OmsPermitState::Open,
+            0,
+            0,
+        );
+        first.seal(1, genesis_digest());
+        let mut second = OmsPermitRecord::new(
+            2,
+            IntentId::new(2).expect("intent"),
+            "b".repeat(64),
+            OmsPermitState::Open,
+            0,
+            0,
+        );
+        second.seal(2, &first.digest);
+        let full = FixtureRecords {
+            oms: vec![first.clone(), second.clone()],
+            ..FixtureRecords::default()
+        };
+        write_signed_root(&root, &full, &key)?;
+        let (oms, _) = RecoveryJournalRoot::new(&root, RecoveryAuthenticity::Strict(key.clone()))
+            .load(AccountId::new(ACCOUNT)?)?;
+        assert_eq!(
+            oms.terminal_head().sequence,
+            2,
+            "anchor records the full head"
+        );
+
+        // Replace the journal with the older valid prefix and re-sign it with
+        // the owner key. Only the independent anchor still knows the rollback.
+        let prefix = FixtureRecords {
+            oms: vec![first],
+            ..FixtureRecords::default()
+        };
+        write_signed_root(&root, &prefix, &key)?;
+        // Restore the original, higher anchor after re-sealing the prefix.
+        let (sequence, digest) = oms_head(&full.oms);
+        write_json(
+            &root.join(OMS_ANCHOR_FILE),
+            &RecoveryAnchor::seal(&key, &oms_identity(), 2, sequence, &digest)?,
+        )?;
+        let result = RecoveryJournalRoot::new(&root, RecoveryAuthenticity::Strict(key))
+            .load(AccountId::new(ACCOUNT)?);
+        assert!(
+            matches!(result, Err(RecoveryError::Authenticity(_))),
+            "an older valid prefix cannot pass the independently protected head anchor"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+        Ok(())
+    }
+
+    #[test]
+    fn terminal_anchor_counter_regression_is_rejected() -> TestResult {
+        let root = temp_root("anchor-counter-regression");
+        write_owner_root(&root, &FixtureRecords::default())?;
+        let anchor = root.join(ACCOUNT_ANCHOR_FILE);
+        write_json(
+            &anchor,
+            &RecoveryAnchor::for_owner_directory(&account_identity(), 0, 0, genesis_digest()),
+        )?;
+        let result = RecoveryJournalRoot::new(&root, RecoveryAuthenticity::OwnerDirectory)
+            .load(AccountId::new(ACCOUNT)?);
+        assert!(
+            matches!(result, Err(RecoveryError::Authenticity(_))),
+            "a zero anchor counter is not a monotonic terminal anchor"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+        Ok(())
+    }
+
+    #[test]
+    fn correct_owner_controlled_load_succeeds_end_to_end() -> TestResult {
+        let key = owner_key();
+        let root = temp_root("correct-owner-load");
+        let (daily, journal) = daily_recovery_for_accounts(&[])?;
+        let records = FixtureRecords {
+            account: journal,
+            daily_pnl: daily,
+            ..FixtureRecords::default()
+        };
+        write_signed_root(&root, &records, &key)?;
+        let (oms, account) = RecoveryJournalRoot::new(&root, RecoveryAuthenticity::Strict(key))
+            .load(AccountId::new(ACCOUNT)?)?;
+
+        let control = temp_path("control-correct-owner");
+        let decisions = temp_path("decisions-correct-owner");
+        let lock = temp_path("lock-correct-owner");
+        for path in [&control, &decisions, &lock] {
+            let _ = std::fs::remove_file(path);
+        }
+        let authority = RiskAuthority::recover(RecoveryConfig {
+            account_id: AccountId::new(ACCOUNT)?,
+            policy: policy()?,
+            instruments: vec![instrument()?],
+            trade_date: date()?,
+            control: Box::new(FileControlStore::new(&control)),
+            decisions: Box::new(FileDecisionStore::new(&decisions)),
+            oms,
+            account,
+            sectors: BTreeMap::new(),
+            ownership_path: lock.clone(),
+        })?;
+        assert!(
+            authority.startup_error().is_none(),
+            "an owner-authenticated load reaches a usable recovered authority"
+        );
+
+        for path in [&control, &decisions, &lock] {
+            let _ = std::fs::remove_file(path);
+        }
+        let _ = std::fs::remove_dir_all(&root);
+        Ok(())
     }
 
     fn recover_with_inner(
@@ -3628,8 +4055,13 @@ mod recovery_tests {
         let control = temp_path("control-foreign-snapshot");
         let decisions = temp_path("decisions-foreign-snapshot");
         let lock = temp_path("lock-foreign-snapshot");
-        let permits = temp_path("foreign-permits");
-        let executions = temp_path("foreign-executions");
+        // OwnerDirectory requires an owner-controlled journal directory; the
+        // shared system temp directory is group/world writable on CI hosts.
+        let journal_root = temp_root("foreign-snapshot-journals");
+        #[cfg(unix)]
+        std::fs::set_permissions(&journal_root, std::fs::Permissions::from_mode(0o700))?;
+        let permits = journal_root.join("foreign-permits.jsonl");
+        let executions = journal_root.join("foreign-executions.jsonl");
         for path in [&control, &decisions, &lock, &permits, &executions] {
             let _ = std::fs::remove_file(path);
         }
@@ -3641,6 +4073,7 @@ mod recovery_tests {
             &permits,
             &executions,
             &JournalIdentity::new(ObservationSource::Oms, AccountId::new(99)?, OMS_JOURNAL_ID),
+            &RecoveryAuthenticity::OwnerDirectory,
         )?;
         let (c1, d1) = file_stores(&control, &decisions);
         let wrong_account = RiskAuthority::recover(RecoveryConfig {
@@ -3668,6 +4101,7 @@ mod recovery_tests {
                 AccountId::new(ACCOUNT)?,
                 "some-other-journal",
             ),
+            &RecoveryAuthenticity::OwnerDirectory,
         )?;
         let (c2, d2) = file_stores(&control, &decisions);
         let wrong_journal = RiskAuthority::recover(RecoveryConfig {
