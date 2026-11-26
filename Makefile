@@ -20,6 +20,12 @@
 export PYTHONDONTWRITEBYTECODE := 1
 export PYTEST_ADDOPTS := $(strip $(PYTEST_ADDOPTS) -p no:cacheprovider)
 
+# Added-line gates compare against a resolved commit, never a branch name.
+# If origin/main cannot be resolved the variable is empty and the q checker
+# fails closed instead of silently treating the diff as empty.
+Q_STYLE_BASE_SHA := $(shell git rev-parse --verify origin/main^{commit} 2>/dev/null)
+export Q_STYLE_BASE_SHA
+
 .PHONY: help ci assure check check-static lint test perf bench-ingress bench-risk-oms freeze-check synthetic-market-policy-check shellcheck-check generated-paths-check pollution-check style rust-style source-style python-ruff-style q-style standards-check style-gate python-format-check rust-test python-test python-check cpp-test cpp-format-check schema-check verify-local fmt constraints sbom supply-chain wheels packaging-test bundle bundle-verify git-policy kdb-analyze archive-verify tools
 
 help:

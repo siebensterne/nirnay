@@ -17,6 +17,6 @@ required_index_form = "t[`col]"
 [enforcement]
 checker = "scripts/check_q_style.py"
 self_test = "scripts/check_q_style.py --self-test"
-scope = "added .q lines relative to the configured base ref"
+scope = "added .q lines relative to Q_STYLE_BASE_SHA (a resolved commit)"
 pre_commit_hook = "q-style"
 waivers = "none"
