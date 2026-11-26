@@ -3,7 +3,7 @@
 """Check added q / kdb+ lines for mechanical style violations.
 
 The binding rule set is ``q.toml`` at the repository root. This checker
-loads it at import time, so editing the JSON changes enforcement and editing
+loads it at import time, so editing the TOML changes enforcement and editing
 the checker's constants cannot silently diverge from the published contract.
 The rules cover whitespace hygiene, the silent loader-stop bare ``/`` line,
 the ``count x < n`` precedence bug, and dotted column access inside a lambda
