@@ -40,6 +40,8 @@ jobs:
       # decision; the Python vector gate above still checks fact fixtures.
       - name: Clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Documentation
+        run: cargo xtask docs
   compile-budget:
     runs-on: ubuntu-latest
     steps:
