@@ -9,7 +9,11 @@
 
 use std::collections::BTreeSet;
 
-use account_journal::{FencingTerm, Journal, JournalError};
+use account_journal::{
+    FencingTerm, //
+    Journal,
+    JournalError,
+};
 use trading_core::{
     AccountId, DomainError, EventEnvelope, EventId, EventPayload, EventTimes, LogicalNanos, Paise,
     RunId, StoredBody, TradeDate, UtcNanos,
