@@ -152,9 +152,12 @@ pub enum SourceEventError {
     /// The connection epoch is zero.
     #[error("CONNECTION_EPOCH_INVALID: connection_epoch must be positive")]
     ConnectionEpoch,
-    /// A present provider sequence is zero.
-    #[error("PROVIDER_SEQUENCE_ZERO: a present provider_sequence must be positive")]
+    /// A present provider sequence is zero or outside the u64-or-null domain.
+    #[error("PROVIDER_SEQUENCE_ZERO: a present provider_sequence must be positive and in u64")]
     ProviderSequenceZero,
+    /// A present source timestamp is outside the u64-or-null domain.
+    #[error("INVALID_SOURCE_TIMESTAMP: source_timestamp_ns is neither null nor a u64")]
+    SourceTimestamp,
     /// The epoch receive time is zero.
     #[error("RECEIVE_UTC_INVALID: receive_utc_ns must be positive")]
     ReceiveUtc,
@@ -207,6 +210,7 @@ impl SourceEventError {
             Self::EmptyField { .. } => "SOURCE_FIELD_EMPTY",
             Self::ConnectionEpoch => "CONNECTION_EPOCH_INVALID",
             Self::ProviderSequenceZero => "PROVIDER_SEQUENCE_ZERO",
+            Self::SourceTimestamp => "INVALID_SOURCE_TIMESTAMP",
             Self::ReceiveUtc => "RECEIVE_UTC_INVALID",
             Self::ReceiveMonotonic => "RECEIVE_MONOTONIC_INVALID",
             Self::DigestMalformed { .. } => "DIGEST_MALFORMED",
@@ -235,6 +239,7 @@ impl SourceEventError {
             Self::EmptyField { .. } => "EMPTY_REQUIRED_STRING",
             Self::ConnectionEpoch => "INVALID_CONNECTION_EPOCH",
             Self::ProviderSequenceZero => "INVALID_PROVIDER_SEQUENCE",
+            Self::SourceTimestamp => "INVALID_SOURCE_TIMESTAMP",
             Self::ReceiveUtc | Self::ReceiveMonotonic => "INVALID_RECEIVE_TIME",
             Self::DigestMalformed { .. } => "INVALID_DIGEST_FORMAT",
             Self::DigestMismatch => "ENVELOPE_DIGEST_MISMATCH",
@@ -249,10 +254,27 @@ impl SourceEventError {
 
 impl SourceEvent {
     /// Parse one strict JSON envelope, rejecting duplicate and unknown fields.
+    ///
+    /// Numbers outside the declared u64-or-null domain are classified before
+    /// typed deserialization: otherwise serde collapses a negative or
+    /// out-of-range integer into a generic parse error and the normative field
+    /// code would be unreachable. Duplicate members are still rejected by the
+    /// strict parser before this classification runs.
     pub fn parse(bytes: &[u8]) -> Result<Self, SourceEventError> {
         let value = crate::jcs::parse_strict(bytes).map_err(|error| SourceEventError::Parse {
             detail: error.to_string(),
         })?;
+        if let Some(members) = value.as_object() {
+            if number_outside_u64(members, "connection_epoch") {
+                return Err(SourceEventError::ConnectionEpoch);
+            }
+            if number_outside_u64(members, "provider_sequence") {
+                return Err(SourceEventError::ProviderSequenceZero);
+            }
+            if number_outside_u64(members, "source_timestamp_ns") {
+                return Err(SourceEventError::SourceTimestamp);
+            }
+        }
         serde_json::from_value(value).map_err(|error| SourceEventError::Parse {
             detail: error.to_string(),
         })
@@ -457,6 +479,15 @@ impl SourceEvent {
         );
         members.into_iter().collect()
     }
+}
+
+/// True when a member is a JSON number that cannot be a u64.
+///
+/// A missing member, an explicit `null` and non-number types are left to the
+/// existing strict deserializer: only numeric values that serde would collapse
+/// into a generic parse error are classified here.
+fn number_outside_u64(members: &Map<String, Value>, field: &str) -> bool {
+    matches!(members.get(field), Some(Value::Number(number)) if number.as_u64().is_none())
 }
 
 fn option_u64_value(value: Option<u64>) -> Value {

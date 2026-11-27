@@ -397,3 +397,73 @@ fn normative_codes_are_stable_for_identical_conditions() {
         "quarantine is a structural-valid record, refused only at admission"
     );
 }
+
+fn valid_fixture_event() -> Result<Value, Box<dyn std::error::Error>> {
+    let bytes = fs::read(fixture_path("VAL-001.json"))?;
+    assert_eq!(
+        sha256_hex(&bytes),
+        "9ced8f95f6ffc3ff3ac9940a85a3bd6d791315b748c1791b467469f3fe4601c7",
+        "VAL-001 bytes match the canonical fixture"
+    );
+    let fixture: Value = serde_json::from_slice(&bytes)?;
+    Ok(fixture["events"][0].clone())
+}
+
+#[test]
+fn out_of_domain_numbers_use_field_specific_normative_codes()
+-> Result<(), Box<dyn std::error::Error>> {
+    let base = valid_fixture_event()?;
+    let negative = Value::from(-1_i64);
+    let too_large: Value = serde_json::from_str("18446744073709551616")?;
+
+    for (field, code) in [
+        ("connection_epoch", "INVALID_CONNECTION_EPOCH"),
+        ("provider_sequence", "INVALID_PROVIDER_SEQUENCE"),
+        ("source_timestamp_ns", "INVALID_SOURCE_TIMESTAMP"),
+    ] {
+        for out_of_domain in [&negative, &too_large] {
+            let mut member = base.clone();
+            member[field] = out_of_domain.clone();
+            let bytes = serde_json::to_vec(&member)?;
+            assert_eq!(
+                outcome(SourceEvent::parse(&bytes)),
+                code,
+                "{field} outside the u64-or-null domain maps to {code}"
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn zero_and_null_domain_values_keep_their_existing_codes() -> Result<(), Box<dyn std::error::Error>>
+{
+    let base = valid_fixture_event()?;
+    let mut zero_epoch = base.clone();
+    zero_epoch["connection_epoch"] = Value::from(0_u64);
+    let zero_epoch = SourceEvent::parse(&serde_json::to_vec(&zero_epoch)?)?;
+    assert_eq!(
+        outcome(zero_epoch.validate()),
+        "INVALID_CONNECTION_EPOCH",
+        "a zero connection epoch keeps its field-specific code"
+    );
+
+    let mut zero_provider = base.clone();
+    zero_provider["provider_sequence"] = Value::from(0_u64);
+    let zero_provider = SourceEvent::parse(&serde_json::to_vec(&zero_provider)?)?;
+    assert_eq!(
+        outcome(zero_provider.validate()),
+        "INVALID_PROVIDER_SEQUENCE",
+        "a present zero provider sequence keeps its field-specific code"
+    );
+
+    let mut null_timestamp = base.clone();
+    null_timestamp["source_timestamp_ns"] = Value::Null;
+    let null_timestamp = SourceEvent::parse(&serde_json::to_vec(&null_timestamp)?)?;
+    assert_eq!(
+        outcome(null_timestamp.validate()),
+        ACCEPTED,
+        "an absent source timestamp stays null and is never synthesized"
+    );
+    Ok(())
+}
