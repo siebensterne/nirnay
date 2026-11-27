@@ -12,6 +12,19 @@
 //!
 //! Every refusal is final for that event. No downstream consumer is invoked on
 //! any refusal path and no partial state is consumed.
+//!
+//! # Known limitation: event-to-receipt binding
+//!
+//! `admit()` currently receives the expected envelope digest and receipt
+//! digest as trusted, out-of-band values. It verifies that the candidate event
+//! and receipt match those digests, but it does not derive the event bytes
+//! from a verified NDC manifest artifact. Matching a caller-supplied digest is
+//! therefore not proof that the event is a member of the admitted release. A
+//! future admitted release must derive the event bytes from verified NDC
+//! manifest artifact membership and bind that membership to the receipt before
+//! any positive admission is allowed. No such positive path exists here: the
+//! admitted rights and accepted dataset states are test-only, and production
+//! always refuses.
 
 use crate::receipt::AdmissionReceipt;
 use crate::source_event::ContinuityState;
@@ -138,6 +151,10 @@ impl AdmissionError {
 /// Checks run in a fixed order and the first refusal stops processing. The
 /// sink is reached only after every gate passes; a refusal leaves no partial
 /// consumption behind.
+///
+/// The expected digests remain trusted out-of-band inputs (see the module-level
+/// event-to-receipt binding limitation); this function does not establish
+/// manifest artifact membership and grants no right.
 pub fn admit(input: AdmissionInput<'_>, sink: &dyn SourceEventSink) -> Result<(), AdmissionError> {
     let AdmissionInput {
         envelope,
