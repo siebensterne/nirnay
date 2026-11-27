@@ -262,15 +262,6 @@ fn every_projection_mutation_class_refuses_a_stale_term() -> TestResult {
     let mut projector = Projector::open(directory.path().join("ledger"), AccountId::new(1)?)?;
     let stale: JournalFencingToken = projector.fence("owner-a")?;
     let current: JournalFencingToken = projector.fence("owner-b")?;
-    projector.open_account_fenced(
-        &current,
-        "paper",
-        Paise(1_000_000),
-        TradeDate::new(2026, 1, 1)?,
-        opening_evidence(),
-    )?;
-
-    let event = fill("exec-1", "fill-evt-1", 1);
     let is_stale = |error: &authoritative_oms::ProjectionError| {
         matches!(
             error,
@@ -279,6 +270,36 @@ fn every_projection_mutation_class_refuses_a_stale_term() -> TestResult {
             )
         )
     };
+    assert_journal_stale(
+        projector.open_account_fenced(
+            &stale,
+            "other-scope",
+            Paise(1_000_000),
+            TradeDate::new(2026, 1, 1)?,
+            opening_evidence(),
+        ),
+        is_stale,
+        "opening balance",
+    );
+    assert_eq!(
+        projector.verification_report().record_count,
+        0,
+        "a refused opening must not append a journal record"
+    );
+    projector.open_account_fenced(
+        &current,
+        "paper",
+        Paise(1_000_000),
+        TradeDate::new(2026, 1, 1)?,
+        opening_evidence(),
+    )?;
+    assert_eq!(
+        projector.verification_report().record_count,
+        1,
+        "only the current owner's opening was appended"
+    );
+
+    let event = fill("exec-1", "fill-evt-1", 1);
     assert_journal_stale(
         projector.project_fill_fenced(
             &stale,
@@ -311,7 +332,7 @@ fn every_projection_mutation_class_refuses_a_stale_term() -> TestResult {
     assert_eq!(
         projector.verification_report().record_count,
         1,
-        "only the current owner's opening was appended"
+        "no refused mutation appended a journal record"
     );
     Ok(())
 }
