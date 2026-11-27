@@ -159,7 +159,9 @@ struct RunReport {
     dataset_sha256: String,
     input_rows: u64,
     quotes_accepted: u64,
-    intent_submitted: bool,
+    /// Whether the decision was recorded in the paper journal. This does not
+    /// assert risk acceptance, order creation, dispatch or a fill.
+    decision_recorded: bool,
     decision_deduplicated: bool,
     journal_records: usize,
     journal_sha256: String,
@@ -452,6 +454,68 @@ fn journal_digest(path: &Path) -> anyhow::Result<String> {
     Ok(format!("{:x}", hasher.finalize()))
 }
 
+/// Domain separator for the decision build-identity digest.
+const BUILD_IDENTITY_DOMAIN: &[u8] = b"paper-run-decision-build-identity-v1\0";
+
+/// Reject an unbound, malformed or zero build identity before a decision is
+/// constructed. A decision may only carry a digest derived from the executing
+/// artifact and the run inputs.
+fn validate_build_identity(hex: &str) -> anyhow::Result<()> {
+    ensure!(
+        hex.len() == 64
+            && hex
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+            && hex.bytes().any(|byte| byte != b'0'),
+        "decision build identity must be a non-zero 64-character lowercase hex digest"
+    );
+    Ok(())
+}
+
+/// Compute a deterministic build identity from explicit binary bytes.
+///
+/// This binds a decision to the binary artifact actually executed, together
+/// with the operator spec bytes and the strategy version/configuration
+/// digest. It is not a claim about source-code truth or rights over the
+/// inputs; it identifies what this process ran.
+fn build_identity_digest(
+    executable_bytes: &[u8],
+    spec_bytes: &[u8],
+    strategy_version: &str,
+    configuration_hash: &str,
+) -> anyhow::Result<String> {
+    let mut hasher = Sha256::new();
+    hasher.update(BUILD_IDENTITY_DOMAIN);
+    hasher.update((executable_bytes.len() as u64).to_be_bytes());
+    hasher.update(executable_bytes);
+    hasher.update((spec_bytes.len() as u64).to_be_bytes());
+    hasher.update(spec_bytes);
+    hasher.update(strategy_version.as_bytes());
+    hasher.update([0]);
+    hasher.update(configuration_hash.as_bytes());
+    let digest = format!("{:x}", hasher.finalize());
+    validate_build_identity(&digest)?;
+    Ok(digest)
+}
+
+/// Bind the decision to the exact binary artifact running this session.
+/// Replaying the same binary with the same spec reproduces the same digest.
+fn source_build_hash(
+    spec_bytes: &[u8],
+    strategy_version: &str,
+    configuration_hash: &str,
+) -> anyhow::Result<String> {
+    let executable = std::env::current_exe().context("locating current executable")?;
+    let executable_bytes = std::fs::read(&executable)
+        .with_context(|| format!("reading executing binary {}", executable.display()))?;
+    build_identity_digest(
+        &executable_bytes,
+        spec_bytes,
+        strategy_version,
+        configuration_hash,
+    )
+}
+
 fn run(args: Args) -> anyhow::Result<()> {
     ensure!(args.spec.is_file(), "run spec does not exist");
     let events_path = args.dataset.join("events.jsonl");
@@ -620,14 +684,17 @@ fn run(args: Args) -> anyhow::Result<()> {
     ensure!(input_rows > 0, "dataset is empty");
     ensure!(quotes_accepted > 0, "no quotes were accepted by the engine");
 
-    let mut intent_submitted = false;
+    let mut decision_recorded = false;
     let mut decision_deduplicated = false;
     if let Some((event, intent)) = trigger {
+        let configuration_hash = format!("{:x}", Sha256::digest(&spec_bytes));
+        let source_build_hash =
+            source_build_hash(&spec_bytes, &spec.strategy_version, &configuration_hash)?;
         let decision = DecisionRecord {
             strategy_id: intent.strategy_id,
             strategy_version: intent.strategy_version.clone(),
-            source_build_hash: "0".repeat(64),
-            configuration_hash: format!("{:x}", Sha256::digest(&spec_bytes)),
+            source_build_hash,
+            configuration_hash,
             dataset_hash: dataset_digest(&events_path)?,
             input_refs: match &replay_evidence {
                 Some(reference) => vec![reference.clone()],
@@ -663,7 +730,7 @@ fn run(args: Args) -> anyhow::Result<()> {
             let outcome = engine
                 .submit_decision(decision, submit_times)
                 .context("submitting strategy decision")?;
-            intent_submitted = true;
+            decision_recorded = true;
             decision_deduplicated = outcome.deduplicated;
         }
     }
@@ -697,7 +764,7 @@ fn run(args: Args) -> anyhow::Result<()> {
         dataset_sha256: dataset_digest(&events_path)?,
         input_rows,
         quotes_accepted,
-        intent_submitted,
+        decision_recorded,
         decision_deduplicated,
         journal_records: engine.records().len(),
         journal_sha256: journal_digest(&journal_path)?,
@@ -728,10 +795,10 @@ fn run(args: Args) -> anyhow::Result<()> {
     let bytes = serde_json::to_vec_pretty(&report).context("serializing run report")?;
     std::fs::write(&report_path, bytes).context("writing run report")?;
     eprintln!(
-        "paper_run rows={rows} quotes={quotes} intent={intent} dedup={dedup} records={records}",
+        "paper_run rows={rows} quotes={quotes} decision={decision} dedup={dedup} records={records}",
         rows = report.input_rows,
         quotes = report.quotes_accepted,
-        intent = report.intent_submitted,
+        decision = report.decision_recorded,
         dedup = report.decision_deduplicated,
         records = report.journal_records
     );
@@ -740,4 +807,88 @@ fn run(args: Args) -> anyhow::Result<()> {
 
 fn main() -> anyhow::Result<()> {
     run(Args::parse())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        build_identity_digest, //
+        validate_build_identity,
+    };
+
+    const EXECUTABLE_BYTES: &[u8] = b"synthetic-executable-artifact-bytes";
+    const CONFIGURATION_HASH: &str =
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    #[test]
+    fn build_identity_is_nonzero_lowercase_hex_and_input_bound() {
+        let first = build_identity_digest(
+            EXECUTABLE_BYTES,
+            b"spec-alpha",
+            "strategy-v1",
+            CONFIGURATION_HASH,
+        )
+        .unwrap_or_default();
+        assert_eq!(first.len(), 64, "digest must be 64 characters");
+        assert!(
+            first
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+            "digest must be lowercase hex"
+        );
+        assert!(
+            first.bytes().any(|byte| byte != b'0'),
+            "digest must be non-zero"
+        );
+
+        let repeated = build_identity_digest(
+            EXECUTABLE_BYTES,
+            b"spec-alpha",
+            "strategy-v1",
+            CONFIGURATION_HASH,
+        )
+        .unwrap_or_default();
+        assert_eq!(
+            first, repeated,
+            "same artifact and spec must reproduce the digest"
+        );
+
+        let changed_spec = build_identity_digest(
+            EXECUTABLE_BYTES,
+            b"spec-beta",
+            "strategy-v1",
+            CONFIGURATION_HASH,
+        )
+        .unwrap_or_default();
+        assert_ne!(first, changed_spec, "spec bytes must change the digest");
+
+        let changed_binary = build_identity_digest(
+            b"other-executable-artifact-bytes",
+            b"spec-alpha",
+            "strategy-v1",
+            CONFIGURATION_HASH,
+        )
+        .unwrap_or_default();
+        assert_ne!(first, changed_binary, "binary bytes must change the digest");
+    }
+
+    #[test]
+    fn build_identity_rejects_zero_and_unbound_values() {
+        let rejected = [
+            "0".repeat(64),
+            "g".repeat(64),
+            "A".repeat(64),
+            "abc".to_owned(),
+        ];
+        for value in rejected {
+            assert!(
+                validate_build_identity(&value).is_err(),
+                "unbound value {value} must be rejected"
+            );
+        }
+        assert!(
+            validate_build_identity(CONFIGURATION_HASH).is_ok(),
+            "a well-formed digest must be accepted"
+        );
+    }
 }
