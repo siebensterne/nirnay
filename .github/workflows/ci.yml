@@ -42,6 +42,13 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Documentation
         run: cargo xtask docs
+      # Neutral harness: compile it and run only the tiny deterministic
+      # self-test. The self-test writes a JSON artifact outside the checkout
+      # and emits no performance numbers used as a gate or threshold.
+      - name: Compile neutral benchmark harness
+        run: cargo bench --locked -p trading-core --bench neutral_decisions --no-run
+      - name: Neutral benchmark harness self-test
+        run: cargo bench --locked -p trading-core --bench neutral_decisions -- --self-test
   compile-budget:
     runs-on: ubuntu-latest
     steps:

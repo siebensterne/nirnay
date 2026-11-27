@@ -30,3 +30,10 @@ workspace = true
 name = "contracts"
 path = "tests/contracts.rs"
 required-features = ["market-shaped-tests"]
+
+# Neutral, std-only benchmark harness. The source lives in the workspace-level
+# benches/ directory; enabling market-shaped-tests is neither required nor used.
+[[bench]]
+name = "neutral_decisions"
+path = "../../benches/neutral_decisions.rs"
+harness = false
