@@ -18,6 +18,10 @@ path = "tests/verifier.rs"
 name = "canonical_wire"
 path = "tests/canonical_wire.rs"
 
+[[test]]
+name = "contract_conformance"
+path = "tests/contract_conformance.rs"
+
 [dependencies]
 base64.workspace = true
 ed25519-dalek.workspace = true

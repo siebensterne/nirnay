@@ -21,6 +21,11 @@
 //! LEGACY_BUFFERED, keep their caller-owned policy and remain for existing
 //! callers. A streaming refusal returns to its caller; the buffered verifiers
 //! are not fallback paths and a rejection is not retried through them.
+//!
+//! The independent source-event validator reports normative v1 rejection codes
+//! through [`SourceEventError::normative_code`]. Conformance evidence compares
+//! those codes, never a display string, and never turns a valid envelope into
+//! a rights grant or a dataset acceptance.
 
 pub mod admission;
 pub mod canonical_wire;
@@ -106,6 +111,7 @@ pub use source_event::QualityState;
 pub use source_event::SequenceLedger;
 pub use source_event::SourceEvent;
 pub use source_event::SourceEventError;
+pub use source_event::V1_SCHEMA_VERSION;
 pub use trust::KeyState;
 pub use trust::TrustedKeyEntry;
 pub use trust::TrustedKeyRegistry;
