@@ -22,6 +22,7 @@
 //! callers. A streaming refusal returns to its caller; the buffered verifiers
 //! are not fallback paths and a rejection is not retried through them.
 
+pub mod admission;
 pub mod canonical_wire;
 pub mod error;
 pub mod files;
@@ -31,6 +32,7 @@ pub mod profile_resolver;
 pub mod receipt;
 pub mod resource_profile;
 pub mod schema;
+pub mod source_event;
 pub mod streaming;
 pub mod trust;
 pub mod verifier;
@@ -38,12 +40,24 @@ pub mod verifier;
 #[cfg(test)]
 extern crate self as release_verifier;
 #[cfg(test)]
+#[path = "../tests/admission.rs"]
+mod admission_tests;
+#[cfg(test)]
 #[path = "../tests/b16_streaming.rs"]
 mod b16_streaming_tests;
 #[cfg(test)]
 #[path = "../tests/nz_api001_cross_execution.rs"]
 mod nz_api001_cross_execution_tests;
+#[cfg(test)]
+#[path = "../tests/source_event.rs"]
+mod source_event_tests;
 
+pub use admission::AdmissionError;
+pub use admission::AdmissionInput;
+pub use admission::DatasetAcceptance;
+pub use admission::RightsVerdict;
+pub use admission::SourceEventSink;
+pub use admission::admit;
 pub use canonical_wire::CanonicalError;
 pub use canonical_wire::CanonicalManifest;
 pub use canonical_wire::CanonicalRecord;
@@ -87,6 +101,11 @@ pub use schema::PredecessorEvidence;
 pub use schema::ReleaseManifest;
 pub use schema::RightsDecision;
 pub use schema::RightsEvaluator;
+pub use source_event::ContinuityState;
+pub use source_event::QualityState;
+pub use source_event::SequenceLedger;
+pub use source_event::SourceEvent;
+pub use source_event::SourceEventError;
 pub use trust::KeyState;
 pub use trust::TrustedKeyEntry;
 pub use trust::TrustedKeyRegistry;
