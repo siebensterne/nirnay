@@ -11,6 +11,20 @@
 //! The on-disk frame format (`NRJ1`, 84-byte header, BLAKE3 chain over the
 //! sequence, previous hash and body) is preserved. Bodies are validated
 //! [`trading_core::StoredBody`] records with deterministic event identity.
+//!
+//! Acknowledgement levels (all local to this process and its filesystem):
+//! 1. local queue admission — the body is accepted into the writer call;
+//! 2. local write — the frame bytes were handed to the file writer;
+//! 3. local flush — the buffered writer was flushed to the OS;
+//! 4. local sync — `sync_data` returned and the append is locally durable.
+//!
+//! No replication is claimed at any level, and no D4/D5 exposure is implied.
+//! The fencing record is synced before a new owner receives a token; `flock`
+//! from M3 is local mutual exclusion only and is not distributed fencing.
+//!
+//! The legacy `append` remains for single-process callers that hold the local
+//! lock. `append_fenced` is the authoritative owner-facing surface: it requires
+//! a token and rejects stale terms at the sink before any write.
 
 use std::{
     collections::BTreeMap,
@@ -60,6 +74,40 @@ pub struct StoredRecord {
     pub previous_hash: Hash32,
     pub hash: Hash32,
     pub body: StoredBody,
+}
+
+/// A monotonically increasing durable fencing term. The journal owns the term;
+/// an owner never invents one. Terms start at 1; 0 is the genesis term.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct FencingTerm(u64);
+
+impl FencingTerm {
+    #[must_use]
+    pub const fn new(value: u64) -> Self {
+        Self(value)
+    }
+
+    #[must_use]
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
+/// Capability presented with every fenced append. It binds one owner to one
+/// term; the sink refuses a write whose term is older than the persisted term.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FencingToken {
+    pub term: FencingTerm,
+    pub owner: String,
+}
+
+/// Durable on-disk fencing record, replaced atomically and synced before a new
+/// owner is granted a token.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct FencingRecord {
+    term: u64,
+    owner: String,
 }
 
 /// Deterministic append-boundary faults for durability tests. Never set in
@@ -113,6 +161,22 @@ pub enum JournalError {
     SequenceExhausted,
     #[error("payload requires journal schema version {required} but the body declares {declared}")]
     SchemaVersionTooOld { required: u16, declared: u16 },
+    #[error("stale fencing term {presented}; persisted term is {persisted}")]
+    StaleFencingTerm { presented: u64, persisted: u64 },
+    #[error("fencing term {presented} was never issued; persisted term is {persisted}")]
+    UnknownFencingTerm { presented: u64, persisted: u64 },
+    #[error("fencing term {term} is held by `{holder}`, not `{presented}`")]
+    FencingOwnerMismatch {
+        presented: String,
+        holder: String,
+        term: u64,
+    },
+    #[error("fencing owner must not be empty")]
+    InvalidFencingOwner,
+    #[error("fencing term space is exhausted")]
+    FencingTermExhausted,
+    #[error("fencing record is corrupt at {path}: {reason}")]
+    CorruptFencingRecord { path: PathBuf, reason: String },
 }
 
 impl JournalError {
@@ -141,6 +205,9 @@ pub struct Journal {
     segment_count: u64,
     poisoned: bool,
     commit_fault: Option<CommitFault>,
+    fencing_path: PathBuf,
+    fencing_term: u64,
+    fencing_owner: Option<String>,
 }
 
 impl std::fmt::Debug for Journal {
@@ -223,6 +290,8 @@ impl Journal {
         let active_file = lock_file
             .try_clone()
             .map_err(|source| JournalError::io(&lock_path, source))?;
+        let fencing_path = root.join("FENCING");
+        let fencing = load_fencing_record(&fencing_path)?;
         let mut journal = Self {
             root,
             stream_id,
@@ -238,6 +307,9 @@ impl Journal {
             segment_count: 0,
             poisoned: false,
             commit_fault: None,
+            fencing_term: fencing.as_ref().map_or(0, |record| record.term),
+            fencing_owner: fencing.map(|record| record.owner),
+            fencing_path,
         };
         journal.load_segments()?;
         Ok(journal)
@@ -445,6 +517,108 @@ impl Journal {
         self.active_path = path;
         self.active_file = file;
         Ok(())
+    }
+
+    /// The persisted fencing term, loaded from the durable record on open.
+    #[must_use]
+    pub fn fencing_term(&self) -> FencingTerm {
+        FencingTerm(self.fencing_term)
+    }
+
+    /// The owner holding the persisted fencing term.
+    #[must_use]
+    pub fn fencing_owner(&self) -> Option<&str> {
+        self.fencing_owner.as_deref()
+    }
+
+    /// Atomically replace and sync the durable fencing record. This completes
+    /// before a token is returned, so the term is durable before a new owner
+    /// can append. The exclusive `LOCK` is held for the whole operation.
+    fn write_fencing_record(&self, term: u64, owner: &str) -> Result<(), JournalError> {
+        let record = FencingRecord {
+            term,
+            owner: owner.to_owned(),
+        };
+        let bytes = serde_json::to_vec(&record).map_err(JournalError::Serialize)?;
+        let temp_path = self.root.join("FENCING.tmp");
+        {
+            let mut temp = OpenOptions::new()
+                .create(true)
+                .truncate(true)
+                .write(true)
+                .open(&temp_path)
+                .map_err(|source| JournalError::io(&temp_path, source))?;
+            temp.write_all(&bytes)
+                .map_err(|source| JournalError::io(&temp_path, source))?;
+            temp.sync_all()
+                .map_err(|source| JournalError::io(&temp_path, source))?;
+        }
+        fs::rename(&temp_path, &self.fencing_path)
+            .map_err(|source| JournalError::io(&self.fencing_path, source))?;
+        sync_directory(&self.root)
+    }
+
+    /// Grant an owner the next fencing term. Checked arithmetic prevents a
+    /// wrap-around from reviving a stale term.
+    pub fn fence(&mut self, owner: &str) -> Result<FencingToken, JournalError> {
+        if owner.trim().is_empty() {
+            return Err(JournalError::InvalidFencingOwner);
+        }
+        let term = self
+            .fencing_term
+            .checked_add(1)
+            .ok_or(JournalError::FencingTermExhausted)?;
+        self.write_fencing_record(term, owner)?;
+        self.fencing_term = term;
+        self.fencing_owner = Some(owner.to_owned());
+        Ok(FencingToken {
+            term: FencingTerm(term),
+            owner: owner.to_owned(),
+        })
+    }
+
+    /// Reject a token whose term is older than the persisted term, was never
+    /// issued, or belongs to a different owner. Equal current terms with the
+    /// right owner fall through to the existing event-identity rules.
+    fn guard(&self, token: &FencingToken) -> Result<(), JournalError> {
+        let persisted = self.fencing_term;
+        let presented = token.term.get();
+        if presented < persisted {
+            return Err(JournalError::StaleFencingTerm {
+                presented,
+                persisted,
+            });
+        }
+        if presented > persisted {
+            return Err(JournalError::UnknownFencingTerm {
+                presented,
+                persisted,
+            });
+        }
+        match self.fencing_owner.as_deref() {
+            Some(holder) if holder == token.owner => Ok(()),
+            Some(holder) => Err(JournalError::FencingOwnerMismatch {
+                presented: token.owner.clone(),
+                holder: holder.to_owned(),
+                term: presented,
+            }),
+            None => Err(JournalError::FencingOwnerMismatch {
+                presented: token.owner.clone(),
+                holder: "none".to_owned(),
+                term: presented,
+            }),
+        }
+    }
+
+    /// Fenced append. A repeated body at the current term is deduplicated by
+    /// the existing event-identity rules; the term is never lowered.
+    pub fn append_fenced(
+        &mut self,
+        token: &FencingToken,
+        body: StoredBody,
+    ) -> Result<StoredRecord, JournalError> {
+        self.guard(token)?;
+        self.append(body)
     }
 
     pub fn append(&mut self, body: StoredBody) -> Result<StoredRecord, JournalError> {
@@ -693,9 +867,274 @@ fn read_hash(
     Ok(Hash32::from_bytes(raw))
 }
 
+/// Read the durable fencing record. An absent record is genesis (term 0, no
+/// owner); a malformed record is refused rather than silently downgraded.
+fn load_fencing_record(path: &Path) -> Result<Option<FencingRecord>, JournalError> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let bytes = fs::read(path).map_err(|source| JournalError::io(path, source))?;
+    let record: FencingRecord =
+        serde_json::from_slice(&bytes).map_err(|error| JournalError::CorruptFencingRecord {
+            path: path.to_path_buf(),
+            reason: error.to_string(),
+        })?;
+    if record.owner.trim().is_empty() {
+        return Err(JournalError::CorruptFencingRecord {
+            path: path.to_path_buf(),
+            reason: "fencing record has an empty owner".to_owned(),
+        });
+    }
+    Ok(Some(record))
+}
+
 fn sync_directory(path: &Path) -> Result<(), JournalError> {
     let directory = File::open(path).map_err(|source| JournalError::io(path, source))?;
     directory
         .sync_all()
         .map_err(|source| JournalError::io(path, source))
+}
+
+#[cfg(test)]
+mod fencing_tests {
+    //! M7 fencing-term tests for the account journal. Authored before the
+    //! implementation so the missing durable-term capability fails first.
+
+    use super::{
+        FencingTerm, //
+        FencingToken,
+        Journal,
+        JournalError,
+    };
+    use std::collections::BTreeSet;
+    use trading_core::{
+        AccountId, //
+        DomainError,
+        EventEnvelope,
+        EventId,
+        EventPayload,
+        EventTimes,
+        LogicalNanos,
+        Paise,
+        RunId,
+        StoredBody,
+        TradeDate,
+        UtcNanos,
+    };
+
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    const TIMESTAMP: i64 = 1_793_145_600_000_000_000;
+    const STREAM: &str = "m7-fencing";
+    const RUN: RunId = RunId::from_bytes([
+        0x10, 0x32, 0x54, 0x76, 0x98, 0xba, 0xdc, 0xfe, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd,
+        0xef,
+    ]);
+
+    fn body(sequence: u64) -> Result<StoredBody, DomainError> {
+        let event_id = EventId::for_run(RUN, sequence);
+        Ok(StoredBody {
+            envelope: EventEnvelope {
+                event_id,
+                schema_version: 1,
+                stream_id: STREAM.to_owned(),
+                source_id: None,
+                source_clock_domain: None,
+                session_id: Some("2026-10-28".to_owned()),
+                source_sequence: None,
+                correlation_id: None,
+                causation_id: None,
+                times: EventTimes {
+                    source_time_utc: None,
+                    received_time_utc: UtcNanos::new(TIMESTAMP),
+                    available_time: LogicalNanos::new(1),
+                    recorded_time_utc: UtcNanos::new(TIMESTAMP),
+                },
+                quality: BTreeSet::new(),
+            },
+            payload: EventPayload::AccountOpened {
+                account_id: AccountId::new(sequence)?,
+                starting_cash: Paise(1_000_000),
+                trade_date: TradeDate::new(2026, 10, 28)
+                    .ok()
+                    .ok_or_else(|| DomainError::InvalidEventTime("invalid date".to_owned()))?,
+            },
+        })
+    }
+
+    macro_rules! assert_stale {
+        ($result:expr) => {
+            match $result {
+                Err(JournalError::StaleFencingTerm { .. }) => {}
+                other => panic!("expected StaleFencingTerm, got {other:?}"),
+            }
+        };
+    }
+
+    #[test]
+    fn owner_termination_makes_previous_token_stale() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let root = dir.path().join("journal");
+        let old_token;
+        {
+            let mut journal = Journal::open(&root, STREAM)?;
+            old_token = journal.fence("owner-a")?;
+            journal.append_fenced(&old_token, body(1)?)?;
+        }
+        let mut journal = Journal::open(&root, STREAM)?;
+        let current = journal.fence("owner-b")?;
+        journal.append_fenced(&current, body(2)?)?;
+        assert_stale!(journal.append_fenced(&old_token, body(3)?));
+        Ok(())
+    }
+
+    #[test]
+    fn paused_owner_resuming_after_reassignment_is_rejected() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let mut journal = Journal::open(dir.path().join("journal"), STREAM)?;
+        let paused = journal.fence("paused-owner")?;
+        let reassigned = journal.fence("new-owner")?;
+        journal.append_fenced(&reassigned, body(1)?)?;
+        assert_stale!(journal.append_fenced(&paused, body(2)?));
+        Ok(())
+    }
+
+    #[test]
+    fn two_competing_owners_only_latest_term_writes() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let mut journal = Journal::open(dir.path().join("journal"), STREAM)?;
+        let first = journal.fence("competitor-a")?;
+        let second = journal.fence("competitor-b")?;
+        assert_eq!(first.term.get(), 1, "first competitor term");
+        assert_eq!(second.term.get(), 2, "second competitor term");
+        journal.append_fenced(&second, body(1)?)?;
+        assert_stale!(journal.append_fenced(&first, body(2)?));
+        assert_eq!(
+            journal.records().len(),
+            1,
+            "only the current owner's write landed"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn stale_token_is_rejected_without_accepting_the_write() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let mut journal = Journal::open(dir.path().join("journal"), STREAM)?;
+        let stale = journal.fence("owner-a")?;
+        let _current = journal.fence("owner-b")?;
+        assert_stale!(journal.append_fenced(&stale, body(1)?));
+        assert_eq!(
+            journal.records().len(),
+            0,
+            "rejected write must not be persisted"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn restart_preserves_persisted_fencing_term() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let root = dir.path().join("journal");
+        let old_token;
+        {
+            let mut journal = Journal::open(&root, STREAM)?;
+            old_token = journal.fence("owner-a")?;
+            journal.append_fenced(&old_token, body(1)?)?;
+        }
+        let mut journal = Journal::open(&root, STREAM)?;
+        assert_eq!(journal.fencing_term().get(), 1, "term survives restart");
+        assert_eq!(
+            journal.fencing_owner(),
+            Some("owner-a"),
+            "owner survives restart"
+        );
+        let next = journal.fence("owner-b")?;
+        assert_eq!(
+            next.term.get(),
+            2,
+            "term advances monotonically after restart"
+        );
+        assert_stale!(journal.append_fenced(&old_token, body(2)?));
+        Ok(())
+    }
+
+    #[test]
+    fn simulated_partition_and_rejoin_rejects_stale_owner() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let mut journal = Journal::open(dir.path().join("journal"), STREAM)?;
+        let partitioned = journal.fence("owner-a")?;
+        let rejoined = journal.fence("owner-b")?;
+        journal.append_fenced(&rejoined, body(1)?)?;
+        assert_stale!(journal.append_fenced(&partitioned, body(2)?));
+        Ok(())
+    }
+
+    #[test]
+    fn duplicate_replay_after_restart_is_idempotent_without_lowering_term() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let root = dir.path().join("journal");
+        let token;
+        let replay = body(1)?;
+        {
+            let mut journal = Journal::open(&root, STREAM)?;
+            token = journal.fence("owner-a")?;
+            journal.append_fenced(&token, replay.clone())?;
+        }
+        let mut journal = Journal::open(&root, STREAM)?;
+        assert_eq!(
+            journal.fencing_term().get(),
+            1,
+            "term persisted before restart"
+        );
+        let repeated = journal.append_fenced(&token, replay)?;
+        assert_eq!(repeated.sequence, 1, "same term replay is idempotent");
+        assert_eq!(
+            journal.fencing_term().get(),
+            1,
+            "duplicate must not lower the term"
+        );
+        let next = journal.fence("owner-b")?;
+        assert_stale!(journal.append_fenced(&token, body(2)?));
+        assert_eq!(
+            journal.fencing_term().get(),
+            next.term.get(),
+            "term is not lowered by replay"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn forged_term_and_wrong_owner_are_rejected() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let mut journal = Journal::open(dir.path().join("journal"), STREAM)?;
+        let current = journal.fence("rightful-owner")?;
+        assert_eq!(current.term, FencingTerm::new(1), "first term is one");
+        let forged = FencingToken {
+            term: FencingTerm::new(9),
+            owner: "rightful-owner".to_owned(),
+        };
+        assert!(
+            matches!(
+                journal.append_fenced(&forged, body(1)?),
+                Err(JournalError::UnknownFencingTerm {
+                    presented: 9,
+                    persisted: 1,
+                })
+            ),
+            "a term that was never issued must be rejected"
+        );
+        let wrong_owner = FencingToken {
+            term: current.term,
+            owner: "impostor".to_owned(),
+        };
+        assert!(
+            matches!(
+                journal.append_fenced(&wrong_owner, body(1)?),
+                Err(JournalError::FencingOwnerMismatch { .. })
+            ),
+            "a token from another owner must be rejected"
+        );
+        Ok(())
+    }
 }
