@@ -10,11 +10,30 @@
 
 use std::{
     collections::BTreeMap,
+    io::{
+        BufRead, //
+        BufReader,
+        Write,
+    },
     path::{Path, PathBuf},
+    process::{
+        Command, //
+        Stdio,
+    },
 };
 
 use paper_runner::{
-    PaperMode, PersistentStartup, RecoveredStartup, StartupReadiness, startup, startup_persistent,
+    OwnershipClearEvidence, //
+    PaperMode,
+    PersistentStartup,
+    RecoveredStartup,
+    StartupReadiness,
+    clear_stale_ownership_sentinel,
+    derive_ownership_paths,
+    startup,
+    startup_persistent,
+    validate_ownership_paths,
+    validate_ownership_scope,
 };
 use risk_authority::authority::{
     AccountRecoveryRecord, DailyPnlBasis, DailyPnlCalendar, DailyPnlRecord, DailyPnlRecovery,
@@ -462,4 +481,281 @@ fn executable_default_is_ephemeral_and_has_no_external_adapter() {
             "no external execution or provider path in the harness: {forbidden}"
         );
     }
+}
+
+// M4 sentinel runbook: the ownership path is create_new, removed on clean drop.
+// A crashed process leaves the sentinel and the next startup fails closed; only
+// an explicitly verified operator clearance may remove it. PID and file age are
+// never evidence of ownership.
+
+#[test]
+fn ownership_paths_are_derived_and_bound_to_account_and_directory()
+-> Result<(), Box<dyn std::error::Error>> {
+    let root = tempfile::tempdir()?;
+    let other_root = tempfile::tempdir()?;
+    let root_path = root.path().canonicalize()?;
+    let paths = derive_ownership_paths(&root_path, account(), "validated")?;
+    assert!(
+        paths.journal.starts_with(&root_path) && paths.authority.starts_with(&root_path),
+        "both sentinels live under the owner-controlled root"
+    );
+    assert_ne!(
+        paths.journal, paths.authority,
+        "journal and authority sentinels differ"
+    );
+    let journal_name = paths
+        .journal
+        .file_name()
+        .ok_or("journal sentinel name")?
+        .to_string_lossy();
+    assert!(
+        journal_name.contains(&ACCOUNT.to_string()),
+        "the sentinel name binds the account identity"
+    );
+    assert_ne!(
+        derive_ownership_paths(root.path(), AccountId::new(999)?, "validated")?.journal,
+        paths.journal,
+        "a different account derives a different sentinel"
+    );
+    assert_ne!(
+        derive_ownership_paths(other_root.path(), account(), "validated")?.journal,
+        paths.journal,
+        "a different directory derives a different sentinel"
+    );
+    assert!(
+        validate_ownership_paths(root.path(), account(), "validated", &paths).is_ok(),
+        "the derived paths validate against their own identity"
+    );
+    assert!(
+        validate_ownership_paths(root.path(), account(), "other-label", &paths).is_err(),
+        "a different label cannot validate the same sentinel"
+    );
+    let escaped = root
+        .path()
+        .parent()
+        .ok_or("parent directory")?
+        .join("escaped.lock");
+    assert!(
+        validate_ownership_scope(root.path(), &escaped, &paths.authority).is_err(),
+        "a path outside the owner-controlled root is rejected"
+    );
+    assert!(
+        validate_ownership_scope(root.path(), &paths.journal, &paths.journal).is_err(),
+        "the two sentinel paths must be distinct"
+    );
+    Ok(())
+}
+
+#[test]
+fn ownership_sentinel_child_holder() {
+    let Ok(path) = std::env::var("PAPER_RUNNER_CHILD_OWNERSHIP_PATH") else {
+        return;
+    };
+    let guard = AuthorityOwnership::acquire(path).expect("child sentinel acquisition");
+    println!("ownership-held");
+    std::io::stdout().flush().expect("flush child signal");
+    std::thread::park();
+    drop(guard);
+}
+
+#[test]
+fn stale_sentinel_fails_closed_until_explicit_verification()
+-> Result<(), Box<dyn std::error::Error>> {
+    let root = tempfile::tempdir()?;
+    let paths = derive_ownership_paths(root.path(), account(), "crash-holder")?;
+    let mut child = Command::new(std::env::current_exe()?)
+        .args(["--exact", "ownership_sentinel_child_holder", "--nocapture"])
+        .env("PAPER_RUNNER_CHILD_OWNERSHIP_PATH", &paths.journal)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let mut stdout = BufReader::new(child.stdout.take().ok_or("child stdout")?);
+    let mut signalled = false;
+    for _ in 0..16 {
+        let mut line = String::new();
+        if stdout.read_line(&mut line)? == 0 {
+            break;
+        }
+        if line.trim() == "ownership-held" {
+            signalled = true;
+            break;
+        }
+    }
+    assert!(signalled, "child signalled ownership");
+    assert!(paths.journal.exists(), "the child holds the sentinel");
+
+    child.kill()?;
+    let status = child.wait()?;
+    assert!(
+        !status.success(),
+        "the holder was terminated without a clean drop"
+    );
+    assert!(paths.journal.exists(), "a crash leaves the sentinel behind");
+    assert!(
+        AuthorityOwnership::acquire(&paths.journal).is_err(),
+        "startup fails closed while the stale sentinel remains"
+    );
+
+    let fixture = Fixture::new("crash-fixture");
+    let mut config = fixture.config();
+    config.journal_ownership_path = paths.journal.clone();
+    let error = expect_startup_err(
+        startup_persistent(account(), policy(), Vec::new(), date(), config),
+        "a stale sentinel must block the startup transaction",
+    );
+    assert!(
+        error.contains("ownership"),
+        "the failure names ownership: {error}"
+    );
+
+    let pid_like = OwnershipClearEvidence {
+        operator_id: "operator-1".to_owned(),
+        verification_ref: "12345".to_owned(),
+        account_id: account(),
+        recovery_root: root.path().to_path_buf(),
+        label: "crash-holder".to_owned(),
+    };
+    assert!(
+        clear_stale_ownership_sentinel(&paths.journal, pid_like).is_err(),
+        "a PID- or age-shaped reference is never verification"
+    );
+    assert!(
+        paths.journal.exists(),
+        "a refused clearance leaves the sentinel intact"
+    );
+
+    let verified = OwnershipClearEvidence {
+        operator_id: "operator-1".to_owned(),
+        verification_ref: "owner-verified-incident-20261127".to_owned(),
+        account_id: account(),
+        recovery_root: root.path().to_path_buf(),
+        label: "crash-holder".to_owned(),
+    };
+    assert!(
+        clear_stale_ownership_sentinel(&paths.journal, verified)?,
+        "explicit operator verification clears the stale sentinel"
+    );
+    assert!(
+        !paths.journal.exists(),
+        "the sentinel is gone after verified clearance"
+    );
+    let reacquired = AuthorityOwnership::acquire(&paths.journal)?;
+    drop(reacquired);
+    Ok(())
+}
+
+#[test]
+fn sentinel_released_on_every_startup_error_path() {
+    let competing = Fixture::new("runbook-competing");
+    let holder = AuthorityOwnership::acquire(competing.base.with_extension("journal.lock"))
+        .expect("competing holder");
+    let error = expect_startup_err(competing.recover(), "a live owner must fail closed");
+    assert!(
+        error.contains("ownership"),
+        "competing owner is reported: {error}"
+    );
+    drop(holder);
+
+    let loader = Fixture::new("runbook-loader");
+    std::fs::remove_file(loader.root.join(OMS_PERMITS_FILE)).expect("remove journal");
+    let _ = expect_startup_err(loader.recover(), "a missing journal must fail closed");
+    assert!(
+        !loader.base.with_extension("journal.lock").exists(),
+        "the sentinel is released after a loader failure"
+    );
+
+    let stores = Fixture::new("runbook-stores");
+    let mut config = stores.config();
+    config.control = Box::new(NoopControlStore);
+    config.decisions = Box::new(InMemoryDecisionStore::new());
+    let _ = expect_startup_err(
+        startup_persistent(account(), policy(), Vec::new(), date(), config),
+        "non-durable stores must fail closed",
+    );
+    assert!(
+        !stores.base.with_extension("journal.lock").exists(),
+        "the sentinel is released after a store verification failure"
+    );
+
+    let authority = Fixture::new("runbook-authority");
+    std::fs::remove_file(authority.root.join(DAILY_PNL_FILE)).expect("remove daily pnl");
+    let _ = expect_startup_err(
+        authority.recover(),
+        "a damaged recovery root must fail closed",
+    );
+    assert!(
+        !authority.base.with_extension("journal.lock").exists(),
+        "the pre-load sentinel is released after a reconstruction failure"
+    );
+    assert!(
+        !authority.base.with_extension("authority.lock").exists(),
+        "the authority sentinel is never left behind on failure"
+    );
+}
+
+#[test]
+fn second_owner_deadlocks_closed_while_first_holds_the_sentinel()
+-> Result<(), Box<dyn std::error::Error>> {
+    let root = tempfile::tempdir()?;
+    let paths = derive_ownership_paths(root.path(), account(), "deadlock")?;
+    let first = AuthorityOwnership::acquire(&paths.journal)?;
+    assert!(
+        AuthorityOwnership::acquire(&paths.journal).is_err(),
+        "a second owner cannot take the same sentinel"
+    );
+    let fixture = Fixture::new("deadlock-fixture");
+    let mut config = fixture.config();
+    config.journal_ownership_path = paths.journal.clone();
+    config.authority_ownership_path = paths.authority.clone();
+    let error = expect_startup_err(
+        startup_persistent(account(), policy(), Vec::new(), date(), config),
+        "a live sentinel must block startup",
+    );
+    assert!(
+        error.contains("ownership"),
+        "deadlock resolves as fail-closed: {error}"
+    );
+    assert!(
+        paths.journal.exists(),
+        "the first owner still holds the sentinel"
+    );
+    drop(first);
+    assert!(
+        !paths.journal.exists(),
+        "the sentinel is released on clean drop"
+    );
+    let reacquired = AuthorityOwnership::acquire(&paths.journal)?;
+    drop(reacquired);
+    Ok(())
+}
+
+#[test]
+fn m3_recovery_lock_and_m4_sentinel_order_are_documented() {
+    let source = include_str!("../src/lib.rs");
+    assert!(
+        source.contains("M3 recovery lock"),
+        "the M3 recovery lock lifetime is documented"
+    );
+    assert!(
+        source.contains("M4 ownership sentinel"),
+        "the M4 sentinel lifetime is documented"
+    );
+    let acquire = source
+        .find("AuthorityOwnership::acquire")
+        .expect("ownership acquisition");
+    let load = source
+        .find("RecoveryJournalRoot::new")
+        .expect("recovery loader wiring");
+    assert!(
+        acquire < load,
+        "the M4 sentinel precedes the M3 recovery lock"
+    );
+    assert!(
+        !source.contains("std::process::id"),
+        "clearance never inspects a process id"
+    );
+    assert!(
+        !source.contains("modified()"),
+        "clearance never inspects file age"
+    );
 }

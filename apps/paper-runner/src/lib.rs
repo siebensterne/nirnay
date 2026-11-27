@@ -8,20 +8,32 @@
 pub mod report;
 
 use std::{
-    collections::BTreeMap, //
-    path::{Path, PathBuf},
+    collections::{
+        BTreeMap, //
+        BTreeSet,
+    },
+    io::ErrorKind,
+    path::{
+        Component, //
+        Path,
+        PathBuf,
+    },
 };
 
 use authoritative_oms::{
     BrokerOrderId, //
     ClientOrderId,
     FillEvent,
+    OmsOrderState,
     OmsStore,
+    OrderView,
+    OutboxState,
     PermitRef,
     Projector,
     ReconciliationInput,
     ReconciliationOutcome,
     reconcile,
+    store::fill_content_digest,
 };
 use broker_adapter::{
     BrokerAdapter, //
@@ -119,6 +131,7 @@ use trading_core::{
     Quantity,
     QuoteSnapshot,
     ReconciliationReport,
+    ReconciliationStatus,
     Segment,
     SettlementRegime,
     Side,
@@ -285,13 +298,195 @@ fn verify_durable_stores(
     Ok(())
 }
 
+/// The two M4 ownership sentinels derived for one owner-controlled root.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OwnershipPaths {
+    pub journal: PathBuf,
+    pub authority: PathBuf,
+}
+
+/// Derive M4 sentinel paths strictly under the owner-controlled root. The name
+/// binds the account identity, the canonical directory identity and the label,
+/// so a sentinel cannot be reused for another account or recovery directory.
+/// The root must already exist; this function never creates a directory.
+pub fn derive_ownership_paths(
+    root: &Path,
+    account_id: AccountId,
+    label: &str,
+) -> Result<OwnershipPaths, String> {
+    if label.trim().is_empty() {
+        return Err("ownership sentinel label must not be empty".to_owned());
+    }
+    let root = root
+        .canonicalize()
+        .map_err(|error| format!("owner-controlled recovery root unavailable: {error}"))?;
+    if !root.is_dir() {
+        return Err("owner-controlled recovery root is not a directory".to_owned());
+    }
+    let material = format!(
+        "paper-ownership-v1|{}|{}|{}",
+        account_id.get(),
+        root.display(),
+        label
+    );
+    let digest = Sha256::digest(material.as_bytes());
+    let prefix: String = digest
+        .iter()
+        .take(8)
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    let stem = format!("{prefix}-{}", account_id.get());
+    Ok(OwnershipPaths {
+        journal: root.join(format!("{stem}-journal.sentinel")),
+        authority: root.join(format!("{stem}-authority.sentinel")),
+    })
+}
+
+/// Check the cheap structural invariants every M4 sentinel path must satisfy:
+/// both live under the owner-controlled root, neither walks out of it with
+/// `..`, and the two roles use distinct paths.
+pub fn validate_ownership_scope(
+    root: &Path,
+    journal: &Path,
+    authority: &Path,
+) -> Result<(), String> {
+    let root = root
+        .canonicalize()
+        .map_err(|error| format!("owner-controlled recovery root unavailable: {error}"))?;
+    for path in [journal, authority] {
+        if path
+            .components()
+            .any(|part| matches!(part, Component::ParentDir))
+        {
+            return Err(format!(
+                "ownership path {} leaves its directory scope",
+                path.display()
+            ));
+        }
+        let anchor = path
+            .parent()
+            .ok_or_else(|| format!("ownership path {} has no directory anchor", path.display()))?;
+        let anchor = anchor.canonicalize().map_err(|error| {
+            format!(
+                "ownership directory {} unavailable: {error}",
+                anchor.display()
+            )
+        })?;
+        if !anchor.starts_with(&root) {
+            return Err(format!(
+                "ownership path {} is outside the owner-controlled root",
+                path.display()
+            ));
+        }
+    }
+    if journal == authority {
+        return Err("journal and authority sentinels must use distinct paths".to_owned());
+    }
+    Ok(())
+}
+
+/// Strict identity check: the supplied paths must be exactly those derived
+/// from the root, account and label. Callers use this before handing paths to
+/// `PersistentStartup` so a sentinel cannot be rebound to another identity.
+pub fn validate_ownership_paths(
+    root: &Path,
+    account_id: AccountId,
+    label: &str,
+    paths: &OwnershipPaths,
+) -> Result<(), String> {
+    let derived = derive_ownership_paths(root, account_id, label)?;
+    validate_ownership_scope(root, &paths.journal, &paths.authority)?;
+    if paths.journal != derived.journal || paths.authority != derived.authority {
+        return Err(
+            "ownership paths are not bound to this account, directory and label".to_owned(),
+        );
+    }
+    Ok(())
+}
+
+/// Explicit operator evidence for clearing a stale sentinel after a crash.
+/// PIDs, file ages and process liveness are deliberately absent from this
+/// contract: they are not proof that no owner is active.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OwnershipClearEvidence {
+    pub operator_id: String,
+    pub verification_ref: String,
+    pub account_id: AccountId,
+    pub recovery_root: PathBuf,
+    pub label: String,
+}
+
+/// Clear a stale M4 sentinel only after explicit operator verification.
+///
+/// RUNBOOK: a holder acquired this path with `create_new` and removes it on a
+/// clean `Drop`. If the process is terminated while holding it, removal never
+/// runs and the next startup fails closed. An operator verifies out of band
+/// that no owner is active, supplies a non-trivial verification reference and
+/// calls this function; it refuses PID- or age-shaped references and refuses
+/// paths not derived from the verified account, directory and label. No other
+/// clearance path exists.
+pub fn clear_stale_ownership_sentinel(
+    path: &Path,
+    evidence: OwnershipClearEvidence,
+) -> Result<bool, String> {
+    if evidence.operator_id.trim().is_empty() {
+        return Err("sentinel clearance requires an operator identity".to_owned());
+    }
+    let reference = evidence.verification_ref.trim();
+    if reference.len() < 8
+        || !reference
+            .chars()
+            .any(|character| !character.is_ascii_digit())
+    {
+        return Err(
+            "sentinel clearance requires explicit verification; PID or age is not evidence"
+                .to_owned(),
+        );
+    }
+    let derived = derive_ownership_paths(
+        &evidence.recovery_root,
+        evidence.account_id,
+        &evidence.label,
+    )?;
+    validate_ownership_paths(
+        &evidence.recovery_root,
+        evidence.account_id,
+        &evidence.label,
+        &derived,
+    )?;
+    if path != derived.journal && path != derived.authority {
+        return Err("sentinel clearance requires the exact derived ownership path".to_owned());
+    }
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(format!(
+            "sentinel clearance failed for {}: {error}",
+            path.display()
+        )),
+    }
+}
+
 /// The single cohesive persistent startup transaction.
 ///
 /// STARTUP INTEGRATION BOUNDARY ONLY, NOT production authorization or
-/// readiness. Order is deliberate and fail-closed: acquire account ownership,
-/// load the owner recovery root, verify durable stores, then reconstruct and
-/// reconcile the authority. A failure at any step returns NOT-READY and never
-/// constructs an authority or enables new risk.
+/// readiness. Order is deliberate and fail-closed: validate the sentinel paths,
+/// acquire account ownership, load the owner recovery root, verify durable
+/// stores, then reconstruct and reconcile the authority. A failure at any step
+/// returns NOT-READY and never constructs an authority or enables new risk.
+///
+/// M3/M4 LOCK RUNBOOK: the M3 recovery lock is owned by the library loader and
+/// by `RiskAuthority::recover`; it exists only for the duration of those calls
+/// and is released when they return. The M4 ownership sentinel is the
+/// `AuthorityOwnership` acquired below: the journal sentinel is held from
+/// before any journal read until the returned startup value is dropped, and
+/// the authority sentinel is acquired inside `RiskAuthority::recover` and held
+/// for the same lifetime. Acquisition order is therefore M4 journal sentinel,
+/// then M3 recovery lock in the loader, then durable-store verification, then
+/// M4 authority sentinel. A clean drop removes each sentinel; a process
+/// terminated while holding one leaves it behind and the next startup fails
+/// closed until an operator clears it with explicit verification (never PID or
+/// age) via `clear_stale_ownership_sentinel`.
 pub fn startup_persistent(
     account_id: AccountId,
     policy: ValidatedRiskPolicy,
@@ -299,6 +494,15 @@ pub fn startup_persistent(
     trade_date: TradeDate,
     config: PersistentStartup,
 ) -> Result<RecoveredStartup, String> {
+    // 0. M4 sentinels must stay inside the owner-controlled root before any
+    // lock is taken. This check cannot itself create or modify a sentinel.
+    validate_ownership_scope(
+        &config.recovery_root,
+        &config.journal_ownership_path,
+        &config.authority_ownership_path,
+    )
+    .map_err(|error| format!("NOT-READY: invalid ownership path: {error}"))?;
+
     // 1. Account ownership BEFORE any journal is read. A competing owner or a
     // stale lock fails the whole transaction here, before the loader runs.
     let journal_ownership = AuthorityOwnership::acquire(&config.journal_ownership_path)
@@ -439,6 +643,8 @@ pub struct PaperRun {
     pub reconciliation: ReconciliationOutcome,
     pub mode: PaperMode,
     pub identity: PaperIdentity,
+    /// Authoritative snapshots supplied to each strategy decision, in order.
+    pub strategy_snapshots: Vec<StrategySnapshot>,
 }
 
 fn instrument(input: &PaperInput) -> Result<Instrument, String> {
@@ -632,31 +838,254 @@ fn observation_policy() -> risk_authority::ObservationPolicy {
     }
 }
 
-fn paper_fill_event(
+/// The paper account scope opened by `run_paper`. It is a ledger identity, not
+/// a provider, broker or venue identity.
+pub const PAPER_ACCOUNT_SCOPE: &str = "paper";
+
+/// Neutral broker execution evidence. The side here is delivered evidence and
+/// is *checked*, never trusted: the authoritative OMS order decides the side
+/// that is recorded in the ledger.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PaperExecutionEvidence {
+    pub execution_id: String,
+    pub broker_event_id: String,
+    pub side: Side,
+    pub quantity: i64,
+    pub price_paise: i64,
+    pub now_ns: i64,
+}
+
+/// Build the durable execution event from broker evidence and the side of the
+/// authoritative OMS order. Callers must pass the OMS side, never a locally
+/// inferred or hardcoded side.
+#[must_use]
+pub fn paper_fill_event(
     client: ClientOrderId,
-    execution_id: &str,
-    broker_event_id: &str,
-    quantity: i64,
-    price_paise: i64,
-    now_ns: i64,
+    evidence: &PaperExecutionEvidence,
+    authoritative_side: Side,
 ) -> FillEvent {
     FillEvent {
         schema_version: 1,
-        execution_id: execution_id.to_owned(),
-        broker_event_id: broker_event_id.to_owned(),
+        execution_id: evidence.execution_id.clone(),
+        broker_event_id: evidence.broker_event_id.clone(),
         client_order_id: client,
         oms_order_id: client.to_string(),
-        side: Side::Buy,
-        quantity,
-        price_paise,
+        side: authoritative_side,
+        quantity: evidence.quantity,
+        price_paise: evidence.price_paise,
         currency: "INR".to_owned(),
-        broker_timestamp_ns: now_ns,
-        received_at_ns: now_ns,
+        broker_timestamp_ns: evidence.now_ns,
+        received_at_ns: evidence.now_ns,
         source: "paper-simulated-broker".to_owned(),
-        account_scope: "paper".to_owned(),
+        account_scope: PAPER_ACCOUNT_SCOPE.to_owned(),
         charges_paise: 0,
         charge_status: authoritative_oms::ChargeStatus::Estimated,
         provenance: "paper-runner synthetic fill".to_owned(),
+    }
+}
+
+/// Read the position from the account ledger, the only authority for position.
+/// There is no parallel local position counter anywhere in the harness.
+pub fn ledger_position(projector: &Projector, instrument_id: &InstrumentId) -> Result<i64, String> {
+    Ok(projector
+        .state()
+        .positions
+        .get(PAPER_ACCOUNT_SCOPE)
+        .and_then(|by_instrument| by_instrument.get(instrument_id))
+        .copied()
+        .unwrap_or(0))
+}
+
+/// Apply one broker execution to the authoritative OMS and then to the account
+/// ledger. Fail-closed order of checks:
+/// 1. the client order must exist in the OMS;
+/// 2. the delivered side must match the OMS order's side (contradictions are
+///    rejected before any durable state is touched);
+/// 3. an already-seen execution id must carry identical economics, otherwise
+///    it is an idempotent no-op;
+/// 4. a terminal order cannot accept a late fill without authoritative
+///    reconciliation evidence;
+/// 5. remaining quantity and the prospective ledger position use checked
+///    arithmetic, so over-fill and overflow fail closed;
+/// 6. only an accepted OMS fill is projected into the ledger.
+///
+/// Returns `true` only when a new execution was applied.
+pub fn apply_authoritative_fill(
+    store: &mut OmsStore,
+    projector: &mut Projector,
+    instruments: &mut BTreeMap<String, InstrumentId>,
+    client: ClientOrderId,
+    instrument_id: &InstrumentId,
+    evidence: PaperExecutionEvidence,
+) -> Result<bool, String> {
+    let order = store
+        .order(client)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| format!("fill for unknown OMS order {client}"))?;
+    let authoritative_side = order.intent.side;
+    if evidence.side != authoritative_side {
+        return Err(format!(
+            "fill side {} contradicts authoritative OMS order side {authoritative_side}",
+            evidence.side
+        ));
+    }
+    let candidate = paper_fill_event(client, &evidence, authoritative_side);
+    if let Some(stored) = store.fill(&evidence.execution_id) {
+        if stored.side != authoritative_side
+            || fill_content_digest(stored) != fill_content_digest(&candidate)
+        {
+            return Err(format!(
+                "execution {} reuses an id with contradictory economics",
+                evidence.execution_id
+            ));
+        }
+        return Ok(false);
+    }
+    if order.state.terminal() {
+        return Err(format!(
+            "fill for terminal OMS order {client} in state {:?}",
+            order.state
+        ));
+    }
+    let remaining = order
+        .intent
+        .quantity
+        .get()
+        .checked_sub(order.filled_quantity)
+        .ok_or("fill accounting overflow: filled quantity exceeds order quantity")?;
+    if evidence.quantity <= 0 || evidence.quantity > remaining {
+        return Err(format!(
+            "fill quantity {} exceeds remaining quantity {remaining}",
+            evidence.quantity
+        ));
+    }
+    let signed_quantity = if authoritative_side == Side::Buy {
+        evidence.quantity
+    } else {
+        evidence
+            .quantity
+            .checked_neg()
+            .ok_or("fill accounting overflow: side negation")?
+    };
+    ledger_position(projector, instrument_id)?
+        .checked_add(signed_quantity)
+        .ok_or("fill accounting overflow: ledger position")?;
+
+    let applied = store
+        .apply_typed_fill(candidate)
+        .map_err(|error| error.to_string())?;
+    if applied {
+        instruments.insert(evidence.execution_id.clone(), instrument_id.clone());
+        let stored = store
+            .fill(&evidence.execution_id)
+            .ok_or("missing persisted fill")?;
+        projector
+            .project_fill(stored, instrument_id)
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(applied)
+}
+
+/// The authoritative snapshot handed to a strategy before every decision.
+/// Every field is recomputed from durable OMS/ledger state and the independent
+/// reconciliation report; no local flags or historical-id scans are involved.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StrategySnapshot {
+    pub position_quantity: i64,
+    pub active_orders: Vec<ClientOrderId>,
+    pub partial_fills: Vec<ClientOrderId>,
+    pub unknown_orders: Vec<ClientOrderId>,
+    pub pending_cancel_replace: Vec<ClientOrderId>,
+    pub reconciliation_status: ReconciliationStatus,
+    pub has_open_order: bool,
+}
+
+/// Build an indexed authoritative view from the OMS's own order/outbox views.
+/// The OMS already keeps these records keyed by identity, so this is a single
+/// pass over live rows and never a scan of historical client-order ids.
+pub fn strategy_snapshot(
+    store: &OmsStore,
+    projector: &Projector,
+    instrument_id: &InstrumentId,
+    reconciliation_status: ReconciliationStatus,
+) -> Result<StrategySnapshot, String> {
+    let position_quantity = ledger_position(projector, instrument_id)?;
+    let mut active_orders = BTreeSet::new();
+    let mut partial_fills = BTreeSet::new();
+    let mut unknown_orders = BTreeSet::new();
+    let mut pending_cancel_replace = BTreeSet::new();
+
+    for order in store.orders().map_err(|error| error.to_string())? {
+        let OrderView {
+            client_order_id,
+            state,
+            ..
+        } = order;
+        match state {
+            OmsOrderState::PartiallyFilled => {
+                active_orders.insert(client_order_id);
+                partial_fills.insert(client_order_id);
+            }
+            OmsOrderState::Unknown | OmsOrderState::Reconciling => {
+                active_orders.insert(client_order_id);
+                unknown_orders.insert(client_order_id);
+            }
+            OmsOrderState::CancelPending => {
+                active_orders.insert(client_order_id);
+                pending_cancel_replace.insert(client_order_id);
+            }
+            OmsOrderState::Created
+            | OmsOrderState::RiskAccepted
+            | OmsOrderState::PendingSubmission
+            | OmsOrderState::Working
+            | OmsOrderState::Resolved => {
+                active_orders.insert(client_order_id);
+            }
+            OmsOrderState::Filled | OmsOrderState::Cancelled | OmsOrderState::Rejected => {}
+        }
+    }
+    for attempt in store.outbox().map_err(|error| error.to_string())? {
+        if matches!(
+            attempt.state,
+            OutboxState::Pending | OutboxState::Claimed | OutboxState::Dispatching
+        ) && matches!(attempt.command_type.as_str(), "CANCEL" | "REPLACE")
+        {
+            active_orders.insert(attempt.client_order_id);
+            pending_cancel_replace.insert(attempt.client_order_id);
+        }
+    }
+
+    let has_open_order = !active_orders.is_empty();
+    Ok(StrategySnapshot {
+        position_quantity,
+        active_orders: active_orders.into_iter().collect(),
+        partial_fills: partial_fills.into_iter().collect(),
+        unknown_orders: unknown_orders.into_iter().collect(),
+        pending_cancel_replace: pending_cancel_replace.into_iter().collect(),
+        reconciliation_status,
+        has_open_order,
+    })
+}
+
+/// Project the authoritative snapshot into the narrow strategy input. The
+/// strategy can only see these fields, so both must come from the snapshot.
+#[must_use]
+pub fn strategy_event_from_snapshot(
+    observation_sequence: u64,
+    instrument_id: String,
+    midpoint: Rational,
+    best_bid: i64,
+    best_ask: i64,
+    snapshot: &StrategySnapshot,
+) -> StrategyEvent {
+    StrategyEvent {
+        observation_sequence,
+        instrument_id,
+        midpoint,
+        best_bid,
+        best_ask,
+        position_quantity: snapshot.position_quantity,
+        has_open_order: snapshot.has_open_order,
     }
 }
 
@@ -904,20 +1333,48 @@ pub fn run_paper(input: &PaperInput, oms_path: &Path) -> Result<PaperRun, String
     let mut intents_emitted = 0_usize;
     let mut reservations = 0_usize;
     let mut ordinal = 0_u64;
-    let mut position = 0_i64;
+    let mut strategy_snapshots: Vec<StrategySnapshot> = Vec::new();
 
     for (index, event) in events.iter().enumerate() {
         let (bid, ask) = kernel_top_of_book(event)?;
         let midpoint = Rational::fraction(bid + ask, 2).map_err(|e| e.to_string())?;
-        let strategy_event = StrategyEvent {
-            observation_sequence: event.sequence.unwrap_or((index as u64) + 1),
-            instrument_id: input.instrument_id.clone(),
+        // Reconcile and build the authoritative snapshot before the strategy
+        // decides. No local open-order flag or position counter is consulted.
+        let reconciliation = reconcile(
+            &store,
+            &projector,
+            &ReconciliationInput {
+                deliveries: deliveries.clone(),
+                instruments: instruments.clone(),
+            },
+        )
+        .map_err(|e| e.to_string())?;
+        health.reconciliation_differences = u32::try_from(
+            reconciliation
+                .differences
+                .iter()
+                .filter(|difference| difference.is_blocking())
+                .count(),
+        )
+        .unwrap_or(u32::MAX);
+        let snapshot = strategy_snapshot(
+            &store,
+            &projector,
+            &instrument_id,
+            reconciliation.report.status,
+        )
+        .map_err(|e| e.to_string())?;
+        health.open_orders = u32::try_from(snapshot.active_orders.len()).unwrap_or(u32::MAX);
+        health.unknown_orders = u32::try_from(snapshot.unknown_orders.len()).unwrap_or(u32::MAX);
+        strategy_snapshots.push(snapshot.clone());
+        let strategy_event = strategy_event_from_snapshot(
+            event.sequence.unwrap_or((index as u64) + 1),
+            input.instrument_id.clone(),
             midpoint,
-            best_bid: bid,
-            best_ask: ask,
-            position_quantity: position,
-            has_open_order: false,
-        };
+            bid,
+            ask,
+            &snapshot,
+        );
         let Some(intent) = strategy
             .on_event(&strategy_event)
             .map_err(|e| e.to_string())?
@@ -939,20 +1396,6 @@ pub fn run_paper(input: &PaperInput, oms_path: &Path) -> Result<PaperRun, String
             rejection_reason: None,
         };
 
-        let mut open_orders = 0_u32;
-        for id in 1..=ordinal {
-            if let Some(order) = store
-                .order(ClientOrderId::new(id).map_err(|e| e.to_string())?)
-                .map_err(|e| e.to_string())?
-                && !order.state.terminal()
-            {
-                open_orders = open_orders.saturating_add(1);
-            }
-        }
-        health.open_orders = open_orders;
-        health.unknown_orders =
-            u32::try_from(store.unresolved().map_err(|e| e.to_string())?.len()).unwrap_or(u32::MAX);
-
         let gap = if matches!(
             event.quality,
             StreamState::Gap | StreamState::Recovering | StreamState::Unverified
@@ -970,23 +1413,6 @@ pub fn run_paper(input: &PaperInput, oms_path: &Path) -> Result<PaperRun, String
             gap,
             book_complete: true,
         };
-        let reconciliation = reconcile(
-            &store,
-            &projector,
-            &ReconciliationInput {
-                deliveries: deliveries.clone(),
-                instruments: instruments.clone(),
-            },
-        )
-        .map_err(|e| e.to_string())?;
-        health.reconciliation_differences = u32::try_from(
-            reconciliation
-                .differences
-                .iter()
-                .filter(|difference| difference.is_blocking())
-                .count(),
-        )
-        .unwrap_or(u32::MAX);
         let observations = build_observations(
             feed_observation,
             &store,
@@ -1059,27 +1485,33 @@ pub fn run_paper(input: &PaperInput, oms_path: &Path) -> Result<PaperRun, String
                         ..
                     } = broker_event
                     {
-                        let fill = paper_fill_event(
-                            client,
-                            &execution_id,
-                            &broker_event_id,
+                        let authoritative = store
+                            .order(client)
+                            .map_err(|e| e.to_string())?
+                            .ok_or("filled order disappeared from the OMS")?;
+                        let evidence = PaperExecutionEvidence {
+                            execution_id,
+                            broker_event_id,
+                            side: authoritative.intent.side,
                             quantity,
                             price_paise,
-                            ordinal as i64 + 5,
-                        );
-                        let applied = store
-                            .apply_typed_fill(fill.clone())
-                            .map_err(|e| e.to_string())?;
+                            now_ns: ordinal as i64 + 5,
+                        };
+                        // The fill side is the OMS order's side, never a
+                        // hardcoded default. The fill helper re-checks it and
+                        // lets the ledger remain the sole position authority.
+                        let fill = paper_fill_event(client, &evidence, authoritative.intent.side);
                         deliveries.push(fill);
-                        instruments.insert(execution_id.clone(), instrument_id.clone());
+                        let applied = apply_authoritative_fill(
+                            &mut store,
+                            &mut projector,
+                            &mut instruments,
+                            client,
+                            &instrument_id,
+                            evidence,
+                        )
+                        .map_err(|e| e.to_string())?;
                         if applied {
-                            position = position.saturating_add(quantity);
-                            projector
-                                .project_fill(
-                                    store.fill(&execution_id).ok_or("missing persisted fill")?,
-                                    &instrument_id,
-                                )
-                                .map_err(|e| e.to_string())?;
                             // Paper-only mark from the same synthetic kernel
                             // quote the strategy consumed; explicit rounding
                             // of the exact doubled-paise midpoint.
@@ -1199,6 +1631,7 @@ pub fn run_paper(input: &PaperInput, oms_path: &Path) -> Result<PaperRun, String
         reconciliation,
         mode,
         identity,
+        strategy_snapshots,
     })
 }
 
