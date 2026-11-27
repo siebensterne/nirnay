@@ -4,4 +4,5 @@
 pub mod fixed;
 pub mod model;
 mod side;
+pub mod units;
 pub use side::{InvalidSide, Side};
