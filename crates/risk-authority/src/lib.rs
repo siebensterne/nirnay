@@ -38,6 +38,7 @@ pub use authority::{
     OmsPermitRecord,
     OmsPermitState,
     OwnerSigningKey,
+    RECOVERY_LOCK_FILE,
     RECOVERY_SNAPSHOT_VERSION,
     RecoveryAnchor,
     RecoveryAuthenticity,

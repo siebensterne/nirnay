@@ -3243,6 +3243,9 @@ pub const ACCOUNT_ANCHOR_FILE: &str = "account_anchor.json";
 /// them.
 pub const OMS_HIGH_WATER_FILE: &str = "oms_high_water.json";
 pub const ACCOUNT_HIGH_WATER_FILE: &str = "account_high_water.json";
+/// Stable kernel-lock file for one serialized recovery transaction. The lock
+/// is held on its descriptor for the whole load, not inferred from metadata.
+pub const RECOVERY_LOCK_FILE: &str = "recovery.lock";
 pub const BINDING_SUFFIX: &str = ".auth";
 
 const BINDING_DOMAIN: &str = "nirnay-recovery-binding-v1";
@@ -3437,33 +3440,6 @@ fn check_owner_journal_paths(paths: &[&Path]) -> Result<(), RecoveryError> {
 
 #[cfg(not(unix))]
 fn check_owner_journal_paths(_paths: &[&Path]) -> Result<(), RecoveryError> {
-    Err(RecoveryError::Authenticity(
-        "OS owner authenticity requires a Unix platform".to_owned(),
-    ))
-}
-
-#[cfg(unix)]
-fn check_owner_directory(path: &Path) -> Result<(), RecoveryError> {
-    use std::os::unix::fs::MetadataExt;
-
-    let meta = std::fs::symlink_metadata(path).map_err(|error| {
-        RecoveryError::Authenticity(format!("journal root is unreadable: {error}"))
-    })?;
-    if !meta.file_type().is_dir() || meta.file_type().is_symlink() {
-        return Err(RecoveryError::Authenticity(
-            "journal root is not an owner-controlled real directory".to_owned(),
-        ));
-    }
-    if meta.mode() & 0o022 != 0 {
-        return Err(RecoveryError::Authenticity(
-            "journal root is group- or world-writable".to_owned(),
-        ));
-    }
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn check_owner_directory(_path: &Path) -> Result<(), RecoveryError> {
     Err(RecoveryError::Authenticity(
         "OS owner authenticity requires a Unix platform".to_owned(),
     ))
@@ -3880,39 +3856,582 @@ impl RecoveryHighWater {
     }
 }
 
+/// A recovery transaction is serialized by a kernel-held lock on a stable file
+/// in the pinned recovery root, and every required record is opened through the
+/// pinned directory descriptor. `std` has no wrappers for `flock`, `openat` or
+/// `renameat`, so this is the narrow FFI boundary. Platforms without these
+/// primitives fail closed instead of falling back to path-based checks.
+#[cfg(any(
+    target_os = "linux",
+    target_os = "android",
+    target_os = "macos",
+    target_os = "ios"
+))]
+#[allow(unsafe_code)] // std exposes no kernel-lock or relative-open wrapper
+mod recovery_io {
+    use super::*;
+    use std::{
+        ffi::CString,
+        io,
+        os::unix::{
+            fs::{MetadataExt, OpenOptionsExt},
+            io::{AsRawFd, FromRawFd},
+        },
+    };
+
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    const O_DIRECTORY: i32 = 0o200000;
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    const O_NOFOLLOW: i32 = 0o400000;
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    const O_CLOEXEC: i32 = 0o2000000;
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    const O_DIRECTORY: i32 = 0o4000000;
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    const O_NOFOLLOW: i32 = 0o000400;
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    const O_CLOEXEC: i32 = 0o100000000;
+
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    const O_CREAT: i32 = 0o100;
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    const O_EXCL: i32 = 0o200;
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    const O_CREAT: i32 = 0o1000;
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    const O_EXCL: i32 = 0o4000;
+
+    const O_RDONLY: i32 = 0;
+    const O_WRONLY: i32 = 1;
+    const O_RDWR: i32 = 2;
+    const LOCK_EX: i32 = 2;
+
+    unsafe extern "C" {
+        fn openat(dirfd: i32, path: *const std::ffi::c_char, flags: i32, ...) -> i32;
+        fn renameat(
+            olddirfd: i32,
+            oldpath: *const std::ffi::c_char,
+            newdirfd: i32,
+            newpath: *const std::ffi::c_char,
+        ) -> i32;
+        fn unlinkat(dirfd: i32, path: *const std::ffi::c_char, flags: i32) -> i32;
+        fn flock(fd: i32, operation: i32) -> i32;
+    }
+
+    fn c_name(name: &str) -> Result<CString, RecoveryError> {
+        CString::new(name).map_err(|_| {
+            RecoveryError::Authenticity("recovery record name contains a NUL byte".to_owned())
+        })
+    }
+
+    fn sidecar_name(file: &str) -> String {
+        format!("{file}{BINDING_SUFFIX}")
+    }
+
+    /// A pinned directory descriptor plus the identity it had at pin time.
+    /// Every guarded operation re-checks both the descriptor identity and the
+    /// root path identity before touching an object.
+    pub(super) struct PinnedRecoveryDir {
+        dir: File,
+        root: PathBuf,
+        dev: u64,
+        ino: u64,
+        uid: u32,
+        mode: u32,
+    }
+
+    impl PinnedRecoveryDir {
+        pub(super) fn open(root: &Path) -> Result<Self, RecoveryError> {
+            let dir = OpenOptions::new()
+                .read(true)
+                .custom_flags(O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+                .open(root)
+                .map_err(|error| {
+                    RecoveryError::Authenticity(format!("recovery directory pin failed: {error}"))
+                })?;
+            let meta = dir.metadata().map_err(|error| {
+                RecoveryError::Authenticity(format!("pinned directory is unreadable: {error}"))
+            })?;
+            if !meta.is_dir() {
+                return Err(RecoveryError::Authenticity(
+                    "pinned recovery root is not a directory".to_owned(),
+                ));
+            }
+            let path_meta = std::fs::symlink_metadata(root).map_err(|error| {
+                RecoveryError::Authenticity(format!("recovery root is unreadable: {error}"))
+            })?;
+            if !path_meta.is_dir() || path_meta.file_type().is_symlink() {
+                return Err(RecoveryError::Authenticity(
+                    "recovery root is not a real directory".to_owned(),
+                ));
+            }
+            if meta.dev() != path_meta.dev() || meta.ino() != path_meta.ino() {
+                return Err(RecoveryError::Authenticity(
+                    "recovery root changed while it was being pinned".to_owned(),
+                ));
+            }
+            Ok(Self {
+                dir,
+                root: root.to_path_buf(),
+                dev: meta.dev(),
+                ino: meta.ino(),
+                uid: meta.uid(),
+                mode: meta.mode(),
+            })
+        }
+
+        pub(super) fn path(&self) -> &Path {
+            &self.root
+        }
+
+        fn check_identity(&self) -> Result<(), RecoveryError> {
+            let meta = self.dir.metadata().map_err(|error| {
+                RecoveryError::Authenticity(format!("pinned directory is unreadable: {error}"))
+            })?;
+            if meta.dev() != self.dev || meta.ino() != self.ino {
+                return Err(RecoveryError::Authenticity(
+                    "pinned recovery directory descriptor changed".to_owned(),
+                ));
+            }
+            let path_meta = std::fs::symlink_metadata(&self.root).map_err(|error| {
+                RecoveryError::Authenticity(format!("recovery root is unreadable: {error}"))
+            })?;
+            if !path_meta.is_dir()
+                || path_meta.file_type().is_symlink()
+                || path_meta.dev() != self.dev
+                || path_meta.ino() != self.ino
+            {
+                return Err(RecoveryError::Authenticity(
+                    "recovery root identity changed after pinning".to_owned(),
+                ));
+            }
+            Ok(())
+        }
+
+        pub(super) fn check_owner_directory(&self) -> Result<(), RecoveryError> {
+            self.check_identity()?;
+            if self.mode & 0o022 != 0 {
+                return Err(RecoveryError::Authenticity(
+                    "journal root is group- or world-writable".to_owned(),
+                ));
+            }
+            Ok(())
+        }
+
+        fn open_at(
+            &self,
+            name: &str,
+            flags: i32,
+            mode: i32,
+        ) -> Result<Option<File>, RecoveryError> {
+            self.check_identity()?;
+            let name_c = c_name(name)?;
+            // SAFETY: the descriptor is a live, pinned O_DIRECTORY file and the
+            // name is a NUL-terminated fixed record name.
+            let fd = unsafe {
+                openat(
+                    self.dir.as_raw_fd(),
+                    name_c.as_ptr(),
+                    flags | O_NOFOLLOW | O_CLOEXEC,
+                    mode,
+                )
+            };
+            if fd < 0 {
+                let error = io::Error::last_os_error();
+                if error.kind() == io::ErrorKind::NotFound {
+                    return Ok(None);
+                }
+                return Err(RecoveryError::Authenticity(format!(
+                    "relative open of {name} failed: {error}"
+                )));
+            }
+            // SAFETY: `openat` returned a fresh, owned descriptor.
+            let file = unsafe { File::from_raw_fd(fd) };
+            let meta = file.metadata().map_err(|error| {
+                RecoveryError::Authenticity(format!(
+                    "recovery object {name} is unreadable: {error}"
+                ))
+            })?;
+            if !meta.file_type().is_file() {
+                return Err(RecoveryError::Authenticity(format!(
+                    "recovery object {name} is not a regular file"
+                )));
+            }
+            Ok(Some(file))
+        }
+
+        /// Open a required record relative to the pinned descriptor. None means
+        /// the directory entry is absent; callers map it to their typed error.
+        pub(super) fn open_read(&self, name: &str) -> Result<Option<File>, RecoveryError> {
+            self.open_at(name, O_RDONLY, 0)
+        }
+
+        pub(super) fn open_lock(&self, name: &str) -> Result<File, RecoveryError> {
+            self.open_at(name, O_RDWR | O_CREAT, 0o600)?
+                .ok_or_else(|| RecoveryError::Authenticity("recovery lock vanished".to_owned()))
+        }
+
+        pub(super) fn check_owner(&self, names: &[&str]) -> Result<(), RecoveryError> {
+            self.check_owner_directory()?;
+            for name in names {
+                if let Some(file) = self.open_read(name)? {
+                    let meta = file.metadata().map_err(|error| {
+                        RecoveryError::Authenticity(format!(
+                            "recovery object {name} is unreadable: {error}"
+                        ))
+                    })?;
+                    if meta.mode() & 0o022 != 0 {
+                        return Err(RecoveryError::Authenticity(format!(
+                            "recovery object {name} is group- or world-writable"
+                        )));
+                    }
+                    if meta.uid() != self.uid {
+                        return Err(RecoveryError::Authenticity(format!(
+                            "recovery object {name} is not owned by the directory owner"
+                        )));
+                    }
+                }
+            }
+            Ok(())
+        }
+
+        pub(super) fn check_owner_optional(&self, name: &str) -> Result<(), RecoveryError> {
+            if self.open_read(name)?.is_some() {
+                self.check_owner(&[name])?;
+            }
+            Ok(())
+        }
+
+        /// Stage a fresh record and rename it into place entirely through the
+        /// pinned descriptor. Any failure removes the staged file and fails the
+        /// caller closed.
+        pub(super) fn replace(&self, name: &str, contents: &str) -> Result<(), RecoveryError> {
+            self.check_identity()?;
+            let temp_name = format!(
+                "{name}.tmp-{}-{}",
+                std::process::id(),
+                NEXT_HIGH_WATER_TEMP.fetch_add(1, Ordering::Relaxed)
+            );
+            let temp = c_name(&temp_name)?;
+            let target = c_name(name)?;
+            // SAFETY: both names are NUL-terminated fixed names and both
+            // directories are the same live pinned descriptor.
+            let fd = unsafe {
+                openat(
+                    self.dir.as_raw_fd(),
+                    temp.as_ptr(),
+                    O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
+                    0o600,
+                )
+            };
+            if fd < 0 {
+                return Err(RecoveryError::Authenticity(format!(
+                    "high-water advance could not be staged: {}",
+                    io::Error::last_os_error()
+                )));
+            }
+            // SAFETY: `openat` returned a fresh, owned descriptor.
+            let mut file = unsafe { File::from_raw_fd(fd) };
+            let write_result = file
+                .write_all(contents.as_bytes())
+                .and_then(|()| file.sync_all());
+            if let Err(error) = write_result {
+                let _ = unsafe { unlinkat(self.dir.as_raw_fd(), temp.as_ptr(), 0) };
+                return Err(RecoveryError::Authenticity(format!(
+                    "high-water advance could not be staged: {error}"
+                )));
+            }
+            drop(file);
+            self.check_identity()?;
+            // SAFETY: the descriptor and both fixed names remain live.
+            let renamed = unsafe {
+                renameat(
+                    self.dir.as_raw_fd(),
+                    temp.as_ptr(),
+                    self.dir.as_raw_fd(),
+                    target.as_ptr(),
+                )
+            };
+            if renamed != 0 {
+                let error = io::Error::last_os_error();
+                let _ = unsafe { unlinkat(self.dir.as_raw_fd(), temp.as_ptr(), 0) };
+                return Err(RecoveryError::Authenticity(format!(
+                    "high-water advance could not be committed: {error}"
+                )));
+            }
+            Ok(())
+        }
+    }
+
+    /// Kernel-held cross-process lock. It is owned by the descriptor, so a
+    /// crashed process releases it and no stale-file age check is involved.
+    pub(super) struct RecoveryLock {
+        _file: File,
+    }
+
+    impl RecoveryLock {
+        pub(super) fn acquire(dir: &PinnedRecoveryDir) -> Result<Self, RecoveryError> {
+            let file = dir.open_lock(RECOVERY_LOCK_FILE)?;
+            // SAFETY: `file` is a live descriptor owned by this guard.
+            let locked = unsafe { flock(file.as_raw_fd(), LOCK_EX) };
+            if locked != 0 {
+                return Err(RecoveryError::Authenticity(format!(
+                    "recovery lock acquisition failed: {}",
+                    io::Error::last_os_error()
+                )));
+            }
+            Ok(Self { _file: file })
+        }
+    }
+
+    fn read_journal_in<T: serde::de::DeserializeOwned>(
+        dir: &PinnedRecoveryDir,
+        name: &str,
+    ) -> Result<Vec<T>, RecoveryError> {
+        let file = dir
+            .open_read(name)?
+            .ok_or_else(|| RecoveryError::JournalMissing(dir.path().join(name)))?;
+        let mut records = Vec::new();
+        for (index, line) in io::BufReader::new(file).lines().enumerate() {
+            let line = line.map_err(|error| {
+                RecoveryError::Snapshot(format!("journal read failure: {error}"))
+            })?;
+            if line.trim().is_empty() {
+                continue;
+            }
+            let record: T = serde_json::from_str(&line).map_err(|error| {
+                RecoveryError::Snapshot(format!("journal line {}: {error}", index + 1))
+            })?;
+            records.push(record);
+        }
+        Ok(records)
+    }
+
+    fn read_json_in<T: serde::de::DeserializeOwned>(
+        dir: &PinnedRecoveryDir,
+        name: &str,
+        what: &str,
+    ) -> Result<T, RecoveryError> {
+        let file = dir.open_read(name)?.ok_or_else(|| {
+            RecoveryError::Authenticity(format!(
+                "{what} is missing: {}",
+                dir.path().join(name).display()
+            ))
+        })?;
+        serde_json::from_reader(io::BufReader::new(file))
+            .map_err(|error| RecoveryError::Authenticity(format!("{what} is corrupt: {error}")))
+    }
+
+    fn read_required_json_in<T: serde::de::DeserializeOwned>(
+        dir: &PinnedRecoveryDir,
+        name: &str,
+    ) -> Result<T, RecoveryError> {
+        let file = dir
+            .open_read(name)?
+            .ok_or_else(|| RecoveryError::JournalMissing(dir.path().join(name)))?;
+        serde_json::from_reader(io::BufReader::new(file))
+            .map_err(|error| RecoveryError::Snapshot(format!("record {name}: {error}")))
+    }
+
+    fn verify_oms_in_dir(
+        dir: &PinnedRecoveryDir,
+        expected: &JournalIdentity,
+        authenticity: &RecoveryAuthenticity,
+    ) -> Result<VerifiedOmsSnapshot, RecoveryError> {
+        if expected.source != ObservationSource::Oms || expected.journal_id.trim().is_empty() {
+            return Err(RecoveryError::Snapshot(
+                "invalid OMS journal identity".to_owned(),
+            ));
+        }
+        if authenticity.requires_os_owner() {
+            dir.check_owner(&[OMS_PERMITS_FILE, OMS_EXECUTIONS_FILE])?;
+            dir.check_owner_optional(&sidecar_name(OMS_PERMITS_FILE))?;
+        }
+        let permits = read_journal_in::<OmsPermitRecord>(dir, OMS_PERMITS_FILE)?;
+        let executions = read_journal_in::<ExecutionRecoveryRecord>(dir, OMS_EXECUTIONS_FILE)?;
+        verify_recovery_chain(&executions)?;
+        let derived = bind_recovery_journal(&permits, &executions)?;
+        if let Some(key) = authenticity.key() {
+            let record: RecoveryBindingRecord = read_json_in(
+                dir,
+                &sidecar_name(OMS_PERMITS_FILE),
+                "owner binding sidecar",
+            )?;
+            record.verify(key, expected, &derived)?;
+        }
+        Ok(VerifiedOmsSnapshot {
+            binding: SnapshotBinding {
+                identity: expected.clone(),
+                schema_version: 1,
+                verification_version: RECOVERY_SNAPSHOT_VERSION,
+                record_count: derived.record_count,
+                first_sequence: derived.first_sequence,
+                last_sequence: derived.last_sequence,
+                head_digest: derived.head_digest,
+                state_digest: derived.state_digest,
+                replay_checkpoint: derived.replay_checkpoint,
+            },
+            permits,
+            executions,
+        })
+    }
+
+    fn verify_account_in_dir(
+        dir: &PinnedRecoveryDir,
+        expected: &JournalIdentity,
+        authenticity: &RecoveryAuthenticity,
+    ) -> Result<VerifiedAccountSnapshot, RecoveryError> {
+        if expected.source != ObservationSource::AccountJournal
+            || expected.journal_id.trim().is_empty()
+        {
+            return Err(RecoveryError::Snapshot(
+                "invalid account journal identity".to_owned(),
+            ));
+        }
+        if authenticity.requires_os_owner() {
+            dir.check_owner(&[ACCOUNT_JOURNAL_FILE, DAILY_PNL_FILE])?;
+            dir.check_owner_optional(&sidecar_name(ACCOUNT_JOURNAL_FILE))?;
+        }
+        let records = read_journal_in::<AccountRecoveryRecord>(dir, ACCOUNT_JOURNAL_FILE)?;
+        let daily_pnl = read_required_json_in::<DailyPnlRecovery>(dir, DAILY_PNL_FILE)?;
+        let derived = bind_recovery_journal(&records, &daily_pnl)?;
+        if let Some(key) = authenticity.key() {
+            let record: RecoveryBindingRecord = read_json_in(
+                dir,
+                &sidecar_name(ACCOUNT_JOURNAL_FILE),
+                "owner binding sidecar",
+            )?;
+            record.verify(key, expected, &derived)?;
+        }
+        Ok(VerifiedAccountSnapshot {
+            binding: SnapshotBinding {
+                identity: expected.clone(),
+                schema_version: 1,
+                verification_version: RECOVERY_SNAPSHOT_VERSION,
+                record_count: derived.record_count,
+                first_sequence: derived.first_sequence,
+                last_sequence: derived.last_sequence,
+                head_digest: derived.head_digest,
+                state_digest: derived.state_digest,
+                replay_checkpoint: derived.replay_checkpoint,
+            },
+            records,
+            daily_pnl,
+        })
+    }
+
+    fn advance_high_water_in_dir(
+        dir: &PinnedRecoveryDir,
+        authenticity: &RecoveryAuthenticity,
+        identity: &JournalIdentity,
+        counter: u64,
+        name: &str,
+    ) -> Result<(), RecoveryError> {
+        let record = match authenticity.key() {
+            Some(key) => RecoveryHighWater::seal(key, identity, counter)?,
+            None => RecoveryHighWater::for_owner_directory(identity, counter),
+        };
+        let text = serde_json::to_string(&record).map_err(|error| {
+            RecoveryError::Authenticity(format!("high-water advance serialization: {error}"))
+        })?;
+        dir.replace(name, &text)
+    }
+
+    pub(super) fn load_pinned(
+        root: &RecoveryJournalRoot,
+        account_id: AccountId,
+    ) -> Result<(VerifiedOmsSnapshot, VerifiedAccountSnapshot), RecoveryError> {
+        let dir = PinnedRecoveryDir::open(&root.root)?;
+        // The lock is acquired before any record is read and released only
+        // when this value drops after the high-water advance has committed.
+        let _lock = RecoveryLock::acquire(&dir)?;
+        if root.authenticity.requires_os_owner() {
+            dir.check_owner_directory()?;
+        }
+        let oms_expected = JournalIdentity::new(ObservationSource::Oms, account_id, OMS_JOURNAL_ID);
+        let account_expected = JournalIdentity::new(
+            ObservationSource::AccountJournal,
+            account_id,
+            ACCOUNT_JOURNAL_ID,
+        );
+        let oms = verify_oms_in_dir(&dir, &oms_expected, &root.authenticity)?;
+        let account = verify_account_in_dir(&dir, &account_expected, &root.authenticity)?;
+
+        if root.authenticity.requires_os_owner() {
+            dir.check_owner(&[
+                OMS_ANCHOR_FILE,
+                ACCOUNT_ANCHOR_FILE,
+                OMS_HIGH_WATER_FILE,
+                ACCOUNT_HIGH_WATER_FILE,
+            ])?;
+        }
+        let oms_anchor_record: RecoveryAnchor =
+            read_json_in(&dir, OMS_ANCHOR_FILE, "terminal anchor")?;
+        let account_anchor_record: RecoveryAnchor =
+            read_json_in(&dir, ACCOUNT_ANCHOR_FILE, "terminal anchor")?;
+        let oms_head = oms.terminal_head();
+        let account_head = account.terminal_head();
+        oms_anchor_record.check(&oms_expected, &oms_head, &root.authenticity)?;
+        account_anchor_record.check(&account_expected, &account_head, &root.authenticity)?;
+
+        let oms_high_water_record: RecoveryHighWater =
+            read_json_in(&dir, OMS_HIGH_WATER_FILE, "trusted high-water counter")?;
+        let account_high_water_record: RecoveryHighWater =
+            read_json_in(&dir, ACCOUNT_HIGH_WATER_FILE, "trusted high-water counter")?;
+        oms_high_water_record.check(
+            &oms_expected,
+            oms_anchor_record.counter,
+            &root.authenticity,
+        )?;
+        account_high_water_record.check(
+            &account_expected,
+            account_anchor_record.counter,
+            &root.authenticity,
+        )?;
+
+        #[cfg(test)]
+        super::recovery_advance_gate();
+        advance_high_water_in_dir(
+            &dir,
+            &root.authenticity,
+            &oms_expected,
+            oms_anchor_record.counter,
+            OMS_HIGH_WATER_FILE,
+        )?;
+        advance_high_water_in_dir(
+            &dir,
+            &root.authenticity,
+            &account_expected,
+            account_anchor_record.counter,
+            ACCOUNT_HIGH_WATER_FILE,
+        )?;
+        Ok((oms, account))
+    }
+}
+
 static NEXT_HIGH_WATER_TEMP: AtomicU64 = AtomicU64::new(1);
 
-/// Advance one high-water record by writing a fresh file and renaming it into
-/// place. A partial or failed write can never leave the persisted counter
-/// unreadable or moved backwards; any failure fails the whole load closed.
-fn advance_high_water(
-    authenticity: &RecoveryAuthenticity,
-    identity: &JournalIdentity,
-    counter: u64,
-    path: &Path,
-) -> Result<(), RecoveryError> {
-    let record = match authenticity.key() {
-        Some(key) => RecoveryHighWater::seal(key, identity, counter)?,
-        None => RecoveryHighWater::for_owner_directory(identity, counter),
-    };
-    let text = serde_json::to_string(&record).map_err(|error| {
-        RecoveryError::Authenticity(format!("high-water advance serialization: {error}"))
-    })?;
-    let temp = path.with_extension(format!(
-        "tmp-{}-{}",
-        std::process::id(),
-        NEXT_HIGH_WATER_TEMP.fetch_add(1, Ordering::Relaxed)
-    ));
-    std::fs::write(&temp, text).map_err(|error| {
-        let _ = std::fs::remove_file(&temp);
-        RecoveryError::Authenticity(format!("high-water advance could not be staged: {error}"))
-    })?;
-    std::fs::rename(&temp, path).map_err(|error| {
-        let _ = std::fs::remove_file(&temp);
-        RecoveryError::Authenticity(format!(
-            "high-water advance could not be committed: {error}"
-        ))
-    })
+// Test-only phase gate. It is installed per thread so concurrent recovery
+// tests can force a deterministic interleaving between verification and the
+// high-water advance without sleeping. Production builds compile it away.
+#[cfg(test)]
+thread_local! {
+    static RECOVERY_ADVANCE_GATE: std::cell::RefCell<
+        Option<(
+            std::sync::mpsc::Sender<()>,
+            std::sync::mpsc::Receiver<()>,
+        )>,
+    > = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn recovery_advance_gate() {
+    RECOVERY_ADVANCE_GATE.with(|slot| {
+        if let Some((reached, release)) = slot.borrow().as_ref() {
+            let _ = reached.send(());
+            let _ = release.recv();
+        }
+    });
 }
 
 /// Owner-side helper that derives the exact binding facts the verifier will
@@ -4357,86 +4876,36 @@ impl RecoveryJournalRoot {
     /// configured authenticity model, and reject a journal whose terminal head
     /// does not match its independently protected anchor. An empty journal is
     /// valid only when the file exists, is signed and is anchored at genesis.
+    /// The whole read-verify-advance sequence runs under one cross-process lock
+    /// on a pinned directory descriptor.
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "macos",
+        target_os = "ios"
+    ))]
     pub fn load(
         &self,
         account_id: AccountId,
     ) -> Result<(VerifiedOmsSnapshot, VerifiedAccountSnapshot), RecoveryError> {
-        if self.authenticity.requires_os_owner() {
-            check_owner_directory(&self.root)?;
-        }
-        let permits = self.root.join(OMS_PERMITS_FILE);
-        let executions = self.root.join(OMS_EXECUTIONS_FILE);
-        let accounts = self.root.join(ACCOUNT_JOURNAL_FILE);
-        let daily_pnl = self.root.join(DAILY_PNL_FILE);
-        let oms_anchor = self.root.join(OMS_ANCHOR_FILE);
-        let account_anchor = self.root.join(ACCOUNT_ANCHOR_FILE);
-        let oms_high_water = self.root.join(OMS_HIGH_WATER_FILE);
-        let account_high_water = self.root.join(ACCOUNT_HIGH_WATER_FILE);
+        recovery_io::load_pinned(self, account_id)
+    }
 
-        let oms_expected = JournalIdentity::new(ObservationSource::Oms, account_id, OMS_JOURNAL_ID);
-        let account_expected = JournalIdentity::new(
-            ObservationSource::AccountJournal,
-            account_id,
-            ACCOUNT_JOURNAL_ID,
-        );
-        let oms =
-            VerifiedOmsSnapshot::verify(&permits, &executions, &oms_expected, &self.authenticity)?;
-        let account = VerifiedAccountSnapshot::verify(
-            &accounts,
-            &daily_pnl,
-            &account_expected,
-            &self.authenticity,
-        )?;
-
-        if self.authenticity.requires_os_owner() {
-            check_owner_journal_paths(&[
-                oms_anchor.as_path(),
-                account_anchor.as_path(),
-                oms_high_water.as_path(),
-                account_high_water.as_path(),
-            ])?;
-        }
-        let oms_anchor_record: RecoveryAnchor = read_auth_json(&oms_anchor, "terminal anchor")?;
-        let account_anchor_record: RecoveryAnchor =
-            read_auth_json(&account_anchor, "terminal anchor")?;
-        let oms_head = oms.terminal_head();
-        let account_head = account.terminal_head();
-        oms_anchor_record.check(&oms_expected, &oms_head, &self.authenticity)?;
-        account_anchor_record.check(&account_expected, &account_head, &self.authenticity)?;
-
-        // The high-water records are required, independently persisted trust
-        // state. A missing, corrupt, foreign or stale counter fails the load
-        // even when the journal and its anchor agree with each other.
-        let oms_high_water_record: RecoveryHighWater =
-            read_auth_json(&oms_high_water, "trusted high-water counter")?;
-        let account_high_water_record: RecoveryHighWater =
-            read_auth_json(&account_high_water, "trusted high-water counter")?;
-        oms_high_water_record.check(
-            &oms_expected,
-            oms_anchor_record.counter,
-            &self.authenticity,
-        )?;
-        account_high_water_record.check(
-            &account_expected,
-            account_anchor_record.counter,
-            &self.authenticity,
-        )?;
-
-        // Only after every check passes may the trusted counters advance to
-        // the verified anchor counters. A failed advance fails the load closed.
-        advance_high_water(
-            &self.authenticity,
-            &oms_expected,
-            oms_anchor_record.counter,
-            &oms_high_water,
-        )?;
-        advance_high_water(
-            &self.authenticity,
-            &account_expected,
-            account_anchor_record.counter,
-            &account_high_water,
-        )?;
-        Ok((oms, account))
+    /// Recovery is unsupported where directory and kernel-lock primitives are
+    /// unavailable; it fails closed instead of using path-based checks.
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "macos",
+        target_os = "ios"
+    )))]
+    pub fn load(
+        &self,
+        _account_id: AccountId,
+    ) -> Result<(VerifiedOmsSnapshot, VerifiedAccountSnapshot), RecoveryError> {
+        Err(RecoveryError::Authenticity(
+            "recovery transaction requires directory pinning primitives".to_owned(),
+        ))
     }
 }
 
@@ -5855,6 +6324,7 @@ mod tests {
         RiskPolicy, //
         ValidatedRiskPolicy,
     };
+    use std::thread;
     use trading_core::{
         AlgoId, //
         JournalRef,
@@ -6749,5 +7219,304 @@ mod tests {
             "recovery rejects a tampered account snapshot binding"
         );
         files.cleanup();
+    }
+
+    // --- Cross-process recovery transaction invariants ---------------------
+
+    fn recovery_test_root(label: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "nirnay-recovery-tx-{label}-{}-{}",
+            std::process::id(),
+            NEXT_TEST_PATH.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("recovery fixture root");
+        root
+    }
+
+    fn write_recovery_value<T: Serialize>(path: &Path, value: &T) {
+        let text = serde_json::to_string(value).expect("serialize recovery value");
+        std::fs::write(path, text).expect("write recovery value");
+    }
+
+    /// Minimal, fully signed recovery root at a chosen anchor/high-water
+    /// counter. Empty journals are valid when they are signed and anchored.
+    fn write_signed_recovery_root(root: &Path, key: &OwnerSigningKey, counter: u64) {
+        let empty_executions: Vec<ExecutionRecoveryRecord> = Vec::new();
+        let empty_permits: Vec<OmsPermitRecord> = Vec::new();
+        let empty_accounts: Vec<AccountRecoveryRecord> = Vec::new();
+        write_lines(&root.join(OMS_PERMITS_FILE), &empty_permits);
+        write_lines(&root.join(OMS_EXECUTIONS_FILE), &empty_executions);
+        write_lines(&root.join(ACCOUNT_JOURNAL_FILE), &empty_accounts);
+        write_recovery_value(&root.join(DAILY_PNL_FILE), &DailyPnlRecovery::default());
+        let oms_binding =
+            recovery_binding_record(key, &oms_identity(), &empty_permits, &empty_executions)
+                .expect("oms binding");
+        let account_binding = recovery_binding_record(
+            key,
+            &account_identity(),
+            &empty_accounts,
+            &DailyPnlRecovery::default(),
+        )
+        .expect("account binding");
+        write_recovery_value(
+            &root.join(format!("{OMS_PERMITS_FILE}{BINDING_SUFFIX}")),
+            &oms_binding,
+        );
+        write_recovery_value(
+            &root.join(format!("{ACCOUNT_JOURNAL_FILE}{BINDING_SUFFIX}")),
+            &account_binding,
+        );
+        let genesis = genesis_digest();
+        write_recovery_value(
+            &root.join(OMS_ANCHOR_FILE),
+            &RecoveryAnchor::seal(key, &oms_identity(), counter, 0, genesis).expect("oms anchor"),
+        );
+        write_recovery_value(
+            &root.join(ACCOUNT_ANCHOR_FILE),
+            &RecoveryAnchor::seal(key, &account_identity(), counter, 0, genesis)
+                .expect("account anchor"),
+        );
+        write_recovery_value(
+            &root.join(OMS_HIGH_WATER_FILE),
+            &RecoveryHighWater::seal(key, &oms_identity(), counter).expect("oms high water"),
+        );
+        write_recovery_value(
+            &root.join(ACCOUNT_HIGH_WATER_FILE),
+            &RecoveryHighWater::seal(key, &account_identity(), counter)
+                .expect("account high water"),
+        );
+    }
+
+    fn read_high_water_counter(path: &Path) -> u64 {
+        let text = std::fs::read_to_string(path).expect("read high water");
+        let record: RecoveryHighWater = serde_json::from_str(&text).expect("parse high water");
+        record.counter
+    }
+
+    fn recovery_gate_channels() -> (
+        std::sync::mpsc::Sender<()>,
+        std::sync::mpsc::Receiver<()>,
+        std::sync::mpsc::Receiver<()>,
+        std::sync::mpsc::Sender<()>,
+    ) {
+        let (reached_tx, reached_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        (reached_tx, reached_rx, release_rx, release_tx)
+    }
+
+    /// Install the gate on the calling thread. Recovery threads call this
+    /// before `load`; the gate is thread-local so unrelated loads are no-ops.
+    fn install_recovery_gate(
+        reached_tx: std::sync::mpsc::Sender<()>,
+        release_rx: std::sync::mpsc::Receiver<()>,
+    ) {
+        RECOVERY_ADVANCE_GATE.with(|slot| {
+            *slot.borrow_mut() = Some((reached_tx, release_rx));
+        });
+    }
+
+    #[cfg(unix)]
+    #[allow(unsafe_code)] // kernel file lock is only exposed through libc FFI
+    fn recovery_lock_is_held(root: &Path) -> bool {
+        use std::os::unix::io::AsRawFd;
+
+        unsafe extern "C" {
+            fn flock(fd: i32, operation: i32) -> i32;
+        }
+
+        let path = root.join(RECOVERY_LOCK_FILE);
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .expect("open recovery lock file");
+        // LOCK_EX | LOCK_NB: a held kernel lock makes this fail immediately.
+        unsafe { flock(file.as_raw_fd(), 2 | 4) != 0 }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn concurrent_recovery_never_regresses_the_high_water() {
+        let key = OwnerSigningKey::new(b"recovery-serialization-key".to_vec()).expect("key");
+        let root = recovery_test_root("serial-race");
+        write_signed_recovery_root(&root, &key, 11);
+        let high_water = root.join(OMS_HIGH_WATER_FILE);
+        let mut observed = vec![read_high_water_counter(&high_water)];
+
+        let (reached_tx, reached_rx, release_rx, release_tx) = recovery_gate_channels();
+        let older_root = root.clone();
+        let older_key = key.clone();
+        let (older_done_tx, older_done_rx) = std::sync::mpsc::channel();
+        let older = thread::spawn(move || {
+            install_recovery_gate(reached_tx, release_rx);
+            let result = RecoveryJournalRoot::new(
+                older_root.clone(),
+                RecoveryAuthenticity::OwnerSignature(older_key),
+            )
+            .load(AccountId::new(1).expect("account"));
+            let counter = read_high_water_counter(&older_root.join(OMS_HIGH_WATER_FILE));
+            older_done_tx
+                .send((result, counter))
+                .expect("send older result");
+        });
+
+        reached_rx
+            .recv()
+            .expect("older recovery reached the advance gate");
+        // The older recovery verified counter 11. Publish the newer owner
+        // state (counter 12) while it is still inside its transaction.
+        write_signed_recovery_root(&root, &key, 12);
+        let lock_held = recovery_lock_is_held(&root);
+        let (newer_done_tx, newer_done_rx) = std::sync::mpsc::channel();
+        let newer_root = root.clone();
+        let newer_key = key.clone();
+        let newer = thread::spawn(move || {
+            let result = RecoveryJournalRoot::new(
+                newer_root,
+                RecoveryAuthenticity::OwnerSignature(newer_key),
+            )
+            .load(AccountId::new(1).expect("account"));
+            newer_done_tx.send(result).expect("send newer result");
+        });
+
+        if !lock_held {
+            // Without a transaction lock the newer recovery commits 12.
+            newer_done_rx
+                .recv()
+                .expect("newer recovery completed")
+                .expect("newer recovery succeeded");
+        }
+        observed.push(read_high_water_counter(&high_water));
+        release_tx.send(()).expect("release older recovery");
+        let (older_result, _) = older_done_rx.recv().expect("older recovery completed");
+        assert!(
+            older_result.is_ok(),
+            "both recoveries present valid anchors"
+        );
+        if lock_held {
+            newer_done_rx
+                .recv()
+                .expect("newer recovery completed after lock release")
+                .expect("newer recovery succeeded");
+        }
+        let _ = older.join();
+        let _ = newer.join();
+        observed.push(read_high_water_counter(&high_water));
+
+        assert!(
+            observed.windows(2).all(|pair| pair[0] <= pair[1]),
+            "persisted high-water never decreases: {observed:?}"
+        );
+        assert_eq!(
+            observed.last().copied(),
+            Some(12),
+            "the maximum committed counter is persisted: {observed:?}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn recovery_lock_is_held_until_the_transaction_finishes() {
+        let key = OwnerSigningKey::new(b"recovery-lock-key".to_vec()).expect("key");
+        let root = recovery_test_root("lock-scope");
+        write_signed_recovery_root(&root, &key, 3);
+
+        let (reached_tx, reached_rx, release_rx, release_tx) = recovery_gate_channels();
+        let loader_root = root.clone();
+        let loader_key = key.clone();
+        let loader = thread::spawn(move || {
+            install_recovery_gate(reached_tx, release_rx);
+            RecoveryJournalRoot::new(
+                loader_root,
+                RecoveryAuthenticity::OwnerSignature(loader_key),
+            )
+            .load(AccountId::new(1).expect("account"))
+        });
+
+        reached_rx
+            .recv()
+            .expect("recovery reached the advance gate");
+        assert!(
+            recovery_lock_is_held(&root),
+            "the kernel lock is held across verification and advance"
+        );
+        release_tx.send(()).expect("release recovery");
+        assert!(
+            loader.join().expect("loader thread").is_ok(),
+            "the gated recovery succeeds"
+        );
+        assert!(
+            !recovery_lock_is_held(&root),
+            "the kernel lock is released only after the transaction finishes"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn pinned_directory_identity_change_is_rejected() {
+        let key = OwnerSigningKey::new(b"recovery-dir-pin-key".to_vec()).expect("key");
+        let root = recovery_test_root("dir-swap");
+        write_signed_recovery_root(&root, &key, 3);
+        let swapped = root.with_extension("swapped");
+        let _ = std::fs::remove_dir_all(&swapped);
+
+        let (reached_tx, reached_rx, release_rx, release_tx) = recovery_gate_channels();
+        let loader_root = root.clone();
+        let loader_key = key.clone();
+        let loader = thread::spawn(move || {
+            install_recovery_gate(reached_tx, release_rx);
+            RecoveryJournalRoot::new(
+                loader_root,
+                RecoveryAuthenticity::OwnerSignature(loader_key),
+            )
+            .load(AccountId::new(1).expect("account"))
+        });
+
+        reached_rx
+            .recv()
+            .expect("recovery reached the advance gate");
+        std::fs::rename(&root, &swapped).expect("swap recovery directory");
+        std::fs::create_dir_all(&root).expect("replacement recovery directory");
+        write_signed_recovery_root(&root, &key, 3);
+        release_tx.send(()).expect("release recovery");
+
+        let result = loader.join().expect("loader thread");
+        assert!(
+            matches!(result, Err(RecoveryError::Authenticity(_))),
+            "a directory identity change after pinning is rejected"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&swapped);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn high_water_symlink_is_refused() {
+        let key = OwnerSigningKey::new(b"recovery-nofollow-key".to_vec()).expect("key");
+        let root = recovery_test_root("nofollow");
+        write_signed_recovery_root(&root, &key, 3);
+        let target = root.with_extension("high-water-target");
+        write_recovery_value(
+            &target,
+            &RecoveryHighWater::seal(&key, &oms_identity(), 3).expect("target high water"),
+        );
+        let high_water = root.join(OMS_HIGH_WATER_FILE);
+        std::fs::remove_file(&high_water).expect("remove regular high water");
+        std::os::unix::fs::symlink(&target, &high_water).expect("link high water");
+
+        let result =
+            RecoveryJournalRoot::new(root.clone(), RecoveryAuthenticity::OwnerSignature(key))
+                .load(AccountId::new(1).expect("account"));
+        assert!(
+            matches!(result, Err(RecoveryError::Authenticity(_))),
+            "a symlinked high-water record is refused"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_file(&target);
     }
 }
