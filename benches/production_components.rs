@@ -1626,6 +1626,10 @@ fn run_main() -> Result<(), String> {
         "nearest-rank: sort ascending, index = round((n-1)*fraction); count_beyond_X counts strictly greater samples; raw_histogram_ns is lossless",
     );
     artifact.string("source_sha", &source_sha);
+    artifact.string(
+        "source_sha_scope",
+        "commit containing the benchmark source at measurement time; a file cannot contain the SHA of the commit that contains it, so the later artifact-only commit is not self-bound",
+    );
     artifact.string("base_sha", BASE_SHA);
     artifact.string("binary_digest_sha256", &binary_digest);
     artifact.string(

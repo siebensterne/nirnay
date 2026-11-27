@@ -1315,7 +1315,6 @@ dependencies = [
  "account-journal",
  "authoritative-oms",
  "broker-adapter",
- "cost-model",
  "market-event",
  "market-kernel",
  "ops-runtime",

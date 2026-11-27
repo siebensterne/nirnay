@@ -28,7 +28,6 @@ trading-core.workspace = true
 
 [dev-dependencies]
 account-journal.workspace = true
-cost-model.workspace = true
 paper-engine.workspace = true
 tempfile.workspace = true
 
@@ -41,8 +40,9 @@ name = "certification"
 path = "tests/certification.rs"
 
 # Neutral, std-workload benchmark of real production components. The source
-# lives in the workspace-level benches/ directory; all required crates are
-# already declared above, so no dependency is added.
+# lives in the workspace-level benches/ directory. One existing workspace
+# dev-dependency (`paper-engine`) is added to link the real engine; no new
+# external dependency is introduced.
 [[bench]]
 name = "production_components"
 path = "../../benches/production_components.rs"
