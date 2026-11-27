@@ -1134,6 +1134,8 @@ impl AuthorityState {
 pub struct RiskAuthority {
     account_id: AccountId,
     policy: ValidatedRiskPolicy,
+    /// Evaluator version and build identity bound into authored decisions.
+    evaluator: EvaluatorIdentity,
     instruments: BTreeMap<InstrumentId, Instrument>,
     /// Synthetic instrument-to-sector mapping. Absent labels deny new risk
     /// once a sector cap is configured in the policy.
@@ -1154,6 +1156,7 @@ pub struct RiskAuthority {
 
 struct BuildOptions {
     control: Box<dyn ControlStore + Send + Sync>,
+    evaluator: EvaluatorIdentity,
     decision_store: Option<Box<dyn DecisionStore + Send + Sync>>,
     ownership: Option<AuthorityOwnership>,
     startup_error: Option<RecoveryError>,
@@ -1172,6 +1175,7 @@ impl RiskAuthority {
         Self {
             account_id,
             policy,
+            evaluator: options.evaluator,
             instruments: instruments
                 .into_iter()
                 .map(|instrument| (instrument.instrument_id.clone(), instrument))
@@ -1203,6 +1207,7 @@ impl RiskAuthority {
             trade_date,
             BuildOptions {
                 control: Box::new(NoopControlStore),
+                evaluator: Self::default_evaluator(),
                 decision_store: None,
                 ownership: None,
                 startup_error: None,
@@ -1263,6 +1268,7 @@ impl RiskAuthority {
             trade_date,
             BuildOptions {
                 control,
+                evaluator: Self::default_evaluator(),
                 decision_store: None,
                 ownership: None,
                 startup_error,
@@ -1307,6 +1313,195 @@ impl RiskAuthority {
     pub fn with_observation_policy(mut self, policy: ObservationPolicy) -> Self {
         self.observation_policy = policy;
         self
+    }
+
+    /// Attach a decision store to a simulation authority. The authority owns
+    /// the store; callers that need the appended records keep a clone of an
+    /// in-memory store before handing it over.
+    #[must_use]
+    pub fn with_decision_store(mut self, store: Box<dyn DecisionStore + Send + Sync>) -> Self {
+        self.decision_store = Some(store);
+        self
+    }
+
+    fn default_evaluator() -> EvaluatorIdentity {
+        EvaluatorIdentity {
+            version: "risk-engine-v1".to_owned(),
+            build: "nirnay-risk-authority/2026-11-27".to_owned(),
+        }
+    }
+
+    /// The evaluator identity bound into every decision authored here. Replay
+    /// compares a recorded identity with the identity supplied by its caller;
+    /// a changed build is reported rather than silently replayed.
+    #[must_use]
+    pub fn evaluator_identity(&self) -> EvaluatorIdentity {
+        self.evaluator.clone()
+    }
+
+    /// Capture the authority-owned inputs that one evaluation will use as a
+    /// replayable reference set. Call before the decision so the captured
+    /// exposures are the pre-decision state the rule set actually saw.
+    pub fn replay_inputs(
+        &self,
+        intent: OrderIntent,
+        observations: &Observations,
+    ) -> Result<DecisionReplayInputs, AuthorityError> {
+        let state = self.lock()?;
+        let mut candidate = state.clone();
+        self.check_observations_locked(&mut candidate, observations)?;
+        let daily_pnl = self
+            .validate_daily_pnl_for_evaluation(&candidate, observations)
+            .map_err(|error| AuthorityError::ControlFailure(format!("daily pnl: {error}")))?;
+        let context = self.build_context(&candidate, &intent, observations, daily_pnl)?;
+        let lineage = self.build_lineage(&candidate, &intent, observations)?;
+        Ok(DecisionReplayInputs {
+            lineage,
+            policy: self.policy.clone(),
+            intent,
+            context,
+        })
+    }
+
+    /// Bind every decision input to a stable reference and a content digest.
+    /// A missing required reference denies the decision; no payload is copied
+    /// into the returned set.
+    fn build_lineage(
+        &self,
+        state: &AuthorityState,
+        intent: &OrderIntent,
+        observations: &Observations,
+    ) -> Result<DecisionLineage, AuthorityError> {
+        let missing = |source: ObservationSource| AuthorityError::MissingObservation {
+            observation_source: source,
+        };
+        let market = observations
+            .market
+            .as_ref()
+            .ok_or_else(|| missing(ObservationSource::MarketDataKernel))?;
+        let journal = observations
+            .account_journal
+            .as_ref()
+            .ok_or_else(|| missing(ObservationSource::AccountJournal))?;
+        let ops = observations
+            .ops
+            .as_ref()
+            .ok_or_else(|| missing(ObservationSource::Ops))?;
+        let operator = observations
+            .operator
+            .as_ref()
+            .ok_or_else(|| missing(ObservationSource::OperatorControl))?;
+        let reconciliation = observations
+            .reconciliation
+            .as_ref()
+            .ok_or_else(|| missing(ObservationSource::Reconciliation))?;
+        let pnl = state.daily_pnl.as_ref().ok_or_else(|| {
+            AuthorityError::ControlFailure(
+                "decision lineage: daily pnl snapshot reference is missing".to_owned(),
+            )
+        })?;
+        let market_digest = digest_json(&market.payload)?;
+        let account_digest = digest_json(&(
+            &state.positions,
+            &state.pending_buy,
+            &state.pending_sell,
+            state.gross_exposure_paise,
+            state.pending_gross_exposure_paise,
+            &state.strategy_exposure,
+            &state.sector_exposure,
+        ))?;
+        let control_digest = digest_json(&(
+            &ops.payload,
+            &operator.payload,
+            state.kill_switch_engaged,
+            state.session_open,
+            state.account_snapshot_available,
+        ))?;
+        let reconciliation_digest = digest_json(&(
+            &reconciliation.payload,
+            &state.reconciliation_decision,
+            state.reconciliation_blocked,
+        ))?;
+        let config_digest = digest_json(&(
+            self.observation_policy.max_market_age_ns,
+            self.observation_policy.max_oms_age_ns,
+            self.observation_policy.max_account_journal_age_ns,
+            self.observation_policy.max_reconciliation_age_ns,
+            self.observation_policy.max_ops_age_ns,
+            self.observation_policy.max_operator_age_ns,
+            self.observation_policy.max_sequence_gaps,
+            self.observation_policy.max_journal_append_latency_ns,
+            self.observation_policy.max_journal_queue_depth,
+            self.observation_policy.min_disk_available_bytes,
+            self.observation_policy.max_unknown_orders,
+            self.observation_policy.max_reconciliation_differences,
+        ))?;
+        let instrument_version = self
+            .instruments
+            .get(&intent.instrument_id)
+            .map(digest_json)
+            .transpose()?
+            .unwrap_or_else(|| "instrument:absent".to_owned());
+        Ok(DecisionLineage {
+            schema_version: DECISION_LINEAGE_VERSION,
+            policy_digest: digest_json(&*self.policy)?,
+            evaluator: self.evaluator.clone(),
+            intent_id: Some(intent.intent_id),
+            intent_digest: digest_json(intent)?,
+            market_ref: InputRef {
+                reference: format!(
+                    "market:schema={}:epoch={}:seq={}",
+                    market.payload.kernel_schema_version,
+                    market
+                        .payload
+                        .connection_epoch
+                        .map_or_else(|| "none".to_owned(), |value| value.to_string()),
+                    market
+                        .payload
+                        .source_sequence
+                        .map_or_else(|| "none".to_owned(), |value| value.to_string()),
+                ),
+                digest: market_digest.clone(),
+            },
+            account_ref: InputRef {
+                reference: format!(
+                    "account:journal={}:seq={}",
+                    journal.payload.head_hash_hex, journal.payload.record_count
+                ),
+                digest: account_digest,
+            },
+            pnl_ref: InputRef {
+                reference: format!(
+                    "pnl:journal={}:seq={}",
+                    pnl.account_journal_digest, pnl.account_journal_sequence
+                ),
+                digest: digest_json(pnl)?,
+            },
+            instrument_version,
+            control_digest,
+            reconciliation_ref: InputRef {
+                reference: format!(
+                    "recon:{}:{:?}",
+                    reconciliation.payload.report.reconciliation_id,
+                    reconciliation.payload.report.status
+                ),
+                digest: reconciliation_digest,
+            },
+            source: SourceBinding {
+                digest: market_digest,
+                sequence: market.payload.source_sequence.unwrap_or(0),
+            },
+            versions: ModelVersions {
+                feature: DECISION_FEATURE_VERSION.to_owned(),
+                strategy: intent.strategy_version.clone(),
+                config: config_digest,
+                model: DECISION_MODEL_VERSION.to_owned(),
+            },
+            clock: ClockBinding {
+                identity: CLOCK_BINDING_IDENTITY.to_owned(),
+                at_ns: i64::try_from(state.now.get()).unwrap_or(i64::MAX),
+            },
+        })
     }
 
     /// Expose the deterministic permit-to-intent digest for a committed
@@ -1971,15 +2166,25 @@ impl RiskAuthority {
         if !assessment.accepted {
             // Remembering a rejection is a state change in its own right and
             // must invalidate any fence taken before it.
+            let lineage = self.build_lineage(&state, &intent, &observations)?;
+            let outcome_digest = rule_outcome_digest(&assessment);
             let mut candidate = state.clone();
             candidate.decided.insert(intent.intent_id, intent.clone());
             candidate.bump_revision()?;
-            self.persist_decision(&candidate, &intent, DecisionOutcome::Rejected, 0, 0)?;
+            self.persist_decision(
+                &candidate,
+                &intent,
+                DecisionOutcome::Rejected,
+                0,
+                0,
+                lineage,
+                outcome_digest,
+            )?;
             *state = candidate;
             return Err(AuthorityError::Rejected(assessment));
         }
 
-        self.commit_reservation(&mut state, &intent, &assessment)
+        self.commit_reservation(&mut state, &intent, &assessment, Some(&observations))
     }
 
     fn build_context(
@@ -2072,6 +2277,7 @@ impl RiskAuthority {
         state: &mut AuthorityState,
         intent: &OrderIntent,
         assessment: &RiskAssessment,
+        observations: Option<&Observations>,
     ) -> Result<Reservation, AuthorityError> {
         // Plan every affected quantity with checked arithmetic before any of
         // it is written back, so a late overflow cannot leave a partial
@@ -2174,12 +2380,19 @@ impl RiskAuthority {
             .reservations
             .insert(intent.intent_id, reservation.clone());
         candidate.decided.insert(intent.intent_id, intent.clone());
+        let lineage = observations
+            .map(|values| self.build_lineage(state, intent, values))
+            .transpose()?
+            .unwrap_or_else(DecisionLineage::unbound);
+        let outcome_digest = rule_outcome_digest(assessment);
         self.persist_decision(
             &candidate,
             intent,
             DecisionOutcome::Accepted,
             permit_id,
             notional_paise.0,
+            lineage,
+            outcome_digest,
         )?;
         *state = candidate;
         Ok(reservation)
@@ -2188,6 +2401,7 @@ impl RiskAuthority {
     /// Append the authority-owned decision record before committing the state.
     /// A store failure therefore leaves both the durable stream and the in-memory
     /// state unchanged.
+    #[allow(clippy::too_many_arguments)] // lineage and rule digest are one atomic decision bundle
     fn persist_decision(
         &self,
         state: &AuthorityState,
@@ -2195,6 +2409,8 @@ impl RiskAuthority {
         outcome: DecisionOutcome,
         permit_id: u64,
         notional_paise: i64,
+        lineage: DecisionLineage,
+        rule_outcome_digest: String,
     ) -> Result<(), AuthorityError> {
         let Some(store) = self.decision_store.as_ref() else {
             return Ok(());
@@ -2209,6 +2425,8 @@ impl RiskAuthority {
             at_ns,
         );
         record.policy_version = self.policy.version.clone();
+        record.lineage = lineage;
+        record.rule_outcome_digest = rule_outcome_digest;
         store
             .append_decision(&record)
             .map_err(|error| AuthorityError::ControlFailure(format!("decision store: {error}")))?;
@@ -2271,6 +2489,8 @@ impl RiskAuthority {
             DecisionOutcome::Released,
             reservation.permit_id,
             reservation.reserved_notional_paise.0,
+            DecisionLineage::unbound(),
+            String::new(),
         )?;
         *state = candidate;
         Ok(reservation)
@@ -2365,6 +2585,8 @@ impl RiskAuthority {
             DecisionOutcome::Filled,
             reservation.permit_id,
             reservation.reserved_notional_paise.0,
+            DecisionLineage::unbound(),
+            String::new(),
         )?;
         *state = candidate;
         Ok(reservation)
@@ -2754,6 +2976,318 @@ pub enum OmsPermitState {
     Unknown,
 }
 
+/// Version of the immutable decision input-reference set. An unknown version
+/// is never interpreted by replay.
+pub const DECISION_LINEAGE_VERSION: u32 = 1;
+
+/// Identity of the logical clock every decision timestamp is measured on.
+pub const CLOCK_BINDING_IDENTITY: &str = "nirnay-logical-clock-v1";
+
+/// Version of the derived feature and rule-model sets used at evaluation.
+pub const DECISION_FEATURE_VERSION: &str = "risk-features-v1";
+pub const DECISION_MODEL_VERSION: &str = "risk-rule-set-v1";
+
+/// Identity of the risk evaluator and its build. Replay refuses a record
+/// authored by a different evaluator rather than silently applying the current
+/// rules to an older rule-level outcome.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EvaluatorIdentity {
+    pub version: String,
+    pub build: String,
+}
+
+/// A stable reference to one authority-owned input plus the digest of its
+/// content. The referenced payload is never copied into the decision record.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InputRef {
+    pub reference: String,
+    pub digest: String,
+}
+
+/// Source-data digest and the exact sequence at which it was observed.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourceBinding {
+    pub digest: String,
+    pub sequence: u64,
+}
+
+/// Feature, strategy, configuration and model versions in force at decision.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelVersions {
+    pub feature: String,
+    pub strategy: String,
+    pub config: String,
+    pub model: String,
+}
+
+/// Clock identity and the evaluation timestamp on that clock.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClockBinding {
+    pub identity: String,
+    pub at_ns: i64,
+}
+
+/// The versioned, immutable set of input references a decision was derived
+/// from. Every field is a stable identity, a digest or a version; no owner
+/// payload is duplicated here. Replay resolves each reference against freshly
+/// supplied inputs and re-derives the rule-level outcome instead of trusting
+/// the recorded verdict alone.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DecisionLineage {
+    pub schema_version: u32,
+    /// Digest of the exact validated policy content used for evaluation.
+    pub policy_digest: String,
+    pub evaluator: EvaluatorIdentity,
+    pub intent_id: Option<IntentId>,
+    pub intent_digest: String,
+    pub market_ref: InputRef,
+    pub account_ref: InputRef,
+    pub pnl_ref: InputRef,
+    /// Digest of the effective instrument specification, used as its version.
+    pub instrument_version: String,
+    pub control_digest: String,
+    pub reconciliation_ref: InputRef,
+    pub source: SourceBinding,
+    pub versions: ModelVersions,
+    pub clock: ClockBinding,
+}
+
+impl Default for DecisionLineage {
+    fn default() -> Self {
+        Self {
+            schema_version: DECISION_LINEAGE_VERSION,
+            policy_digest: String::new(),
+            evaluator: EvaluatorIdentity::default(),
+            intent_id: None,
+            intent_digest: String::new(),
+            market_ref: InputRef::default(),
+            account_ref: InputRef::default(),
+            pnl_ref: InputRef::default(),
+            instrument_version: String::new(),
+            control_digest: String::new(),
+            reconciliation_ref: InputRef::default(),
+            source: SourceBinding::default(),
+            versions: ModelVersions::default(),
+            clock: ClockBinding::default(),
+        }
+    }
+}
+
+impl DecisionLineage {
+    /// An unbound reference set. Kept for schema compatibility with older
+    /// records; replay never accepts it. Only an authority evaluation binds
+    /// real references.
+    #[must_use]
+    pub fn unbound() -> Self {
+        Self::default()
+    }
+}
+
+/// A fail-closed replay report. Every variant states that the decision is
+/// non-reproducible; no mismatch is silently accepted as a successful replay.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum ReplayError {
+    #[error("non-reproducible decision: outcome {0} is not an evaluation")]
+    NotReplayable(String),
+    #[error("non-reproducible decision: lineage schema {0} is unsupported")]
+    UnsupportedLineage(u32),
+    #[error(
+        "non-reproducible decision: evaluator identity changed from {recorded:?} to {current:?}"
+    )]
+    EvaluatorChanged {
+        recorded: EvaluatorIdentity,
+        current: EvaluatorIdentity,
+    },
+    #[error("non-reproducible decision: reference {0} is missing")]
+    MissingReference(String),
+    #[error("non-reproducible decision: reference {0} was altered")]
+    AlteredReference(String),
+    #[error("non-reproducible decision: rule-level outcome differs")]
+    OutcomeChanged,
+}
+
+/// The rule-level outcome of a successful replay.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DecisionReplay {
+    pub intent_id: IntentId,
+    pub outcome: DecisionOutcome,
+    pub accepted: bool,
+    pub rule_outcome_digest: String,
+    pub reproducible: bool,
+}
+
+/// The caller-supplied inputs that resolve a recorded reference set. These
+/// values are held only in memory for the duration of replay; none of them is
+/// copied into a durable decision record.
+#[derive(Clone, Debug)]
+pub struct DecisionReplayInputs {
+    pub lineage: DecisionLineage,
+    pub policy: ValidatedRiskPolicy,
+    pub intent: OrderIntent,
+    pub context: RiskContext,
+}
+
+fn digest_json<T: Serialize>(value: &T) -> Result<String, AuthorityError> {
+    serde_json::to_string(value)
+        .map(|text| digest::sha256_hex(text.as_bytes()))
+        .map_err(|error| {
+            AuthorityError::ControlFailure(format!("decision lineage digest: {error}"))
+        })
+}
+
+fn rule_outcome_digest(assessment: &RiskAssessment) -> String {
+    serde_json::to_string(&(&assessment.accepted, &assessment.checks))
+        .map(|text| digest::sha256_hex(text.as_bytes()))
+        .unwrap_or_default()
+}
+
+fn verify_lineage_ref(
+    name: &'static str,
+    recorded: &str,
+    supplied: &str,
+) -> Result<(), ReplayError> {
+    if recorded.is_empty() || supplied.is_empty() {
+        return Err(ReplayError::MissingReference(name.to_owned()));
+    }
+    if recorded != supplied {
+        return Err(ReplayError::AlteredReference(name.to_owned()));
+    }
+    Ok(())
+}
+
+fn verify_input_ref(
+    name: &'static str,
+    recorded: &InputRef,
+    supplied: &InputRef,
+) -> Result<(), ReplayError> {
+    verify_lineage_ref(name, &recorded.reference, &supplied.reference)?;
+    verify_lineage_ref(name, &recorded.digest, &supplied.digest)
+}
+
+/// Re-evaluate a durable decision against the supplied input set. Every
+/// reference must be present and unchanged, the evaluator identity must match,
+/// and the re-derived rule-level outcome must equal the recorded digest.
+pub fn replay_decision(
+    record: &RiskDecisionRecord,
+    inputs: &DecisionReplayInputs,
+    evaluator: &EvaluatorIdentity,
+) -> Result<DecisionReplay, ReplayError> {
+    if record.lineage.schema_version != DECISION_LINEAGE_VERSION {
+        return Err(ReplayError::UnsupportedLineage(
+            record.lineage.schema_version,
+        ));
+    }
+    match record.outcome {
+        DecisionOutcome::Accepted | DecisionOutcome::Rejected => {}
+        other => return Err(ReplayError::NotReplayable(format!("{other:?}"))),
+    }
+    verify_lineage_ref(
+        "policy",
+        &record.lineage.policy_digest,
+        &inputs.lineage.policy_digest,
+    )?;
+    verify_lineage_ref(
+        "intent",
+        &record.lineage.intent_digest,
+        &inputs.lineage.intent_digest,
+    )?;
+    verify_input_ref(
+        "market",
+        &record.lineage.market_ref,
+        &inputs.lineage.market_ref,
+    )?;
+    verify_input_ref(
+        "account",
+        &record.lineage.account_ref,
+        &inputs.lineage.account_ref,
+    )?;
+    verify_input_ref("pnl", &record.lineage.pnl_ref, &inputs.lineage.pnl_ref)?;
+    verify_lineage_ref(
+        "instrument",
+        &record.lineage.instrument_version,
+        &inputs.lineage.instrument_version,
+    )?;
+    verify_lineage_ref(
+        "control",
+        &record.lineage.control_digest,
+        &inputs.lineage.control_digest,
+    )?;
+    verify_input_ref(
+        "reconciliation",
+        &record.lineage.reconciliation_ref,
+        &inputs.lineage.reconciliation_ref,
+    )?;
+    if record.lineage.source.digest.is_empty() || inputs.lineage.source.digest.is_empty() {
+        return Err(ReplayError::MissingReference("source".to_owned()));
+    }
+    if record.lineage.source != inputs.lineage.source {
+        return Err(ReplayError::AlteredReference("source".to_owned()));
+    }
+    verify_lineage_ref(
+        "feature",
+        &record.lineage.versions.feature,
+        &inputs.lineage.versions.feature,
+    )?;
+    verify_lineage_ref(
+        "strategy",
+        &record.lineage.versions.strategy,
+        &inputs.lineage.versions.strategy,
+    )?;
+    verify_lineage_ref(
+        "config",
+        &record.lineage.versions.config,
+        &inputs.lineage.versions.config,
+    )?;
+    verify_lineage_ref(
+        "model",
+        &record.lineage.versions.model,
+        &inputs.lineage.versions.model,
+    )?;
+    if record.lineage.clock.identity.is_empty() || inputs.lineage.clock.identity.is_empty() {
+        return Err(ReplayError::MissingReference("clock".to_owned()));
+    }
+    if record.lineage.clock != inputs.lineage.clock || record.at_ns != record.lineage.clock.at_ns {
+        return Err(ReplayError::AlteredReference("clock".to_owned()));
+    }
+    match (record.lineage.intent_id, inputs.lineage.intent_id) {
+        (None, _) | (_, None) => return Err(ReplayError::MissingReference("intent".to_owned())),
+        (Some(recorded_id), Some(supplied_id)) if recorded_id != supplied_id => {
+            return Err(ReplayError::AlteredReference("intent".to_owned()));
+        }
+        (Some(_), Some(_)) => {}
+    }
+    if record.lineage.evaluator != inputs.lineage.evaluator {
+        return Err(ReplayError::AlteredReference("evaluator".to_owned()));
+    }
+    if record.lineage.evaluator != *evaluator {
+        return Err(ReplayError::EvaluatorChanged {
+            recorded: record.lineage.evaluator.clone(),
+            current: evaluator.clone(),
+        });
+    }
+    if inputs.intent.intent_id != record.intent_id {
+        return Err(ReplayError::AlteredReference("intent".to_owned()));
+    }
+    let assessment = evaluate_risk(&inputs.intent, &inputs.policy, &inputs.context);
+    let computed = rule_outcome_digest(&assessment);
+    if computed != record.rule_outcome_digest {
+        return Err(ReplayError::OutcomeChanged);
+    }
+    Ok(DecisionReplay {
+        intent_id: record.intent_id,
+        outcome: record.outcome,
+        accepted: assessment.accepted,
+        rule_outcome_digest: computed,
+        reproducible: true,
+    })
+}
+
 /// One authority-authored decision. It is appended durably before the in-memory
 /// transition is committed.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -2771,6 +3305,14 @@ pub struct RiskDecisionRecord {
     pub outcome: DecisionOutcome,
     pub notional_paise: i64,
     pub at_ns: i64,
+    /// Versioned immutable input-reference set. Absent in legacy records and
+    /// then unbound; never inferred from the recorded verdict.
+    #[serde(default)]
+    pub lineage: DecisionLineage,
+    /// Digest of the rule-level outcome, so replay can compare derived rules
+    /// rather than trusting a stored boolean.
+    #[serde(default)]
+    pub rule_outcome_digest: String,
 }
 
 impl RiskDecisionRecord {
@@ -2796,6 +3338,8 @@ impl RiskDecisionRecord {
             outcome,
             notional_paise,
             at_ns,
+            lineage: DecisionLineage::unbound(),
+            rule_outcome_digest: String::new(),
         }
     }
 
@@ -2836,6 +3380,8 @@ impl ChainedRecord for RiskDecisionRecord {
             "outcome": self.outcome,
             "notional_paise": self.notional_paise,
             "at_ns": self.at_ns,
+            "lineage": self.lineage,
+            "rule_outcome_digest": self.rule_outcome_digest,
         })
         .to_string()
     }
@@ -6395,6 +6941,7 @@ impl RiskAuthority {
             config.trade_date,
             BuildOptions {
                 control: config.control,
+                evaluator: Self::default_evaluator(),
                 decision_store: Some(config.decisions),
                 ownership: Some(ownership),
                 startup_error: None,
@@ -6575,7 +7122,7 @@ mod tests {
         let decision = assessment(&target);
         assert_atomic_failure(&authority, label, edit, |authority| {
             let mut state = authority.state.lock().expect("lock");
-            authority.commit_reservation(&mut state, &target, &decision)
+            authority.commit_reservation(&mut state, &target, &decision, None)
         });
     }
 
@@ -6746,7 +7293,7 @@ mod tests {
         state.next_permit = u64::MAX;
         let before = state.digest();
         let error = authority
-            .commit_reservation(&mut state, &target, &decision)
+            .commit_reservation(&mut state, &target, &decision, None)
             .expect_err("a permit counter at its maximum must not saturate");
         assert!(
             matches!(error, AuthorityError::AccountingOverflow(field) if field == "permit id"),
@@ -6762,7 +7309,7 @@ mod tests {
         state.revision = u64::MAX;
         let before = state.digest();
         let error = authority
-            .commit_reservation(&mut state, &target, &decision)
+            .commit_reservation(&mut state, &target, &decision, None)
             .expect_err("a revision at its maximum must not saturate");
         assert!(
             matches!(error, AuthorityError::AccountingOverflow(field) if field == "revision"),
