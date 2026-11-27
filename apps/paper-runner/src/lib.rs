@@ -9,7 +9,7 @@ pub mod report;
 
 use std::{
     collections::BTreeMap, //
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 use authoritative_oms::{
@@ -57,6 +57,9 @@ use report::{
 };
 use risk_authority::{
     AccountJournalObservation, //
+    AuthorityOwnership,
+    ControlStore,
+    DecisionStore,
     FeedObservation,
     MarketObservation,
     Observation,
@@ -67,7 +70,9 @@ use risk_authority::{
     OpsObservation,
     OwnerTokens,
     ReconciliationObservation,
+    RecoveryAuthenticity,
     RecoveryConfig,
+    RecoveryJournalRoot,
     RiskAuthority,
     SequenceGap,
 };
@@ -192,11 +197,58 @@ impl PaperIdentity {
     }
 }
 
-/// The recovery adapters persistent startup requires. `None` is never a
-/// fallback: it means the caller has no verified OMS/account journals and no
-/// durable decision store, so persistent startup must fail closed.
+/// Inputs to the persistent startup transaction.
+///
+/// STARTUP INTEGRATION BOUNDARY ONLY: this wires account ownership, the owner
+/// recovery loader and authority reconstruction into one fail-closed
+/// transaction. It is NOT production authorization or readiness. The
+/// application pins an owner-provisioned recovery root and the code-selected
+/// authenticity model; it never supplies journal records, market data,
+/// provider collection, experiments, holdouts or live execution.
 pub struct PersistentStartup {
-    pub recovery: RecoveryConfig,
+    /// Owner-controlled directory provisioned outside this process. Every
+    /// journal, binding sidecar, terminal anchor and high-water path is derived
+    /// from this root by the library loader, never chosen by the application.
+    pub recovery_root: PathBuf,
+    /// Code-selected authenticity posture (never inferred from file contents).
+    pub authenticity: RecoveryAuthenticity,
+    /// Account ownership lock acquired before any journal load.
+    pub journal_ownership_path: PathBuf,
+    /// Reconstructed-state lock consumed by `RiskAuthority::recover`.
+    pub authority_ownership_path: PathBuf,
+    /// Durable kill-switch and reconciliation store supplied by the owner.
+    pub control: Box<dyn ControlStore + Send + Sync>,
+    /// Durable decision store supplied by the owner.
+    pub decisions: Box<dyn DecisionStore + Send + Sync>,
+    /// Effective-dated sector map supplied by the reference-data owner.
+    pub sectors: BTreeMap<InstrumentId, String>,
+}
+
+/// Explicit readiness of a startup transaction.
+///
+/// Recovery only reconstructs durable state. It is never production
+/// authorization: a recovered authority stays NOT-READY until fresh owner
+/// observations and an authenticated control resolution are supplied.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StartupReadiness {
+    NotReady,
+}
+
+impl StartupReadiness {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::NotReady => "not-ready",
+        }
+    }
+}
+
+/// Outcome of the persistent startup transaction. The recovered authority is
+/// returned with an explicit NOT-READY status and its reasons; no new risk is
+/// enabled by this boundary.
+pub struct RecoveredStartup {
+    pub startup: PaperStartup,
+    pub readiness: StartupReadiness,
+    pub not_ready_reasons: Vec<String>,
 }
 
 /// Authority under an explicit mode, before any observation is supplied.
@@ -204,11 +256,108 @@ pub struct PaperStartup {
     pub mode: PaperMode,
     pub identity: PaperIdentity,
     pub authority: RiskAuthority,
+    /// Private guard so the account ownership acquired before recovery is held
+    /// for exactly the lifetime of the startup value. Callers cannot fabricate
+    /// an owned startup from outside this module.
+    _journal_ownership: Option<AuthorityOwnership>,
+}
+
+/// Verify that the durable stores are readable before they can influence
+/// reconstruction. A non-durable or corrupt store is a NOT-READY failure.
+fn verify_durable_stores(
+    control: &dyn ControlStore,
+    decisions: &dyn DecisionStore,
+) -> Result<(), String> {
+    if !control.is_durable() || !decisions.is_durable() {
+        return Err(
+            "NOT-READY: persistent startup requires durable control and decision stores".to_owned(),
+        );
+    }
+    control
+        .load_kill_switch()
+        .map_err(|error| format!("NOT-READY: control store unreadable: {error}"))?;
+    control
+        .load_reconciliation()
+        .map_err(|error| format!("NOT-READY: control store unreadable: {error}"))?;
+    decisions
+        .load_decisions()
+        .map_err(|error| format!("NOT-READY: decision store unreadable: {error}"))?;
+    Ok(())
+}
+
+/// The single cohesive persistent startup transaction.
+///
+/// STARTUP INTEGRATION BOUNDARY ONLY, NOT production authorization or
+/// readiness. Order is deliberate and fail-closed: acquire account ownership,
+/// load the owner recovery root, verify durable stores, then reconstruct and
+/// reconcile the authority. A failure at any step returns NOT-READY and never
+/// constructs an authority or enables new risk.
+pub fn startup_persistent(
+    account_id: AccountId,
+    policy: ValidatedRiskPolicy,
+    instruments: Vec<Instrument>,
+    trade_date: TradeDate,
+    config: PersistentStartup,
+) -> Result<RecoveredStartup, String> {
+    // 1. Account ownership BEFORE any journal is read. A competing owner or a
+    // stale lock fails the whole transaction here, before the loader runs.
+    let journal_ownership = AuthorityOwnership::acquire(&config.journal_ownership_path)
+        .map_err(|error| format!("NOT-READY: account ownership unavailable: {error}"))?;
+
+    // 2. Pin the owner-controlled root. The library loader derives every
+    // journal, binding sidecar, terminal anchor and high-water path itself and
+    // verifies all of them; no application-supplied record vector is accepted.
+    let loader = RecoveryJournalRoot::new(config.recovery_root.clone(), config.authenticity);
+    let (oms, account) = loader
+        .load(account_id)
+        .map_err(|error| format!("NOT-READY: recovery load failed: {error}"))?;
+
+    // 3. Verify durable control and decision stores before reconstruction.
+    verify_durable_stores(config.control.as_ref(), config.decisions.as_ref())?;
+
+    // 4. Reconstruct through the library. `recover` re-derives both sealed
+    // bindings, replays durable decisions over OMS permits and the account
+    // journal, and fails closed on any account/OMS disagreement. Its own
+    // authority ownership lock is a separate guard from the pre-load one.
+    let authority = RiskAuthority::recover(RecoveryConfig {
+        account_id,
+        policy,
+        instruments,
+        trade_date,
+        control: config.control,
+        decisions: config.decisions,
+        oms,
+        account,
+        sectors: config.sectors,
+        ownership_path: config.authority_ownership_path,
+    })
+    .map_err(|error| format!("NOT-READY: authority recovery failed: {error}"))?;
+
+    if authority.is_simulation() {
+        return Err("NOT-READY: recovered authority reports a simulation identity".to_owned());
+    }
+    if authority.startup_error().is_some() {
+        return Err("NOT-READY: account and OMS reconciliation did not complete".to_owned());
+    }
+
+    Ok(RecoveredStartup {
+        startup: PaperStartup {
+            mode: PaperMode::PersistentPaper,
+            identity: PaperIdentity::recovered(),
+            authority,
+            _journal_ownership: Some(journal_ownership),
+        },
+        readiness: StartupReadiness::NotReady,
+        not_ready_reasons: vec![
+            "recovery reconstructed durable state; owner observations and an authenticated control resolution are still required".to_owned(),
+            "startup never enables new risk; readiness is never inferred from recovered state".to_owned(),
+        ],
+    })
 }
 
 /// The single startup boundary. Ephemeral work gets only the explicit
-/// simulation constructor; persistent work gets only a recovered authority
-/// with real OMS/account adapters and a durable decision store.
+/// simulation constructor; persistent work goes through the full transaction
+/// and still returns a NOT-READY startup.
 pub fn startup(
     mode: PaperMode,
     account_id: AccountId,
@@ -222,27 +371,14 @@ pub fn startup(
             mode,
             identity: PaperIdentity::simulation(),
             authority: RiskAuthority::new_simulation(account_id, policy, instruments, trade_date),
+            _journal_ownership: None,
         }),
         PaperMode::PersistentPaper => {
-            let adapters = persistent.ok_or_else(|| {
+            let config = persistent.ok_or_else(|| {
                 "persistent paper mode requires recovery adapters: verified OMS and account journals, a durable decision store and exclusive state ownership"
                     .to_owned()
             })?;
-            if !adapters.recovery.control.is_durable() || !adapters.recovery.decisions.is_durable()
-            {
-                return Err(
-                    "persistent paper mode requires durable control and decision stores".to_owned(),
-                );
-            }
-            let authority = RiskAuthority::recover(adapters.recovery).map_err(|e| e.to_string())?;
-            if authority.is_simulation() {
-                return Err("recovered authority reported a simulation identity".to_owned());
-            }
-            Ok(PaperStartup {
-                mode,
-                identity: PaperIdentity::recovered(),
-                authority,
-            })
+            Ok(startup_persistent(account_id, policy, instruments, trade_date, config)?.startup)
         }
     }
 }
