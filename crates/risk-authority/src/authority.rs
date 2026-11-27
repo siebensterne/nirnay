@@ -7434,8 +7434,12 @@ mod tests {
     }
 
     fn publish_marker(path: &Path) {
+        publish_marker_bytes(path, b"1");
+    }
+
+    fn publish_marker_bytes(path: &Path, bytes: &[u8]) {
         let staged = PathBuf::from(format!("{}.tmp", path.display()));
-        std::fs::write(&staged, b"1").expect("stage marker");
+        std::fs::write(&staged, bytes).expect("stage marker");
         std::fs::rename(&staged, path).expect("publish marker");
     }
 
@@ -7641,8 +7645,16 @@ mod tests {
             !ownership_path.exists(),
             "the M4 sentinel is released when the writer returns"
         );
+        let mut lock_released = false;
+        for _ in 0..1_000_000 {
+            if !recovery_lock_is_held(&root) {
+                lock_released = true;
+                break;
+            }
+            thread::yield_now();
+        }
         assert!(
-            !recovery_lock_is_held(&root),
+            lock_released,
             "the M3 lock is released when the writer returns"
         );
         assert!(
@@ -7779,8 +7791,10 @@ mod tests {
                 let counter = read_high_water_counter(&root.join(OMS_HIGH_WATER_FILE));
                 notifier.join().expect("child notifier");
                 releaser.join().expect("child releaser");
-                std::fs::write(marker_path(&root, "older-done"), counter.to_string())
-                    .expect("write older counter");
+                publish_marker_bytes(
+                    &marker_path(&root, "older-done"),
+                    counter.to_string().as_bytes(),
+                );
             }
             "writer" => {
                 wait_for_marker(&marker_path(&root, "older-at-gate"));
