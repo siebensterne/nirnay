@@ -22,7 +22,11 @@ use std::cmp::Ordering;
 use std::error::Error;
 use std::fmt;
 
-use serde::{Deserialize, Serialize};
+#[rustfmt::skip]
+use serde::{
+    Deserialize,
+    Serialize,
+};
 
 /// Largest decimal scale supported by an integer coefficient.
 pub const MAX_SCALE: u8 = 18;
