@@ -6082,3 +6082,255 @@ fn unsupported_base_currency_is_rejected() -> TestResult {
     );
     Ok(())
 }
+
+/// S3-D: one durable decision must be replayable from stable input references
+/// and digests, never from a copied payload. These tests pin the seven required
+/// lineage cases before the binding exists.
+#[cfg(test)]
+mod decision_lineage_tests {
+    use super::*;
+    use risk_authority::{
+        DECISION_LINEAGE_VERSION, //
+        DecisionOutcome,
+        DecisionReplay,
+        DecisionReplayInputs,
+        EvaluatorIdentity,
+        InMemoryDecisionStore,
+        ReplayError,
+        replay_decision,
+    };
+
+    fn lineage_authority()
+    -> Result<(RiskAuthority, InMemoryDecisionStore), Box<dyn std::error::Error>> {
+        let store = InMemoryDecisionStore::new();
+        let authority = authority()?.with_decision_store(Box::new(store.clone()));
+        Ok((authority, store))
+    }
+
+    /// Deterministic replay of the same decision inputs under the same
+    /// evaluator and configuration reproduces the same rule-level outcome.
+    #[test]
+    fn replay_reproduces_the_recorded_rule_outcome() -> TestResult {
+        let (authority, store) = lineage_authority()?;
+        let order = intent(1, 2, PRICE, Side::Buy)?;
+        let observations = observation(&authority)?;
+        let inputs = authority.replay_inputs(order.clone(), &observations)?;
+        let reservation = authority.evaluate_and_reserve(order, observations, None)?;
+        let mut records = store.records();
+        let record = records.remove(0);
+
+        assert_eq!(
+            record.outcome,
+            DecisionOutcome::Accepted,
+            "the accepted decision is durable"
+        );
+        assert_eq!(
+            record.lineage.schema_version, DECISION_LINEAGE_VERSION,
+            "the record carries the versioned reference set"
+        );
+        assert_eq!(
+            record.lineage.intent_id,
+            Some(reservation.intent_id),
+            "the lineage binds the authorized intent identity"
+        );
+        assert!(
+            !record.rule_outcome_digest.is_empty(),
+            "the record binds a rule-level outcome digest"
+        );
+
+        let replay: DecisionReplay =
+            replay_decision(&record, &inputs, &authority.evaluator_identity())?;
+        assert_eq!(
+            replay.outcome,
+            DecisionOutcome::Accepted,
+            "replay reports the recorded outcome"
+        );
+        assert!(replay.accepted, "replay reproduces acceptance");
+        assert!(replay.reproducible, "replay is reproducible");
+        assert_eq!(
+            replay.rule_outcome_digest, record.rule_outcome_digest,
+            "the re-derived rule-level digest matches"
+        );
+        let again = replay_decision(&record, &inputs, &authority.evaluator_identity())?;
+        assert_eq!(replay, again, "replay is deterministic");
+        Ok(())
+    }
+
+    #[test]
+    fn altered_policy_digest_blocks_replay() -> TestResult {
+        let (authority, store) = lineage_authority()?;
+        let order = intent(1, 2, PRICE, Side::Buy)?;
+        let observations = observation(&authority)?;
+        let inputs = authority.replay_inputs(order.clone(), &observations)?;
+        authority.evaluate_and_reserve(order, observations, None)?;
+        let mut records = store.records();
+        let mut record = records.remove(0);
+        record.lineage.policy_digest = "f".repeat(64);
+
+        let error = replay_decision(&record, &inputs, &authority.evaluator_identity())
+            .expect_err("an altered policy content digest blocks replay");
+        assert!(
+            matches!(error, ReplayError::AlteredReference(ref name) if name == "policy"),
+            "the blocking reference is named"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn altered_market_snapshot_blocks_replay() -> TestResult {
+        let (authority, store) = lineage_authority()?;
+        let order = intent(1, 2, PRICE, Side::Buy)?;
+        let observations = observation(&authority)?;
+        let inputs = authority.replay_inputs(order.clone(), &observations)?;
+        authority.evaluate_and_reserve(order, observations, None)?;
+        let mut records = store.records();
+        let mut record = records.remove(0);
+        record.lineage.market_ref.digest = "0".repeat(64);
+
+        let error = replay_decision(&record, &inputs, &authority.evaluator_identity())
+            .expect_err("an altered market snapshot digest blocks replay");
+        assert!(
+            matches!(error, ReplayError::AlteredReference(ref name) if name == "market"),
+            "the blocking reference is named"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn missing_pnl_reference_blocks_replay() -> TestResult {
+        let (authority, store) = lineage_authority()?;
+        let order = intent(1, 2, PRICE, Side::Buy)?;
+        let observations = observation(&authority)?;
+        let inputs = authority.replay_inputs(order.clone(), &observations)?;
+        authority.evaluate_and_reserve(order, observations, None)?;
+        let mut records = store.records();
+        let mut record = records.remove(0);
+        record.lineage.pnl_ref.reference.clear();
+
+        let error = replay_decision(&record, &inputs, &authority.evaluator_identity())
+            .expect_err("a missing P&L snapshot reference blocks replay");
+        assert!(
+            matches!(error, ReplayError::MissingReference(ref name) if name == "pnl"),
+            "the missing reference is named"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn changed_evaluator_version_is_non_reproducible() -> TestResult {
+        let (authority, store) = lineage_authority()?;
+        let order = intent(1, 2, PRICE, Side::Buy)?;
+        let observations = observation(&authority)?;
+        let inputs = authority.replay_inputs(order.clone(), &observations)?;
+        authority.evaluate_and_reserve(order, observations, None)?;
+        let mut records = store.records();
+        let record = records.remove(0);
+        let changed = EvaluatorIdentity {
+            version: "risk-engine-v2".to_owned(),
+            build: authority.evaluator_identity().build,
+        };
+
+        let error = replay_decision(&record, &inputs, &changed)
+            .expect_err("a changed evaluator identity is reported, not silently replayed");
+        assert!(
+            matches!(error, ReplayError::EvaluatorChanged { .. }),
+            "the changed evaluator is reported as non-reproducible"
+        );
+        assert!(
+            error.to_string().contains("non-reproducible"),
+            "the report states non-reproducibility"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn missing_control_observation_blocks_replay() -> TestResult {
+        let (authority, store) = lineage_authority()?;
+        let order = intent(1, 2, PRICE, Side::Buy)?;
+        let observations = observation(&authority)?;
+        let inputs = authority.replay_inputs(order.clone(), &observations)?;
+        authority.evaluate_and_reserve(order, observations, None)?;
+        let mut records = store.records();
+        let record = records.remove(0);
+        let mut missing_inputs: DecisionReplayInputs = inputs.clone();
+        missing_inputs.lineage.control_digest.clear();
+
+        let error = replay_decision(&record, &missing_inputs, &authority.evaluator_identity())
+            .expect_err("a missing operational/control observation blocks replay");
+        assert!(
+            matches!(error, ReplayError::MissingReference(ref name) if name == "control"),
+            "the missing control reference is named"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn reconciliation_state_mismatch_blocks_replay() -> TestResult {
+        let (authority, store) = lineage_authority()?;
+        let order = intent(1, 2, PRICE, Side::Buy)?;
+        let observations = observation(&authority)?;
+        let inputs = authority.replay_inputs(order.clone(), &observations)?;
+        authority.evaluate_and_reserve(order, observations, None)?;
+        let mut records = store.records();
+        let record = records.remove(0);
+        let mut mismatched: DecisionReplayInputs = inputs.clone();
+        mismatched.lineage.reconciliation_ref.digest = "b".repeat(64);
+
+        let error = replay_decision(&record, &mismatched, &authority.evaluator_identity())
+            .expect_err("a different reconciliation state blocks replay");
+        assert!(
+            matches!(error, ReplayError::AlteredReference(ref name) if name == "reconciliation"),
+            "the reconciliation mismatch is named"
+        );
+        Ok(())
+    }
+
+    /// A rejected decision is also an authority-authored decision and must
+    /// carry a complete, replayable rule-level outcome.
+    #[test]
+    fn rejected_decisions_carry_replayable_lineage() -> TestResult {
+        let (authority, store) = lineage_authority()?;
+        let order = intent(11, 11, PRICE, Side::Buy)?;
+        let observations = observation(&authority)?;
+        let inputs = authority.replay_inputs(order.clone(), &observations)?;
+        let error = authority
+            .evaluate_and_reserve(order, observations, None)
+            .expect_err("an oversized order is rejected by the rule set");
+        assert!(
+            matches!(error, AuthorityError::Rejected(_)),
+            "the oversized order is rejected"
+        );
+        let mut records = store.records();
+        let record = records.remove(0);
+
+        assert_eq!(
+            record.outcome,
+            DecisionOutcome::Rejected,
+            "the rejection is durable"
+        );
+        assert!(
+            !record.lineage.policy_digest.is_empty(),
+            "a rejection also binds its policy content"
+        );
+        let replay = replay_decision(&record, &inputs, &authority.evaluator_identity())?;
+        assert!(!replay.accepted, "replay reproduces rejection");
+        assert!(replay.reproducible, "the rejection is replayable");
+        Ok(())
+    }
+
+    /// A missing reference blocks new risk before any decision is authored.
+    #[test]
+    fn absent_control_observation_denies_new_risk() -> TestResult {
+        let authority = authority()?;
+        let mut observations = observation(&authority)?;
+        observations.ops = None;
+        let error = authority
+            .evaluate_and_reserve(intent(1, 2, PRICE, Side::Buy)?, observations, None)
+            .expect_err("an absent control observation denies new risk");
+        assert!(
+            matches!(error, AuthorityError::MissingObservation { .. }),
+            "the denial is an explicit missing-observation gate"
+        );
+        Ok(())
+    }
+}
