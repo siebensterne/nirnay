@@ -3245,6 +3245,8 @@ pub const OMS_HIGH_WATER_FILE: &str = "oms_high_water.json";
 pub const ACCOUNT_HIGH_WATER_FILE: &str = "account_high_water.json";
 /// Stable kernel-lock file for one serialized recovery transaction. The lock
 /// is held on its descriptor for the whole load, not inferred from metadata.
+/// This is the single lock identity shared by recovery loaders and by writers
+/// that publish a new journal/anchor state (see [`AuthorityOwnership::recovery_writer`]).
 pub const RECOVERY_LOCK_FILE: &str = "recovery.lock";
 pub const BINDING_SUFFIX: &str = ".auth";
 
@@ -5101,6 +5103,95 @@ impl Drop for AuthorityOwnership {
     }
 }
 
+/// Writer-side participant in the recovery transaction. A writer that is about
+/// to publish a new journal/anchor state holds this guard across the entire
+/// publish (records, terminal anchors and trusted high-water records). It uses
+/// the same kernel lock identity as [`RecoveryJournalRoot::load`], so a loader
+/// cannot verify one counter while a writer commits another underneath it.
+///
+/// Acquisition order is fixed: the caller first holds the M4
+/// [`AuthorityOwnership`] sentinel, then calls
+/// [`AuthorityOwnership::recovery_writer`] to take the M3 recovery lock. The
+/// borrow of the sentinel makes that order enforced by the type system. On
+/// drop the M3 lock is released before the borrowed M4 sentinel can be
+/// released, on success and on every error path: each guard is RAII and there
+/// is no explicit unlock call to forget.
+///
+/// Trust boundary: `flock` is an advisory, local, kernel-held lock. It
+/// serializes cooperating processes on one host and is released on process
+/// death. It is not distributed fencing. An attacker who compromises the
+/// owner directory or steals the owner signing key defeats these local
+/// protections; neither property is claimed here.
+#[cfg(any(
+    target_os = "linux",
+    target_os = "android",
+    target_os = "macos",
+    target_os = "ios"
+))]
+pub struct RecoveryWriterLock<'a> {
+    // Drop order is field order: M3 kernel lock, pinned directory, then the
+    // borrowed M4 sentinel (which the caller drops last).
+    _recovery: recovery_io::RecoveryLock,
+    _dir: recovery_io::PinnedRecoveryDir,
+    _owner: &'a AuthorityOwnership,
+}
+
+/// Writer-side lock guard on platforms without the required primitives. There
+/// is no path-based fallback: writers fail closed just like loaders.
+#[cfg(not(any(
+    target_os = "linux",
+    target_os = "android",
+    target_os = "macos",
+    target_os = "ios"
+)))]
+pub struct RecoveryWriterLock<'a> {
+    _owner: &'a AuthorityOwnership,
+}
+
+impl AuthorityOwnership {
+    /// Opt into the recovery transaction lock while holding this ownership
+    /// sentinel. The returned guard must be held across the whole writer
+    /// publish; it releases the M3 lock on every success or error path.
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "macos",
+        target_os = "ios"
+    ))]
+    pub fn recovery_writer(
+        &self,
+        root: &RecoveryJournalRoot,
+    ) -> Result<RecoveryWriterLock<'_>, RecoveryError> {
+        let dir = recovery_io::PinnedRecoveryDir::open(&root.root)?;
+        let recovery = recovery_io::RecoveryLock::acquire(&dir)?;
+        if root.authenticity.requires_os_owner() {
+            dir.check_owner_directory()?;
+        }
+        Ok(RecoveryWriterLock {
+            _recovery: recovery,
+            _dir: dir,
+            _owner: self,
+        })
+    }
+
+    /// Unsupported platforms fail closed rather than falling back to a
+    /// path-based check that other processes could ignore.
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "macos",
+        target_os = "ios"
+    )))]
+    pub fn recovery_writer(
+        &self,
+        _root: &RecoveryJournalRoot,
+    ) -> Result<RecoveryWriterLock<'_>, RecoveryError> {
+        Err(RecoveryError::Authenticity(
+            "recovery transaction requires directory pinning primitives".to_owned(),
+        ))
+    }
+}
+
 fn checked_paise(value: i64) -> Result<Paise, RecoveryError> {
     if value <= 0 {
         return Err(RecoveryError::Inconsistent(
@@ -6324,6 +6415,7 @@ mod tests {
         RiskPolicy, //
         ValidatedRiskPolicy,
     };
+    use std::process::Command;
     use std::thread;
     use trading_core::{
         AlgoId, //
@@ -7337,84 +7429,448 @@ mod tests {
         unsafe { flock(file.as_raw_fd(), 2 | 4) != 0 }
     }
 
+    fn marker_path(root: &Path, name: &str) -> PathBuf {
+        root.join(format!("{name}.marker"))
+    }
+
+    fn publish_marker(path: &Path) {
+        let staged = PathBuf::from(format!("{}.tmp", path.display()));
+        std::fs::write(&staged, b"1").expect("stage marker");
+        std::fs::rename(&staged, path).expect("publish marker");
+    }
+
+    /// Bounded, time-free wait for a cross-process marker. Ordering comes from
+    /// file publication, never from a sleep, PID or lock-file age heuristic.
+    fn wait_for_marker(path: &Path) {
+        for _ in 0..10_000_000 {
+            if path.exists() {
+                return;
+            }
+            thread::yield_now();
+        }
+        panic!("marker was not published: {}", path.display());
+    }
+
     #[test]
     #[cfg(unix)]
-    fn concurrent_recovery_never_regresses_the_high_water() {
-        let key = OwnerSigningKey::new(b"recovery-serialization-key".to_vec()).expect("key");
-        let root = recovery_test_root("serial-race");
-        write_signed_recovery_root(&root, &key, 11);
+    fn concurrent_loaders_never_regress_the_high_water() {
+        let key = OwnerSigningKey::new(b"recovery-loader-lock-key".to_vec()).expect("key");
+        let root = recovery_test_root("loader-contention");
+        write_signed_recovery_root(&root, &key, 12);
         let high_water = root.join(OMS_HIGH_WATER_FILE);
         let mut observed = vec![read_high_water_counter(&high_water)];
 
-        let (reached_tx, reached_rx, release_rx, release_tx) = recovery_gate_channels();
-        let older_root = root.clone();
-        let older_key = key.clone();
-        let (older_done_tx, older_done_rx) = std::sync::mpsc::channel();
-        let older = thread::spawn(move || {
-            install_recovery_gate(reached_tx, release_rx);
+        let (first_reached_tx, first_reached_rx, first_release_rx, first_release_tx) =
+            recovery_gate_channels();
+        let first_root = root.clone();
+        let first_key = key.clone();
+        let (first_done_tx, first_done_rx) = std::sync::mpsc::channel();
+        let first = thread::spawn(move || {
+            install_recovery_gate(first_reached_tx, first_release_rx);
             let result = RecoveryJournalRoot::new(
-                older_root.clone(),
-                RecoveryAuthenticity::OwnerSignature(older_key),
+                first_root.clone(),
+                RecoveryAuthenticity::OwnerSignature(first_key),
             )
             .load(AccountId::new(1).expect("account"));
-            let counter = read_high_water_counter(&older_root.join(OMS_HIGH_WATER_FILE));
-            older_done_tx
-                .send((result, counter))
-                .expect("send older result");
+            let committed = read_high_water_counter(&first_root.join(OMS_HIGH_WATER_FILE));
+            first_done_tx
+                .send((result, committed))
+                .expect("send first loader result");
         });
 
-        reached_rx
+        first_reached_rx
             .recv()
-            .expect("older recovery reached the advance gate");
-        // The older recovery verified counter 11. Publish the newer owner
-        // state (counter 12) while it is still inside its transaction.
-        write_signed_recovery_root(&root, &key, 12);
-        let lock_held = recovery_lock_is_held(&root);
-        let (newer_done_tx, newer_done_rx) = std::sync::mpsc::channel();
-        let newer_root = root.clone();
-        let newer_key = key.clone();
-        let newer = thread::spawn(move || {
+            .expect("first loader reached the advance gate");
+        assert!(
+            recovery_lock_is_held(&root),
+            "the first loader holds the kernel lock"
+        );
+
+        let second_root = root.clone();
+        let second_key = key.clone();
+        let (second_reached_tx, second_reached_rx, second_release_rx, second_release_tx) =
+            recovery_gate_channels();
+        let (second_done_tx, second_done_rx) = std::sync::mpsc::channel();
+        let second = thread::spawn(move || {
+            install_recovery_gate(second_reached_tx, second_release_rx);
             let result = RecoveryJournalRoot::new(
-                newer_root,
-                RecoveryAuthenticity::OwnerSignature(newer_key),
+                second_root.clone(),
+                RecoveryAuthenticity::OwnerSignature(second_key),
             )
             .load(AccountId::new(1).expect("account"));
-            newer_done_tx.send(result).expect("send newer result");
+            let committed = read_high_water_counter(&second_root.join(OMS_HIGH_WATER_FILE));
+            second_done_tx
+                .send((result, committed))
+                .expect("send second loader result");
         });
 
-        if !lock_held {
-            // Without a transaction lock the newer recovery commits 12.
-            newer_done_rx
-                .recv()
-                .expect("newer recovery completed")
-                .expect("newer recovery succeeded");
-        }
-        observed.push(read_high_water_counter(&high_water));
-        release_tx.send(()).expect("release older recovery");
-        let (older_result, _) = older_done_rx.recv().expect("older recovery completed");
-        assert!(
-            older_result.is_ok(),
-            "both recoveries present valid anchors"
+        first_release_tx.send(()).expect("release first loader");
+        let (first_result, first_committed) = first_done_rx.recv().expect("first loader completed");
+        assert!(first_result.is_ok(), "the first loader verified its anchor");
+        // The second loader reaches its gate only after it acquires the lock
+        // the first loader released, and it has not advanced yet.
+        second_reached_rx
+            .recv()
+            .expect("second loader reached the advance gate");
+        assert_eq!(
+            first_committed, 12,
+            "the older loader committed the counter it verified"
         );
-        if lock_held {
-            newer_done_rx
-                .recv()
-                .expect("newer recovery completed after lock release")
-                .expect("newer recovery succeeded");
-        }
-        let _ = older.join();
-        let _ = newer.join();
+        let intermediate = read_high_water_counter(&high_water);
+        assert_eq!(
+            intermediate, first_committed,
+            "the on-disk counter immediately after the first commit is observed"
+        );
+        observed.push(intermediate);
+
+        second_release_tx.send(()).expect("release second loader");
+        let (second_result, second_committed) =
+            second_done_rx.recv().expect("second loader completed");
+        assert!(
+            second_result.is_ok(),
+            "the second loader verified its anchor"
+        );
+        assert_eq!(
+            second_committed, 12,
+            "the cooperating loader commits the same counter"
+        );
+        let _ = first.join();
+        let _ = second.join();
         observed.push(read_high_water_counter(&high_water));
 
         assert!(
             observed.windows(2).all(|pair| pair[0] <= pair[1]),
-            "persisted high-water never decreases: {observed:?}"
+            "two cooperating loaders never regress the high-water: {observed:?}"
+        );
+        assert_eq!(
+            observed.last(),
+            Some(&12),
+            "two cooperating loaders persist the maximum: {observed:?}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn recovery_writer_contending_with_loader_never_regresses_the_high_water() {
+        let key = OwnerSigningKey::new(b"recovery-writer-lock-key".to_vec()).expect("key");
+        let root = recovery_test_root("writer-contention");
+        write_signed_recovery_root(&root, &key, 11);
+        let high_water = root.join(OMS_HIGH_WATER_FILE);
+        let ownership_path = root.with_extension("ownership.sentinel");
+        let mut observed = vec![read_high_water_counter(&high_water)];
+
+        let (reached_tx, reached_rx, release_rx, release_tx) = recovery_gate_channels();
+        let loader_root = root.clone();
+        let loader_key = key.clone();
+        let (loader_done_tx, loader_done_rx) = std::sync::mpsc::channel();
+        let loader = thread::spawn(move || {
+            install_recovery_gate(reached_tx, release_rx);
+            let result = RecoveryJournalRoot::new(
+                loader_root.clone(),
+                RecoveryAuthenticity::OwnerSignature(loader_key),
+            )
+            .load(AccountId::new(1).expect("account"));
+            let committed = read_high_water_counter(&loader_root.join(OMS_HIGH_WATER_FILE));
+            loader_done_tx
+                .send((result, committed))
+                .expect("send loader result");
+        });
+        reached_rx.recv().expect("loader reached the advance gate");
+        assert!(
+            recovery_lock_is_held(&root),
+            "the loader holds the M3 kernel lock"
+        );
+
+        let writer_root = root.clone();
+        let writer_key = key.clone();
+        let writer_ownership = ownership_path.clone();
+        let (attempt_tx, attempt_rx) = std::sync::mpsc::channel();
+        let (writer_done_tx, writer_done_rx) = std::sync::mpsc::channel();
+        let writer = thread::spawn(move || {
+            attempt_tx.send(()).expect("signal writer attempt");
+            let ownership = AuthorityOwnership::acquire(&writer_ownership).expect("M4 sentinel");
+            let journal_root = RecoveryJournalRoot::new(
+                writer_root.clone(),
+                RecoveryAuthenticity::OwnerSignature(writer_key.clone()),
+            );
+            let guard = ownership
+                .recovery_writer(&journal_root)
+                .expect("M3 writer lock");
+            // Publish the newer counter only under the same lock the loader
+            // uses; the old helper write bypassed this protocol.
+            write_signed_recovery_root(&writer_root, &writer_key, 12);
+            drop(guard);
+            drop(ownership);
+            writer_done_tx.send(()).expect("signal writer done");
+        });
+
+        attempt_rx.recv().expect("writer attempted to publish");
+        assert!(
+            matches!(
+                writer_done_rx.try_recv(),
+                Err(std::sync::mpsc::TryRecvError::Empty)
+            ),
+            "the writer cannot finish while the loader holds the kernel lock"
+        );
+        assert_eq!(
+            read_high_water_counter(&high_water),
+            11,
+            "the writer cannot publish while the loader holds the kernel lock"
+        );
+
+        release_tx.send(()).expect("release loader");
+        let (loader_result, loader_committed) = loader_done_rx.recv().expect("loader completed");
+        assert!(loader_result.is_ok(), "the loader verified counter 11");
+        assert_eq!(
+            loader_committed, 11,
+            "the loader committed the older counter"
+        );
+        let intermediate = read_high_water_counter(&high_water);
+        assert_eq!(
+            intermediate, loader_committed,
+            "the on-disk counter immediately after the loader commit is observed"
+        );
+        observed.push(intermediate);
+
+        writer_done_rx.recv().expect("writer completed");
+        let _ = writer.join();
+        let _ = loader.join();
+        observed.push(read_high_water_counter(&high_water));
+        assert!(
+            !ownership_path.exists(),
+            "the M4 sentinel is released when the writer returns"
+        );
+        assert!(
+            !recovery_lock_is_held(&root),
+            "the M3 lock is released when the writer returns"
+        );
+        assert!(
+            observed.windows(2).all(|pair| pair[0] <= pair[1]),
+            "a protocol-compliant writer never regresses the high-water: {observed:?}"
+        );
+        assert_eq!(
+            observed.last().copied(),
+            Some(12),
+            "the writer's newer counter is persisted: {observed:?}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn spawned_recovery_processes_never_regress_the_high_water() {
+        let root = recovery_test_root("spawned-processes");
+        let key = OwnerSigningKey::new(b"recovery-serialization-key".to_vec()).expect("key");
+        write_signed_recovery_root(&root, &key, 11);
+        let high_water = root.join(OMS_HIGH_WATER_FILE);
+        let older_at_gate = marker_path(&root, "older-at-gate");
+        let older_release = marker_path(&root, "older-release");
+        let older_done = marker_path(&root, "older-done");
+        let writer_attempting = marker_path(&root, "writer-attempting");
+        let writer_done = marker_path(&root, "writer-done");
+        let parent_sampled = marker_path(&root, "parent-sampled");
+        let newer_done = marker_path(&root, "newer-done");
+        let binary = std::env::current_exe().expect("test binary");
+
+        let spawn = |role: &str| {
+            Command::new(&binary)
+                .arg("--ignored")
+                .arg("--exact")
+                .arg("authority::tests::recovery_child_worker")
+                .env("NIRNAY_M3_ROOT", &root)
+                .env("NIRNAY_M3_ROLE", role)
+                .spawn()
+                .expect("spawn recovery child")
+        };
+
+        let mut observed = vec![read_high_water_counter(&high_water)];
+        let mut older = spawn("older_loader");
+        wait_for_marker(&older_at_gate);
+        assert!(
+            recovery_lock_is_held(&root),
+            "the older child holds the kernel lock"
+        );
+
+        let mut writer = spawn("writer");
+        wait_for_marker(&writer_attempting);
+        assert_eq!(
+            read_high_water_counter(&high_water),
+            11,
+            "the writer child waits for the kernel lock"
+        );
+
+        publish_marker(&older_release);
+        wait_for_marker(&older_done);
+        let older_counter = std::fs::read_to_string(&older_done).expect("read older counter");
+        assert_eq!(
+            older_counter.trim(),
+            "11",
+            "the older child committed its verified counter"
+        );
+        let committed = older_counter.trim().parse::<u64>().expect("parse counter");
+        let intermediate = read_high_water_counter(&high_water);
+        assert_eq!(intermediate, committed, "disk counter after older commit");
+        observed.push(intermediate);
+        // The writer holds the lock by now but waits for this marker before
+        // publishing, so the parent's intermediate observation is deterministic.
+        publish_marker(&parent_sampled);
+
+        wait_for_marker(&writer_done);
+        observed.push(read_high_water_counter(&high_water));
+
+        let mut newer = spawn("newer_loader");
+        wait_for_marker(&newer_done);
+        observed.push(read_high_water_counter(&high_water));
+
+        assert!(
+            older.wait().expect("older child status").success(),
+            "the older child succeeded"
+        );
+        assert!(
+            writer.wait().expect("writer child status").success(),
+            "the writer child succeeded"
+        );
+        assert!(
+            newer.wait().expect("newer child status").success(),
+            "the newer child succeeded"
+        );
+        assert!(
+            observed.windows(2).all(|pair| pair[0] <= pair[1]),
+            "persisted high-water never decreases across processes: {observed:?}"
         );
         assert_eq!(
             observed.last().copied(),
             Some(12),
             "the maximum committed counter is persisted: {observed:?}"
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Child-only worker. The parent forces ordering with published marker
+    /// files; the child never uses a sleep, PID or lock age to decide.
+    #[test]
+    #[ignore = "child-only recovery worker invoked by the parent test"]
+    #[cfg(unix)]
+    fn recovery_child_worker() {
+        let root = PathBuf::from(std::env::var_os("NIRNAY_M3_ROOT").expect("child root"));
+        let role = std::env::var("NIRNAY_M3_ROLE").expect("child role");
+        let key = OwnerSigningKey::new(b"recovery-serialization-key".to_vec()).expect("key");
+        match role.as_str() {
+            "older_loader" => {
+                let (reached_tx, reached_rx, release_rx, release_tx) = recovery_gate_channels();
+                install_recovery_gate(reached_tx, release_rx);
+                let reached = marker_path(&root, "older-at-gate");
+                let release = marker_path(&root, "older-release");
+                let notifier = thread::spawn(move || {
+                    reached_rx.recv().expect("child reached the advance gate");
+                    publish_marker(&reached);
+                });
+                let releaser = thread::spawn(move || {
+                    wait_for_marker(&release);
+                    release_tx.send(()).expect("release child gate");
+                });
+                let result = RecoveryJournalRoot::new(
+                    root.clone(),
+                    RecoveryAuthenticity::OwnerSignature(key),
+                )
+                .load(AccountId::new(1).expect("account"));
+                assert!(result.is_ok(), "older child load succeeded");
+                let counter = read_high_water_counter(&root.join(OMS_HIGH_WATER_FILE));
+                notifier.join().expect("child notifier");
+                releaser.join().expect("child releaser");
+                std::fs::write(marker_path(&root, "older-done"), counter.to_string())
+                    .expect("write older counter");
+            }
+            "writer" => {
+                wait_for_marker(&marker_path(&root, "older-at-gate"));
+                publish_marker(&marker_path(&root, "writer-attempting"));
+                let sentinel = root.with_extension("child-ownership.sentinel");
+                let ownership = AuthorityOwnership::acquire(&sentinel).expect("child M4 sentinel");
+                let journal_root = RecoveryJournalRoot::new(
+                    root.clone(),
+                    RecoveryAuthenticity::OwnerSignature(key.clone()),
+                );
+                let guard = ownership
+                    .recovery_writer(&journal_root)
+                    .expect("child M3 writer lock");
+                wait_for_marker(&marker_path(&root, "parent-sampled"));
+                write_signed_recovery_root(&root, &key, 12);
+                drop(guard);
+                drop(ownership);
+                publish_marker(&marker_path(&root, "writer-done"));
+            }
+            "newer_loader" => {
+                wait_for_marker(&marker_path(&root, "writer-done"));
+                let result =
+                    RecoveryJournalRoot::new(&root, RecoveryAuthenticity::OwnerSignature(key))
+                        .load(AccountId::new(1).expect("account"));
+                assert!(result.is_ok(), "newer child load succeeded");
+                publish_marker(&marker_path(&root, "newer-done"));
+            }
+            other => panic!("unknown recovery child role: {other}"),
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn writer_guard_releases_both_locks_on_every_path() {
+        let key = OwnerSigningKey::new(b"recovery-writer-error-key".to_vec()).expect("key");
+        let root = recovery_test_root("writer-error-paths");
+        write_signed_recovery_root(&root, &key, 3);
+        let ownership_path = root.with_extension("ownership-error.sentinel");
+
+        std::fs::write(&ownership_path, b"stale").expect("stale sentinel");
+        assert!(
+            AuthorityOwnership::acquire(&ownership_path).is_err(),
+            "a stale M4 sentinel is refused"
+        );
+        assert!(
+            !recovery_lock_is_held(&root),
+            "no M3 lock is taken when M4 acquisition fails"
+        );
+        std::fs::remove_file(&ownership_path).expect("remove stale sentinel");
+
+        let target = root.with_extension("lock-target");
+        let _ = std::fs::remove_file(root.join(RECOVERY_LOCK_FILE));
+        std::os::unix::fs::symlink(&target, root.join(RECOVERY_LOCK_FILE))
+            .expect("symlink recovery lock");
+        let ownership = AuthorityOwnership::acquire(&ownership_path).expect("M4 sentinel");
+        let journal_root =
+            RecoveryJournalRoot::new(root.clone(), RecoveryAuthenticity::OwnerSignature(key));
+        assert!(
+            ownership.recovery_writer(&journal_root).is_err(),
+            "a non-regular recovery lock is refused"
+        );
+        drop(ownership);
+        assert!(
+            !ownership_path.exists(),
+            "the M4 sentinel is removed after M3 acquisition fails"
+        );
+        assert!(!recovery_lock_is_held(&root), "no M3 lock was acquired");
+
+        std::fs::remove_file(root.join(RECOVERY_LOCK_FILE)).expect("remove symlink");
+        let ownership = AuthorityOwnership::acquire(&ownership_path).expect("M4 sentinel");
+        let guard = ownership
+            .recovery_writer(&journal_root)
+            .expect("M3 writer lock");
+        assert!(recovery_lock_is_held(&root), "the guard holds the M3 lock");
+        drop(guard);
+        assert!(
+            !recovery_lock_is_held(&root),
+            "the guard releases the M3 lock on drop"
+        );
+        assert!(
+            ownership_path.exists(),
+            "the M4 sentinel outlives the guard"
+        );
+        drop(ownership);
+        assert!(
+            !ownership_path.exists(),
+            "the M4 sentinel is released on drop"
+        );
+
+        let _ = std::fs::remove_file(&target);
         let _ = std::fs::remove_dir_all(&root);
     }
 
