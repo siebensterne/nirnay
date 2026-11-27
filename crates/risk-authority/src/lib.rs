@@ -48,6 +48,7 @@ pub use authority::{
     RecoveryError,
     RecoveryHighWater,
     RecoveryJournalRoot,
+    RecoveryWriterLock,
     Reservation,
     RiskAuthority,
     RiskDecisionRecord,
