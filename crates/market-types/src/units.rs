@@ -844,7 +844,7 @@ impl Price {
 }
 
 /// Non-negative quantity measured in an explicit unit of measure.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Quantity {
     units: i128,
     unit: Unit,
@@ -912,6 +912,24 @@ impl Quantity {
     }
 }
 
+/// Private wire form of [`Quantity`]. It mirrors the serialized field names so
+/// no schema change is needed, but it is never exposed to callers.
+#[derive(Deserialize)]
+struct RawQuantity {
+    units: i128,
+    unit: Unit,
+}
+
+impl<'de> Deserialize<'de> for Quantity {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = RawQuantity::deserialize(deserializer)?;
+        Self::new(raw.units, raw.unit).map_err(serde::de::Error::custom)
+    }
+}
+
 /// Positive minimum price increment, expressed in price minor units.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(try_from = "i128", into = "i128")]
@@ -966,7 +984,7 @@ impl From<TickSize> for i128 {
 }
 
 /// Rational number of quote currency units per price unit and quantity unit.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ContractMultiplier {
     value: Rational,
     price_unit: Unit,
@@ -1042,8 +1060,26 @@ impl ContractMultiplier {
     }
 }
 
+/// Private wire form of [`ContractMultiplier`], validated by its constructor.
+#[derive(Deserialize)]
+struct RawContractMultiplier {
+    value: Rational,
+    price_unit: Unit,
+    quantity_unit: Unit,
+}
+
+impl<'de> Deserialize<'de> for ContractMultiplier {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = RawContractMultiplier::deserialize(deserializer)?;
+        Self::new(raw.value, raw.price_unit, raw.quantity_unit).map_err(serde::de::Error::custom)
+    }
+}
+
 /// Origin of an FX rate. Both fields are required for provenance.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RateSource {
     name: String,
     reference: String,
@@ -1079,6 +1115,23 @@ impl fmt::Display for RateSource {
     }
 }
 
+/// Private wire form of [`RateSource`], validated by its constructor.
+#[derive(Deserialize)]
+struct RawRateSource {
+    name: String,
+    reference: String,
+}
+
+impl<'de> Deserialize<'de> for RateSource {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = RawRateSource::deserialize(deserializer)?;
+        Self::new(&raw.name, &raw.reference).map_err(serde::de::Error::custom)
+    }
+}
+
 /// Which leg of a rate is being applied.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1088,7 +1141,7 @@ pub enum FxDirection {
 }
 
 /// Rational rate of quote major units per one base major unit, with provenance.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct FxRate {
     base: Currency,
     quote: Currency,
@@ -1153,6 +1206,34 @@ impl FxRate {
     }
 }
 
+/// Private wire form of [`FxRate`]. The nested [`RateSource`] and [`Rational`]
+/// values are themselves validated before the outer constructor runs.
+#[derive(Deserialize)]
+struct RawFxRate {
+    base: Currency,
+    quote: Currency,
+    quote_per_base: Rational,
+    source: RateSource,
+    observed_at_us: i64,
+}
+
+impl<'de> Deserialize<'de> for FxRate {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = RawFxRate::deserialize(deserializer)?;
+        Self::new(
+            raw.base,
+            raw.quote,
+            raw.quote_per_base,
+            raw.source,
+            raw.observed_at_us,
+        )
+        .map_err(serde::de::Error::custom)
+    }
+}
+
 /// Result of an explicit FX conversion, including rate provenance and receipt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FxConversion {
@@ -1185,7 +1266,7 @@ impl FxConversion {
 }
 
 /// Fee, tax or funding charge denominated in an explicit currency.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Charge {
     kind: ChargeKind,
     amount: Money,
@@ -1228,6 +1309,24 @@ impl Charge {
     }
 }
 
+/// Private wire form of [`Charge`], validated by its constructor.
+#[derive(Deserialize)]
+struct RawCharge {
+    kind: ChargeKind,
+    amount: Money,
+    code: String,
+}
+
+impl<'de> Deserialize<'de> for Charge {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = RawCharge::deserialize(deserializer)?;
+        Self::new(raw.kind, raw.amount, &raw.code).map_err(serde::de::Error::custom)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SettlementRegime {
@@ -1235,7 +1334,7 @@ pub enum SettlementRegime {
     Physical,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SettlementMetadata {
     regime: SettlementRegime,
     currency: Currency,
@@ -1286,6 +1385,31 @@ impl SettlementMetadata {
     #[must_use]
     pub fn reference(&self) -> &str {
         &self.reference
+    }
+}
+
+/// Private wire form of [`SettlementMetadata`], validated by its constructor.
+#[derive(Deserialize)]
+struct RawSettlementMetadata {
+    regime: SettlementRegime,
+    currency: Currency,
+    settlement_at_us: i64,
+    reference: String,
+}
+
+impl<'de> Deserialize<'de> for SettlementMetadata {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = RawSettlementMetadata::deserialize(deserializer)?;
+        Self::new(
+            raw.regime,
+            raw.currency,
+            raw.settlement_at_us,
+            &raw.reference,
+        )
+        .map_err(serde::de::Error::custom)
     }
 }
 
@@ -1347,7 +1471,7 @@ impl InstrumentSpecRef {
 }
 
 /// Immutable, effective-dated instrument terms referenced by id.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct InstrumentSpec {
     id: InstrumentSpecId,
     effective_from_us: i64,
@@ -1445,6 +1569,52 @@ impl InstrumentSpec {
     pub fn covers(&self, effective_at_us: i64) -> bool {
         self.effective_from_us <= effective_at_us
             && self.effective_to_us.is_none_or(|end| effective_at_us < end)
+    }
+}
+
+/// Private wire form of [`InstrumentSpec`]. Every field is deserialized into
+/// its already-validated typed form, then the whole record is rechecked by the
+/// public builder so no interval, dimension or charge-currency rule is skipped.
+#[derive(Deserialize)]
+struct RawInstrumentSpec {
+    id: InstrumentSpecId,
+    effective_from_us: i64,
+    effective_to_us: Option<i64>,
+    quote: Currency,
+    price_unit: Unit,
+    quantity_unit: Unit,
+    price_scale: Scale,
+    money_scale: Scale,
+    tick_size: TickSize,
+    multiplier: ContractMultiplier,
+    fees: Vec<Charge>,
+    taxes: Vec<Charge>,
+    funding: Option<Charge>,
+    settlement: SettlementMetadata,
+}
+
+impl<'de> Deserialize<'de> for InstrumentSpec {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = RawInstrumentSpec::deserialize(deserializer)?;
+        Self::builder()
+            .id(raw.id)
+            .effective_window(raw.effective_from_us, raw.effective_to_us)
+            .quote(raw.quote)
+            .price_unit(raw.price_unit)
+            .quantity_unit(raw.quantity_unit)
+            .price_scale(raw.price_scale)
+            .money_scale(raw.money_scale)
+            .tick_size(raw.tick_size)
+            .multiplier(raw.multiplier)
+            .fees(raw.fees)
+            .taxes(raw.taxes)
+            .funding(raw.funding)
+            .settlement(raw.settlement)
+            .build()
+            .map_err(serde::de::Error::custom)
     }
 }
 
@@ -1613,7 +1783,7 @@ fn windows_overlap(left: &InstrumentSpec, right: &InstrumentSpec) -> bool {
 }
 
 /// Registry of immutable specs; resolution needs only an id and an instant.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct InstrumentSpecRegistry {
     specs: Vec<InstrumentSpec>,
 }
@@ -1665,5 +1835,27 @@ impl InstrumentSpecRegistry {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.specs.is_empty()
+    }
+}
+
+/// Private wire form of [`InstrumentSpecRegistry`]. Specs are never copied
+/// straight into the registry: each one is reinserted through [`Self::insert`]
+/// so overlap and effective-window rules apply to external input too.
+#[derive(Deserialize)]
+struct RawInstrumentSpecRegistry {
+    specs: Vec<InstrumentSpec>,
+}
+
+impl<'de> Deserialize<'de> for InstrumentSpecRegistry {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = RawInstrumentSpecRegistry::deserialize(deserializer)?;
+        let mut registry = Self::new();
+        for spec in raw.specs {
+            registry.insert(spec).map_err(serde::de::Error::custom)?;
+        }
+        Ok(registry)
     }
 }
