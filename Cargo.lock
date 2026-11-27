@@ -1318,6 +1318,7 @@ dependencies = [
  "market-event",
  "market-kernel",
  "ops-runtime",
+ "paper-engine",
  "risk-authority",
  "risk-engine",
  "serde",
