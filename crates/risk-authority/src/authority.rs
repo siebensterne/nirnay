@@ -3237,10 +3237,17 @@ pub const ACCOUNT_JOURNAL_FILE: &str = "account_journal.jsonl";
 pub const DAILY_PNL_FILE: &str = "daily_pnl.json";
 pub const OMS_ANCHOR_FILE: &str = "oms_anchor.json";
 pub const ACCOUNT_ANCHOR_FILE: &str = "account_anchor.json";
+/// Independently persisted trust counters, one per journal identity. These are
+/// separate files from both the journal and its terminal anchor so replacing
+/// the journal and anchor together cannot replace the counter that outlives
+/// them.
+pub const OMS_HIGH_WATER_FILE: &str = "oms_high_water.json";
+pub const ACCOUNT_HIGH_WATER_FILE: &str = "account_high_water.json";
 pub const BINDING_SUFFIX: &str = ".auth";
 
 const BINDING_DOMAIN: &str = "nirnay-recovery-binding-v1";
 const ANCHOR_DOMAIN: &str = "nirnay-recovery-anchor-v1";
+const HIGH_WATER_DOMAIN: &str = "nirnay-recovery-high-water-v1";
 const AUTHENTICITY_SCHEMA: u32 = 1;
 
 /// Owner-held secret used to sign recovery bindings. A symmetric key lets the
@@ -3746,6 +3753,168 @@ impl RecoveryAnchor {
     }
 }
 
+/// Independently persisted trust counter for one journal identity. It lives in
+/// its own file, is advanced only after a load has verified the journal, its
+/// binding and its anchor, and is never rewritten when a journal prefix is
+/// replaced. An attacker who rolls back the journal and its anchor together
+/// still faces the counter that was trusted before the rollback.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecoveryHighWater {
+    pub schema_version: u32,
+    pub counter: u64,
+    pub source: String,
+    pub account_id: AccountId,
+    pub journal_id: String,
+    pub signature: String,
+}
+
+impl RecoveryHighWater {
+    fn preimage(
+        schema_version: u32,
+        counter: u64,
+        source: &str,
+        account_id: AccountId,
+        journal_id: &str,
+    ) -> String {
+        serde_json::json!({
+            "schema_version": schema_version,
+            "counter": counter,
+            "source": source,
+            "account_id": account_id,
+            "journal_id": journal_id,
+        })
+        .to_string()
+    }
+
+    /// Owner-side counter for an OS-owner-controlled directory. It carries no
+    /// keyed signature; protection comes from the directory's owner-only write
+    /// permission, which the loader verifies before trusting it.
+    #[must_use]
+    pub fn for_owner_directory(identity: &JournalIdentity, counter: u64) -> Self {
+        Self {
+            schema_version: AUTHENTICITY_SCHEMA,
+            counter,
+            source: source_tag(identity.source),
+            account_id: identity.account_id,
+            journal_id: identity.journal_id.clone(),
+            signature: String::new(),
+        }
+    }
+
+    /// Owner-side seal of the highest trusted counter. `counter` must be
+    /// non-zero and may only move forward; the authority re-verifies the
+    /// signature and the identity before consulting the value.
+    pub fn seal(
+        key: &OwnerSigningKey,
+        identity: &JournalIdentity,
+        counter: u64,
+    ) -> Result<Self, RecoveryError> {
+        if counter == 0 {
+            return Err(RecoveryError::Authenticity(
+                "trusted high-water counter must be non-zero".to_owned(),
+            ));
+        }
+        let source = source_tag(identity.source);
+        let message = Self::preimage(
+            AUTHENTICITY_SCHEMA,
+            counter,
+            &source,
+            identity.account_id,
+            &identity.journal_id,
+        );
+        Ok(Self {
+            schema_version: AUTHENTICITY_SCHEMA,
+            counter,
+            source,
+            account_id: identity.account_id,
+            journal_id: identity.journal_id.clone(),
+            signature: key.sign(HIGH_WATER_DOMAIN, &message),
+        })
+    }
+
+    fn check(
+        &self,
+        identity: &JournalIdentity,
+        anchor_counter: u64,
+        authenticity: &RecoveryAuthenticity,
+    ) -> Result<(), RecoveryError> {
+        if self.schema_version != AUTHENTICITY_SCHEMA {
+            return Err(RecoveryError::Authenticity(
+                "unsupported trusted high-water schema".to_owned(),
+            ));
+        }
+        if self.counter == 0 {
+            return Err(RecoveryError::Authenticity(
+                "trusted high-water counter is not monotonic".to_owned(),
+            ));
+        }
+        if self.source != source_tag(identity.source)
+            || self.account_id != identity.account_id
+            || self.journal_id != identity.journal_id
+        {
+            return Err(RecoveryError::Authenticity(
+                "trusted high-water belongs to another journal identity".to_owned(),
+            ));
+        }
+        if let Some(key) = authenticity.key() {
+            let message = Self::preimage(
+                self.schema_version,
+                self.counter,
+                &self.source,
+                self.account_id,
+                &self.journal_id,
+            );
+            if !key.matches(HIGH_WATER_DOMAIN, &message, &self.signature) {
+                return Err(RecoveryError::Authenticity(
+                    "trusted high-water signature is forged or altered".to_owned(),
+                ));
+            }
+        }
+        if anchor_counter < self.counter {
+            return Err(RecoveryError::Authenticity(
+                "terminal anchor counter regressed below the trusted high-water counter".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+static NEXT_HIGH_WATER_TEMP: AtomicU64 = AtomicU64::new(1);
+
+/// Advance one high-water record by writing a fresh file and renaming it into
+/// place. A partial or failed write can never leave the persisted counter
+/// unreadable or moved backwards; any failure fails the whole load closed.
+fn advance_high_water(
+    authenticity: &RecoveryAuthenticity,
+    identity: &JournalIdentity,
+    counter: u64,
+    path: &Path,
+) -> Result<(), RecoveryError> {
+    let record = match authenticity.key() {
+        Some(key) => RecoveryHighWater::seal(key, identity, counter)?,
+        None => RecoveryHighWater::for_owner_directory(identity, counter),
+    };
+    let text = serde_json::to_string(&record).map_err(|error| {
+        RecoveryError::Authenticity(format!("high-water advance serialization: {error}"))
+    })?;
+    let temp = path.with_extension(format!(
+        "tmp-{}-{}",
+        std::process::id(),
+        NEXT_HIGH_WATER_TEMP.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::write(&temp, text).map_err(|error| {
+        let _ = std::fs::remove_file(&temp);
+        RecoveryError::Authenticity(format!("high-water advance could not be staged: {error}"))
+    })?;
+    std::fs::rename(&temp, path).map_err(|error| {
+        let _ = std::fs::remove_file(&temp);
+        RecoveryError::Authenticity(format!(
+            "high-water advance could not be committed: {error}"
+        ))
+    })
+}
+
 /// Owner-side helper that derives the exact binding facts the verifier will
 /// recompute, then signs them. It mirrors `bind_recovery_journal` so an owner
 /// can seal a journal without duplicating the derivation or reading authority
@@ -4201,6 +4370,8 @@ impl RecoveryJournalRoot {
         let daily_pnl = self.root.join(DAILY_PNL_FILE);
         let oms_anchor = self.root.join(OMS_ANCHOR_FILE);
         let account_anchor = self.root.join(ACCOUNT_ANCHOR_FILE);
+        let oms_high_water = self.root.join(OMS_HIGH_WATER_FILE);
+        let account_high_water = self.root.join(ACCOUNT_HIGH_WATER_FILE);
 
         let oms_expected = JournalIdentity::new(ObservationSource::Oms, account_id, OMS_JOURNAL_ID);
         let account_expected = JournalIdentity::new(
@@ -4218,16 +4389,52 @@ impl RecoveryJournalRoot {
         )?;
 
         if self.authenticity.requires_os_owner() {
-            check_owner_journal_paths(&[oms_anchor.as_path(), account_anchor.as_path()])?;
+            check_owner_journal_paths(&[
+                oms_anchor.as_path(),
+                account_anchor.as_path(),
+                oms_high_water.as_path(),
+                account_high_water.as_path(),
+            ])?;
         }
         let oms_anchor_record: RecoveryAnchor = read_auth_json(&oms_anchor, "terminal anchor")?;
         let account_anchor_record: RecoveryAnchor =
             read_auth_json(&account_anchor, "terminal anchor")?;
-        oms_anchor_record.check(&oms_expected, &oms.terminal_head(), &self.authenticity)?;
-        account_anchor_record.check(
-            &account_expected,
-            &account.terminal_head(),
+        let oms_head = oms.terminal_head();
+        let account_head = account.terminal_head();
+        oms_anchor_record.check(&oms_expected, &oms_head, &self.authenticity)?;
+        account_anchor_record.check(&account_expected, &account_head, &self.authenticity)?;
+
+        // The high-water records are required, independently persisted trust
+        // state. A missing, corrupt, foreign or stale counter fails the load
+        // even when the journal and its anchor agree with each other.
+        let oms_high_water_record: RecoveryHighWater =
+            read_auth_json(&oms_high_water, "trusted high-water counter")?;
+        let account_high_water_record: RecoveryHighWater =
+            read_auth_json(&account_high_water, "trusted high-water counter")?;
+        oms_high_water_record.check(
+            &oms_expected,
+            oms_anchor_record.counter,
             &self.authenticity,
+        )?;
+        account_high_water_record.check(
+            &account_expected,
+            account_anchor_record.counter,
+            &self.authenticity,
+        )?;
+
+        // Only after every check passes may the trusted counters advance to
+        // the verified anchor counters. A failed advance fails the load closed.
+        advance_high_water(
+            &self.authenticity,
+            &oms_expected,
+            oms_anchor_record.counter,
+            &oms_high_water,
+        )?;
+        advance_high_water(
+            &self.authenticity,
+            &account_expected,
+            account_anchor_record.counter,
+            &account_high_water,
         )?;
         Ok((oms, account))
     }

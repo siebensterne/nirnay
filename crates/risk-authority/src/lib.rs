@@ -14,6 +14,7 @@ pub mod observation;
 
 pub use authority::{
     ACCOUNT_ANCHOR_FILE, //
+    ACCOUNT_HIGH_WATER_FILE,
     ACCOUNT_JOURNAL_FILE,
     ACCOUNT_JOURNAL_ID,
     AccountRecoveryRecord,
@@ -31,6 +32,7 @@ pub use authority::{
     JournalIdentity,
     OMS_ANCHOR_FILE,
     OMS_EXECUTIONS_FILE,
+    OMS_HIGH_WATER_FILE,
     OMS_JOURNAL_ID,
     OMS_PERMITS_FILE,
     OmsPermitRecord,
@@ -43,6 +45,7 @@ pub use authority::{
     RecoveryCheckpoint,
     RecoveryConfig,
     RecoveryError,
+    RecoveryHighWater,
     RecoveryJournalRoot,
     Reservation,
     RiskAuthority,

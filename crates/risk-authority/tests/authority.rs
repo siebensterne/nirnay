@@ -1965,6 +1965,7 @@ mod recovery_tests {
     use super::*;
     use risk_authority::{
         ACCOUNT_ANCHOR_FILE, //
+        ACCOUNT_HIGH_WATER_FILE,
         ACCOUNT_JOURNAL_FILE,
         ACCOUNT_JOURNAL_ID,
         AccountRecoveryRecord,
@@ -1982,6 +1983,7 @@ mod recovery_tests {
         NoopControlStore,
         OMS_ANCHOR_FILE,
         OMS_EXECUTIONS_FILE,
+        OMS_HIGH_WATER_FILE,
         OMS_JOURNAL_ID,
         OMS_PERMITS_FILE,
         OmsPermitRecord,
@@ -1992,6 +1994,7 @@ mod recovery_tests {
         RecoveryBindingRecord,
         RecoveryConfig,
         RecoveryError,
+        RecoveryHighWater,
         RecoveryJournalRoot,
         RiskDecisionRecord,
         VerifiedAccountSnapshot,
@@ -2111,6 +2114,30 @@ mod recovery_tests {
             })
     }
 
+    /// Two sealed OMS records: a valid full head at counter 2 whose prefix is
+    /// also a valid chain at counter 1.
+    fn two_record_oms() -> Vec<OmsPermitRecord> {
+        let mut first = OmsPermitRecord::new(
+            1,
+            IntentId::new(1).expect("intent"),
+            "a".repeat(64),
+            OmsPermitState::Open,
+            0,
+            0,
+        );
+        first.seal(1, genesis_digest());
+        let mut second = OmsPermitRecord::new(
+            2,
+            IntentId::new(2).expect("intent"),
+            "b".repeat(64),
+            OmsPermitState::Open,
+            0,
+            0,
+        );
+        second.seal(2, &first.digest);
+        vec![first, second]
+    }
+
     /// Fixture owner action: lay down the four required files and both
     /// independently protected terminal anchors under an owner-controlled root.
     fn write_owner_root(
@@ -2140,6 +2167,14 @@ mod recovery_tests {
                 account_sequence,
                 &account_digest,
             ),
+        )?;
+        write_json(
+            &root.join(OMS_HIGH_WATER_FILE),
+            &RecoveryHighWater::for_owner_directory(&oms_identity(), oms_sequence.max(1)),
+        )?;
+        write_json(
+            &root.join(ACCOUNT_HIGH_WATER_FILE),
+            &RecoveryHighWater::for_owner_directory(&account_identity(), account_sequence.max(1)),
         )
     }
 
@@ -2188,6 +2223,14 @@ mod recovery_tests {
                 account_sequence,
                 &account_digest,
             )?,
+        )?;
+        write_json(
+            &root.join(OMS_HIGH_WATER_FILE),
+            &RecoveryHighWater::seal(key, &oms_identity(), oms_sequence.max(1))?,
+        )?;
+        write_json(
+            &root.join(ACCOUNT_HIGH_WATER_FILE),
+            &RecoveryHighWater::seal(key, &account_identity(), account_sequence.max(1))?,
         )
     }
 
@@ -2444,6 +2487,233 @@ mod recovery_tests {
             "an older valid prefix cannot pass the independently protected head anchor"
         );
 
+        let _ = std::fs::remove_dir_all(&root);
+        Ok(())
+    }
+
+    /// A true high-water rollback: the attacker replaces the journal with an
+    /// older, internally valid prefix AND re-seals its anchor to a lower (but
+    /// still non-zero and >= that prefix's sequence) counter. Journal, head and
+    /// anchor are all mutually consistent; only an independently persisted
+    /// counter can detect the regression.
+    #[test]
+    fn rolling_back_journal_and_anchor_together_is_rejected() -> TestResult {
+        let key = owner_key();
+        let records = two_record_oms();
+        let full = FixtureRecords {
+            oms: records.clone(),
+            ..FixtureRecords::default()
+        };
+        let prefix = FixtureRecords {
+            oms: vec![records[0].clone()],
+            ..FixtureRecords::default()
+        };
+
+        for (label, authenticity) in [
+            ("strict", RecoveryAuthenticity::Strict(key.clone())),
+            ("owner-directory", RecoveryAuthenticity::OwnerDirectory),
+        ] {
+            let root = temp_root(&format!("joint-rollback-{label}"));
+            write_signed_root(&root, &full, &key)?;
+            let (oms, _) = RecoveryJournalRoot::new(&root, authenticity.clone())
+                .load(AccountId::new(ACCOUNT)?)?;
+            assert_eq!(
+                oms.terminal_head().sequence,
+                2,
+                "the higher terminal head was trusted"
+            );
+
+            // Replace only the journal and its anchor with an older, valid,
+            // self-consistent pair. The trusted high-water record is a separate
+            // file and is deliberately left untouched.
+            let executions: Vec<ExecutionRecoveryRecord> = Vec::new();
+            write_json_lines(&root.join(OMS_PERMITS_FILE), &prefix.oms)?;
+            write_json_lines(&root.join(OMS_EXECUTIONS_FILE), &executions)?;
+            let (sequence, digest) = oms_head(&prefix.oms);
+            write_json(
+                &root.join(OMS_ANCHOR_FILE),
+                &RecoveryAnchor::seal(&key, &oms_identity(), sequence.max(1), sequence, &digest)?,
+            )?;
+            // The rolled-back anchor is valid on its own: non-zero counter and
+            // counter >= the prefix's journal sequence.
+            assert!(sequence.max(1) >= sequence, "older counter is not zero");
+
+            let result =
+                RecoveryJournalRoot::new(&root, authenticity).load(AccountId::new(ACCOUNT)?);
+            assert!(
+                matches!(result, Err(RecoveryError::Authenticity(_))),
+                "a jointly rolled back journal and anchor must be rejected by the trusted high-water counter"
+            );
+            let _ = std::fs::remove_dir_all(&root);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn a_missing_trusted_high_water_record_fails_closed() -> TestResult {
+        let key = owner_key();
+        for (label, authenticity) in [
+            ("strict", RecoveryAuthenticity::Strict(key.clone())),
+            ("owner-directory", RecoveryAuthenticity::OwnerDirectory),
+        ] {
+            let root = temp_root(&format!("missing-high-water-{label}"));
+            write_signed_root(&root, &FixtureRecords::default(), &key)?;
+            std::fs::remove_file(root.join(OMS_HIGH_WATER_FILE))?;
+            let result =
+                RecoveryJournalRoot::new(&root, authenticity).load(AccountId::new(ACCOUNT)?);
+            assert!(
+                matches!(result, Err(RecoveryError::Authenticity(_))),
+                "a missing trusted high-water record must fail the load"
+            );
+            let _ = std::fs::remove_dir_all(&root);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn a_malformed_trusted_high_water_record_fails_closed() -> TestResult {
+        let key = owner_key();
+        for (label, authenticity) in [
+            ("strict", RecoveryAuthenticity::Strict(key.clone())),
+            ("owner-directory", RecoveryAuthenticity::OwnerDirectory),
+        ] {
+            let root = temp_root(&format!("malformed-high-water-{label}"));
+            write_signed_root(&root, &FixtureRecords::default(), &key)?;
+            std::fs::write(root.join(ACCOUNT_HIGH_WATER_FILE), "{ not json")?;
+            let result =
+                RecoveryJournalRoot::new(&root, authenticity).load(AccountId::new(ACCOUNT)?);
+            assert!(
+                matches!(result, Err(RecoveryError::Authenticity(_))),
+                "a corrupt trusted high-water record must fail the load"
+            );
+            let _ = std::fs::remove_dir_all(&root);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn a_foreign_trusted_high_water_identity_fails_closed() -> TestResult {
+        let key = owner_key();
+        for (label, authenticity) in [
+            ("strict", RecoveryAuthenticity::Strict(key.clone())),
+            ("owner-directory", RecoveryAuthenticity::OwnerDirectory),
+        ] {
+            let root = temp_root(&format!("foreign-high-water-{label}"));
+            write_signed_root(&root, &FixtureRecords::default(), &key)?;
+            let foreign_identity = JournalIdentity::new(
+                ObservationSource::Oms,
+                AccountId::new(ACCOUNT)?,
+                "some-other-journal",
+            );
+            let foreign = match &authenticity {
+                RecoveryAuthenticity::OwnerDirectory => {
+                    RecoveryHighWater::for_owner_directory(&foreign_identity, 1)
+                }
+                _ => RecoveryHighWater::seal(&key, &foreign_identity, 1)?,
+            };
+            write_json(&root.join(OMS_HIGH_WATER_FILE), &foreign)?;
+            let result =
+                RecoveryJournalRoot::new(&root, authenticity).load(AccountId::new(ACCOUNT)?);
+            assert!(
+                matches!(result, Err(RecoveryError::Authenticity(_))),
+                "a high-water counter bound to another journal identity must be rejected"
+            );
+            let _ = std::fs::remove_dir_all(&root);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn a_forged_high_water_counter_is_rejected_under_a_signed_model() -> TestResult {
+        let key = owner_key();
+        let root = temp_root("forged-high-water-counter");
+        let full = FixtureRecords {
+            oms: two_record_oms(),
+            ..FixtureRecords::default()
+        };
+        write_signed_root(&root, &full, &key)?;
+        let path = root.join(OMS_HIGH_WATER_FILE);
+        let mut record: RecoveryHighWater = serde_json::from_str(&std::fs::read_to_string(&path)?)?;
+        // Lowering the counter would let a rolled-back anchor pass if the
+        // signature were not verified; the un-keyed edit must be rejected.
+        record.counter = 1;
+        write_json(&path, &record)?;
+        let result = RecoveryJournalRoot::new(&root, RecoveryAuthenticity::Strict(key))
+            .load(AccountId::new(ACCOUNT)?);
+        assert!(
+            matches!(result, Err(RecoveryError::Authenticity(_))),
+            "an unsigned edit of a trusted high-water counter is rejected"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+        Ok(())
+    }
+
+    #[test]
+    fn a_verified_load_advances_the_counter_and_an_equal_reload_passes() -> TestResult {
+        let key = owner_key();
+        let full = FixtureRecords {
+            oms: two_record_oms(),
+            ..FixtureRecords::default()
+        };
+        for (label, authenticity) in [
+            ("strict", RecoveryAuthenticity::Strict(key.clone())),
+            ("owner-directory", RecoveryAuthenticity::OwnerDirectory),
+        ] {
+            let root = temp_root(&format!("advance-high-water-{label}"));
+            write_signed_root(&root, &full, &key)?;
+            let path = root.join(OMS_HIGH_WATER_FILE);
+            let lowered = match &authenticity {
+                RecoveryAuthenticity::OwnerDirectory => {
+                    RecoveryHighWater::for_owner_directory(&oms_identity(), 1)
+                }
+                _ => RecoveryHighWater::seal(&key, &oms_identity(), 1)?,
+            };
+            write_json(&path, &lowered)?;
+
+            let loader = RecoveryJournalRoot::new(&root, authenticity);
+            let (oms, _) = loader.load(AccountId::new(ACCOUNT)?)?;
+            assert_eq!(oms.terminal_head().sequence, 2, "the full head was trusted");
+            let advanced: RecoveryHighWater =
+                serde_json::from_str(&std::fs::read_to_string(&path)?)?;
+            assert_eq!(
+                advanced.counter, 2,
+                "a successful load advanced the trusted counter to the verified anchor counter"
+            );
+
+            let (reloaded, _) = loader.load(AccountId::new(ACCOUNT)?)?;
+            assert_eq!(
+                reloaded.terminal_head().sequence,
+                2,
+                "an equal-counter reload is permitted"
+            );
+            let unchanged: RecoveryHighWater =
+                serde_json::from_str(&std::fs::read_to_string(&path)?)?;
+            assert_eq!(
+                unchanged.counter, 2,
+                "an equal reload does not move the counter"
+            );
+            let _ = std::fs::remove_dir_all(&root);
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_failed_high_water_advance_fails_the_load_closed() -> TestResult {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = temp_root("failed-high-water-advance");
+        write_owner_root(&root, &FixtureRecords::default())?;
+        // The directory still passes owner-only checks, but it can no longer
+        // stage the atomic replacement of the trusted counter.
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o500))?;
+        let result = RecoveryJournalRoot::new(&root, RecoveryAuthenticity::OwnerDirectory)
+            .load(AccountId::new(ACCOUNT)?);
+        assert!(
+            matches!(result, Err(RecoveryError::Authenticity(_))),
+            "a high-water advance that cannot be committed fails the load"
+        );
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))?;
         let _ = std::fs::remove_dir_all(&root);
         Ok(())
     }
