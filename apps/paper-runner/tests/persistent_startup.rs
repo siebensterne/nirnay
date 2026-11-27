@@ -382,8 +382,16 @@ fn loader_failure_prevents_authority_construction() {
 fn valid_neutral_fixtures_yield_a_recovered_authority_still_not_ready() {
     let fixture = Fixture::new("valid-neutral");
     let result = fixture.recover().expect("neutral startup succeeds");
-    assert_eq!(result.readiness, StartupReadiness::NotReady);
-    assert_eq!(result.startup.mode, PaperMode::PersistentPaper);
+    assert_eq!(
+        result.readiness,
+        StartupReadiness::NotReady,
+        "startup must remain not-ready"
+    );
+    assert_eq!(
+        result.startup.mode,
+        PaperMode::PersistentPaper,
+        "mode must be persistent paper"
+    );
     assert!(
         result.startup.identity.label.contains("recovered"),
         "identity is the explicit recovered label"
@@ -396,13 +404,19 @@ fn valid_neutral_fixtures_yield_a_recovered_authority_still_not_ready() {
         result.startup.authority.startup_error().is_none(),
         "account and OMS reconciliation completed"
     );
+    if !result
+        .not_ready_reasons
+        .iter()
+        .any(|reason| reason.contains("observations"))
+    {
+        eprintln!("readiness reasons: {:?}", result.not_ready_reasons);
+    }
     assert!(
         result
             .not_ready_reasons
             .iter()
             .any(|reason| reason.contains("observations")),
-        "readiness still requires owner observations: {:?}",
-        result.not_ready_reasons
+        "readiness still requires owner observations"
     );
     assert!(
         fixture.base.with_extension("journal.lock").exists(),
