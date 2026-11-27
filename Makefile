@@ -27,7 +27,7 @@ export PYTEST_ADDOPTS := $(strip $(PYTEST_ADDOPTS) -p no:cacheprovider)
 Q_STYLE_BASE_SHA := $(shell git rev-parse --verify origin/main^{commit} 2>/dev/null)
 export Q_STYLE_BASE_SHA
 
-.PHONY: help ci assure check check-static lint test perf bench-ingress bench-risk-oms bench-neutral bench-neutral-self-test freeze-check research-code-digest-check synthetic-market-policy-check shellcheck-check generated-paths-check pollution-check style rust-style source-style python-ruff-style q-style standards-check style-gate python-format-check rust-test python-test python-check cpp-test cpp-format-check schema-check verify-local fmt constraints sbom supply-chain wheels packaging-test bundle bundle-verify git-policy kdb-analyze archive-verify tools
+.PHONY: help ci assure check check-static lint test perf bench-ingress bench-risk-oms bench-neutral bench-neutral-self-test bench-production bench-production-self-test freeze-check research-code-digest-check synthetic-market-policy-check shellcheck-check generated-paths-check pollution-check style rust-style source-style python-ruff-style q-style standards-check style-gate python-format-check rust-test python-test python-check cpp-test cpp-format-check schema-check verify-local fmt constraints sbom supply-chain wheels packaging-test bundle bundle-verify git-policy kdb-analyze archive-verify tools
 
 help:
 	@echo "check           full gate: static checks, Rust/Python tests, contracts"
@@ -45,6 +45,8 @@ help:
 	@echo "bundle-verify   verify that same zip and its extracted BUNDLE_DIR"
 	@echo "bench-neutral          opt-in neutral benchmark matrix (JSON artifact)"
 	@echo "bench-neutral-self-test  tiny deterministic harness self-test"
+	@echo "bench-production       opt-in real-component baseline (JSON artifact)"
+	@echo "bench-production-self-test  tiny real-component harness self-test"
 	@echo "tools           install the pinned Python tools"
 
 ci:
@@ -145,6 +147,15 @@ bench-neutral:
 
 bench-neutral-self-test:
 	cargo bench --locked -p trading-core --bench neutral_decisions -- --self-test
+
+# Real Nirnay production components with a neutral opaque workload. Opt-in
+# only: never part of check/CI and never a latency or throughput gate. The
+# artifact records the same correctness digests before and after measurement.
+bench-production:
+	cargo bench --locked -p paper-runner --bench production_components -- --run --out $(abspath evidence/performance/neutral-production-baseline-2026-11-27.json)
+
+bench-production-self-test:
+	cargo bench --locked -p paper-runner --bench production_components -- --self-test
 
 rust-test:
 	cargo test --workspace --all-targets --locked
