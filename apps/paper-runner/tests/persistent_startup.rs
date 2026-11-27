@@ -28,8 +28,21 @@ use risk_authority::{
     OwnerSigningKey, RecoveryAnchor, RecoveryAuthenticity, RecoveryHighWater, genesis_digest,
     recovery_binding_record,
 };
-use risk_engine::{RiskPolicy, ValidatedRiskPolicy};
-use trading_core::{AccountId, AlgoId, InstrumentId, Paise, Quantity, StrategyId, TradeDate};
+#[rustfmt::skip]
+use risk_engine::{
+    RiskPolicy,
+    ValidatedRiskPolicy,
+};
+#[rustfmt::skip]
+use trading_core::{
+    AccountId,
+    AlgoId,
+    InstrumentId,
+    Paise,
+    Quantity,
+    StrategyId,
+    TradeDate,
+};
 
 const ACCOUNT: u64 = 1;
 const STRATEGY: u64 = 2;
