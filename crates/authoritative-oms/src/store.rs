@@ -3,6 +3,21 @@
 //! successful transition. One append + `sync_all` is the atomic commit point;
 //! replay requires a contiguous sequence chain, so a truncated or corrupt tail
 //! is refused rather than silently accepted.
+//!
+//! Acknowledgement levels (all local to this process and its filesystem):
+//! 1. local queue admission — the command is accepted into the in-process outbox;
+//! 2. local write — the record bytes were handed to the local writer;
+//! 3. local flush — the buffered writer was flushed to the OS;
+//! 4. local sync — `sync_all` returned and the append is locally durable.
+//!
+//! No replication is claimed at any level, and no D4/D5 exposure is implied.
+//! Fencing terms are persisted before a new owner is allowed to write; `flock`
+//! from M3 is local mutual exclusion only and is not distributed fencing.
+//!
+//! Every durable record carries the current term in its replayed state. The
+//! legacy write methods remain for single-process callers that hold the local
+//! lock. The `*_fenced` methods are the authoritative owner-facing surface:
+//! they require a token and reject stale terms at the sink before any write.
 
 use std::{
     fmt, //
@@ -154,6 +169,57 @@ pub enum Resolution {
     },
 }
 
+/// A monotonically increasing durable fencing term. The sink (this store) owns
+/// the term; an owner never invents one. Terms start at 1 when an owner is
+/// fenced; 0 is the genesis term before any owner has been granted a token.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct FencingTerm(u64);
+
+impl FencingTerm {
+    #[must_use]
+    pub const fn new(value: u64) -> Self {
+        Self(value)
+    }
+
+    #[must_use]
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
+/// Capability presented with every fenced write. It binds one owner to one
+/// term; the sink refuses a write whose term is older than the persisted term.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FencingToken {
+    pub term: FencingTerm,
+    pub owner: String,
+}
+
+/// Typed fencing failures. A stale term is never silently accepted or clamped
+/// to the persisted term; the caller receives a distinct error.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum FencingError {
+    #[error("stale fencing term {presented}; persisted term is {persisted}")]
+    StaleTerm { presented: u64, persisted: u64 },
+    #[error("fencing term {presented} was never issued; persisted term is {persisted}")]
+    UnknownTerm { presented: u64, persisted: u64 },
+    #[error("fencing term {term} is held by `{holder}`, not `{presented}`")]
+    OwnerMismatch {
+        presented: String,
+        holder: String,
+        term: u64,
+    },
+    #[error("fencing owner must not be empty")]
+    InvalidOwner,
+    #[error("fencing term space is exhausted")]
+    TermExhausted,
+    #[error("storage error: {0}")]
+    Storage(String),
+    #[error("oms failure: {0}")]
+    Oms(OmsError),
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct OrderRecord {
     client_order_id: ClientOrderId,
@@ -223,6 +289,13 @@ struct OmsState {
     /// on every recovery, so a permit cannot be spent twice after restart.
     #[serde(default)]
     consumed_permits: std::collections::BTreeSet<u64>,
+    /// Durable fencing term, advanced with checked arithmetic and persisted in
+    /// the journal before a new owner is granted a token.
+    #[serde(default)]
+    fencing_term: u64,
+    /// Owner holding the persisted fencing term.
+    #[serde(default)]
+    fencing_owner: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -391,6 +464,237 @@ impl OmsStore {
     /// Inject a commit fault for deterministic durability tests.
     pub fn force_commit_fault(&mut self, fault: CommitFault) {
         self.commit_fault = Some(fault);
+    }
+
+    /// The persisted fencing term, replayed from the journal on every open.
+    #[must_use]
+    pub fn fencing_term(&self) -> FencingTerm {
+        FencingTerm(self.state.fencing_term)
+    }
+
+    /// The owner holding the persisted fencing term.
+    #[must_use]
+    pub fn fencing_owner(&self) -> Option<&str> {
+        self.state.fencing_owner.as_deref()
+    }
+
+    /// Grant an owner the next fencing term. The `fence` record is appended and
+    /// synced before the token is returned, so the term is durable before the
+    /// new owner is allowed to accept writes. Checked arithmetic prevents a
+    /// wrap-around from reviving a stale term.
+    pub fn fence(&mut self, owner: &str) -> Result<FencingToken, FencingError> {
+        if owner.trim().is_empty() {
+            return Err(FencingError::InvalidOwner);
+        }
+        let term = self
+            .state
+            .fencing_term
+            .checked_add(1)
+            .ok_or(FencingError::TermExhausted)?;
+        let mut next = self.state.clone();
+        next.fencing_term = term;
+        next.fencing_owner = Some(owner.to_owned());
+        self.append("fence", next).map_err(FencingError::Oms)?;
+        Ok(FencingToken {
+            term: FencingTerm(term),
+            owner: owner.to_owned(),
+        })
+    }
+
+    /// Reject a token whose term is older than the persisted term, was never
+    /// issued, or belongs to a different owner. Equal current terms with the
+    /// right owner pass through to the existing identity/idempotency rules.
+    fn guard(&self, token: &FencingToken) -> Result<(), FencingError> {
+        let persisted = self.state.fencing_term;
+        let presented = token.term.get();
+        if presented < persisted {
+            return Err(FencingError::StaleTerm {
+                presented,
+                persisted,
+            });
+        }
+        if presented > persisted {
+            return Err(FencingError::UnknownTerm {
+                presented,
+                persisted,
+            });
+        }
+        match self.state.fencing_owner.as_deref() {
+            Some(holder) if holder == token.owner => Ok(()),
+            Some(holder) => Err(FencingError::OwnerMismatch {
+                presented: token.owner.clone(),
+                holder: holder.to_owned(),
+                term: presented,
+            }),
+            None => Err(FencingError::OwnerMismatch {
+                presented: token.owner.clone(),
+                holder: "none".to_owned(),
+                term: presented,
+            }),
+        }
+    }
+
+    /// Fenced `create`. A repeated write at the current term is deduplicated by
+    /// the existing client-order/permit identity rules; the term is never lowered.
+    pub fn create_fenced(
+        &mut self,
+        token: &FencingToken,
+        client_order_id: ClientOrderId,
+        intent: &OrderIntent,
+        permit: &PermitRef,
+        now_ns: i64,
+    ) -> Result<(), FencingError> {
+        self.guard(token)?;
+        self.create(client_order_id, intent, permit, now_ns)
+            .map_err(FencingError::Oms)
+    }
+
+    /// Fenced `accept_risk_approved`.
+    pub fn accept_risk_approved_fenced(
+        &mut self,
+        token: &FencingToken,
+        client_order_id: ClientOrderId,
+        now_ns: i64,
+    ) -> Result<(), FencingError> {
+        self.guard(token)?;
+        self.accept_risk_approved(client_order_id, now_ns)
+            .map_err(FencingError::Oms)
+    }
+
+    /// Fenced `claim`.
+    pub fn claim_fenced(
+        &mut self,
+        token: &FencingToken,
+        worker: &str,
+        now_ns: i64,
+        lease_ns: i64,
+    ) -> Result<Option<DispatchClaim>, FencingError> {
+        self.guard(token)?;
+        self.claim(worker, now_ns, lease_ns)
+            .map_err(FencingError::Oms)
+    }
+
+    /// Fenced `mark_dispatching`.
+    pub fn mark_dispatching_fenced(
+        &mut self,
+        token: &FencingToken,
+        attempt_id: i64,
+        now_ns: i64,
+    ) -> Result<(), FencingError> {
+        self.guard(token)?;
+        self.mark_dispatching(attempt_id, now_ns)
+            .map_err(FencingError::Oms)
+    }
+
+    /// Fenced `acknowledge`.
+    pub fn acknowledge_fenced(
+        &mut self,
+        token: &FencingToken,
+        attempt_id: i64,
+        broker_order_id: &BrokerOrderId,
+        broker_event_id: &str,
+        now_ns: i64,
+    ) -> Result<bool, FencingError> {
+        self.guard(token)?;
+        self.acknowledge(attempt_id, broker_order_id, broker_event_id, now_ns)
+            .map_err(FencingError::Oms)
+    }
+
+    /// Fenced `apply_typed_fill`.
+    pub fn apply_typed_fill_fenced(
+        &mut self,
+        token: &FencingToken,
+        event: FillEvent,
+    ) -> Result<bool, FencingError> {
+        self.guard(token)?;
+        self.apply_typed_fill(event).map_err(FencingError::Oms)
+    }
+
+    /// Fenced `apply_fill`.
+    #[allow(clippy::too_many_arguments)] // mirrors apply_fill plus the mandatory fencing token
+    pub fn apply_fill_fenced(
+        &mut self,
+        token: &FencingToken,
+        client_order_id: ClientOrderId,
+        execution_id: &str,
+        broker_event_id: &str,
+        quantity: i64,
+        price_paise: i64,
+        now_ns: i64,
+    ) -> Result<bool, FencingError> {
+        self.guard(token)?;
+        self.apply_fill(
+            client_order_id,
+            execution_id,
+            broker_event_id,
+            quantity,
+            price_paise,
+            now_ns,
+        )
+        .map_err(FencingError::Oms)
+    }
+
+    /// Fenced `expire_dispatched`.
+    pub fn expire_dispatched_fenced(
+        &mut self,
+        token: &FencingToken,
+        now_ns: i64,
+        timeout_ns: i64,
+    ) -> Result<usize, FencingError> {
+        self.guard(token)?;
+        self.expire_dispatched(now_ns, timeout_ns)
+            .map_err(FencingError::Oms)
+    }
+
+    /// Fenced `request_cancel`.
+    pub fn request_cancel_fenced(
+        &mut self,
+        token: &FencingToken,
+        client_order_id: ClientOrderId,
+        now_ns: i64,
+    ) -> Result<i64, FencingError> {
+        self.guard(token)?;
+        self.request_cancel(client_order_id, now_ns)
+            .map_err(FencingError::Oms)
+    }
+
+    /// Fenced `apply_cancel`.
+    pub fn apply_cancel_fenced(
+        &mut self,
+        token: &FencingToken,
+        client_order_id: ClientOrderId,
+        broker_event_id: &str,
+        now_ns: i64,
+    ) -> Result<bool, FencingError> {
+        self.guard(token)?;
+        self.apply_cancel(client_order_id, broker_event_id, now_ns)
+            .map_err(FencingError::Oms)
+    }
+
+    /// Fenced `begin_reconciliation`.
+    pub fn begin_reconciliation_fenced(
+        &mut self,
+        token: &FencingToken,
+        client_order_id: ClientOrderId,
+        now_ns: i64,
+    ) -> Result<(), FencingError> {
+        self.guard(token)?;
+        self.begin_reconciliation(client_order_id, now_ns)
+            .map_err(FencingError::Oms)
+    }
+
+    /// Fenced `resolve_unknown`.
+    pub fn resolve_unknown_fenced(
+        &mut self,
+        token: &FencingToken,
+        client_order_id: ClientOrderId,
+        resolution: Resolution,
+        broker_event_id: &str,
+        now_ns: i64,
+    ) -> Result<(), FencingError> {
+        self.guard(token)?;
+        self.resolve_unknown(client_order_id, resolution, broker_event_id, now_ns)
+            .map_err(FencingError::Oms)
     }
 
     fn append(&mut self, op: &str, mut next: OmsState) -> Result<(), OmsError> {
@@ -1153,4 +1457,422 @@ fn record_event(
     state.events.insert(key.to_owned());
     let _ = (client_order_id, event_type, now_ns);
     Ok(())
+}
+
+#[cfg(test)]
+mod fencing_tests {
+    //! M7 fencing-term tests. Authored before the implementation so the
+    //! missing durable-term capability fails deterministically.
+
+    use super::{
+        BrokerOrderId, //
+        ClientOrderId,
+        FencingError,
+        FencingTerm,
+        FencingToken,
+        FillEvent,
+        OmsStore,
+        PermitRef,
+        Resolution,
+    };
+    use trading_core::{
+        AccountId, //
+        AlgoId,
+        InstrumentId,
+        IntentId,
+        JournalRef,
+        LogicalNanos,
+        OrderIntent,
+        Paise,
+        PricePaise,
+        Product,
+        Quantity,
+        Side,
+        StrategyId,
+        Venue,
+        permit_digest,
+    };
+
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    fn intent(id: u64, quantity: i64) -> Result<OrderIntent, Box<dyn std::error::Error>> {
+        Ok(OrderIntent {
+            intent_id: IntentId::new(id)?,
+            account_id: AccountId::new(1)?,
+            strategy_id: StrategyId::new(2)?,
+            strategy_version: "strategy-v1".to_owned(),
+            algo_id: AlgoId::new(3)?,
+            instrument_id: InstrumentId::new("nse.cash.synidx")?,
+            venue: Venue::Nse,
+            side: Side::Buy,
+            product: Product::Intraday,
+            quantity: Quantity::new(quantity)?,
+            limit_price: PricePaise::new(Paise(1_000))?,
+            reason: "m7 fencing fixture".to_owned(),
+            evidence: vec![JournalRef {
+                sequence: 1,
+                hash_hex: "ab".repeat(32),
+            }],
+            expires_at: LogicalNanos::new(100_000),
+        })
+    }
+
+    fn permit(
+        id: u64,
+        order_id: u64,
+        quantity: i64,
+    ) -> Result<PermitRef, Box<dyn std::error::Error>> {
+        let canonical = intent(order_id, quantity)?;
+        Ok(PermitRef {
+            permit_id: id,
+            policy_version: "risk-v1".to_owned(),
+            snapshot_revision: 3,
+            digest: permit_digest(id, "risk-v1", 3, &canonical),
+        })
+    }
+
+    fn fill(execution: &str, broker_event: &str) -> FillEvent {
+        FillEvent {
+            schema_version: 1,
+            execution_id: execution.to_owned(),
+            broker_event_id: broker_event.to_owned(),
+            client_order_id: ClientOrderId::new(1).expect("fixture client id"),
+            oms_order_id: "1".to_owned(),
+            side: Side::Buy,
+            quantity: 1,
+            price_paise: 1_000,
+            currency: "INR".to_owned(),
+            broker_timestamp_ns: 1,
+            received_at_ns: 1,
+            source: "m7-fixture".to_owned(),
+            account_scope: "paper".to_owned(),
+            charges_paise: 0,
+            charge_status: super::ChargeStatus::Estimated,
+            provenance: "m7 fixture".to_owned(),
+        }
+    }
+
+    macro_rules! assert_stale {
+        ($result:expr) => {
+            match $result {
+                Err(FencingError::StaleTerm { .. }) => {}
+                other => panic!("expected StaleTerm, got {other:?}"),
+            }
+        };
+    }
+
+    #[test]
+    fn owner_termination_makes_previous_token_stale() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("oms.jsonl");
+        let old_token;
+        {
+            let mut store = OmsStore::open(&path)?;
+            old_token = store.fence("owner-a").expect("fence owner-a");
+            store.create_fenced(
+                &old_token,
+                ClientOrderId::new(1)?,
+                &intent(1, 10)?,
+                &permit(1, 1, 10)?,
+                1,
+            )?;
+        }
+        let mut store = OmsStore::open(&path)?;
+        let current = store.fence("owner-b").expect("fence owner-b");
+        store.create_fenced(
+            &current,
+            ClientOrderId::new(2)?,
+            &intent(2, 10)?,
+            &permit(2, 2, 10)?,
+            2,
+        )?;
+        assert!(
+            matches!(
+                store.create_fenced(
+                    &old_token,
+                    ClientOrderId::new(3)?,
+                    &intent(3, 10)?,
+                    &permit(3, 3, 10)?,
+                    3,
+                ),
+                Err(FencingError::StaleTerm { .. })
+            ),
+            "a terminated owner's token must be rejected"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn paused_owner_resuming_after_reassignment_is_rejected() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let mut store = OmsStore::open(dir.path().join("oms.jsonl"))?;
+        let paused = store.fence("paused-owner").expect("fence paused owner");
+        let reassigned = store.fence("new-owner").expect("reassign owner");
+        store.create_fenced(
+            &reassigned,
+            ClientOrderId::new(1)?,
+            &intent(1, 10)?,
+            &permit(1, 1, 10)?,
+            2,
+        )?;
+        assert_stale!(store.create_fenced(
+            &paused,
+            ClientOrderId::new(2)?,
+            &intent(2, 10)?,
+            &permit(2, 2, 10)?,
+            3,
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn two_competing_owners_only_latest_term_writes() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let mut store = OmsStore::open(dir.path().join("oms.jsonl"))?;
+        let first = store.fence("competitor-a").expect("fence competitor-a");
+        let second = store.fence("competitor-b").expect("fence competitor-b");
+        assert_eq!(first.term.get(), 1, "first competitor term");
+        assert_eq!(second.term.get(), 2, "second competitor term");
+        store.create_fenced(
+            &second,
+            ClientOrderId::new(1)?,
+            &intent(1, 10)?,
+            &permit(1, 1, 10)?,
+            2,
+        )?;
+        assert_stale!(store.create_fenced(
+            &first,
+            ClientOrderId::new(2)?,
+            &intent(2, 10)?,
+            &permit(2, 2, 10)?,
+            3,
+        ));
+        assert_eq!(
+            store.orders()?.len(),
+            1,
+            "only the current owner's write landed"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn stale_token_is_rejected_without_accepting_the_write() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let mut store = OmsStore::open(dir.path().join("oms.jsonl"))?;
+        let stale = store.fence("owner-a").expect("fence owner-a");
+        let _current = store.fence("owner-b").expect("fence owner-b");
+        assert_stale!(store.create_fenced(
+            &stale,
+            ClientOrderId::new(1)?,
+            &intent(1, 10)?,
+            &permit(1, 1, 10)?,
+            3,
+        ));
+        assert!(
+            store.orders()?.is_empty(),
+            "rejected write must not be persisted"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn restart_preserves_persisted_fencing_term() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("oms.jsonl");
+        let old_token;
+        {
+            let mut store = OmsStore::open(&path)?;
+            old_token = store.fence("owner-a").expect("fence owner-a");
+            store.create_fenced(
+                &old_token,
+                ClientOrderId::new(1)?,
+                &intent(1, 10)?,
+                &permit(1, 1, 10)?,
+                1,
+            )?;
+        }
+        let mut store = OmsStore::open(&path)?;
+        assert_eq!(store.fencing_term().get(), 1, "term survives restart");
+        assert_eq!(
+            store.fencing_owner(),
+            Some("owner-a"),
+            "owner survives restart"
+        );
+        let next = store.fence("owner-b").expect("fence after restart");
+        assert_eq!(
+            next.term.get(),
+            2,
+            "term advances monotonically after restart"
+        );
+        assert_stale!(store.create_fenced(
+            &old_token,
+            ClientOrderId::new(2)?,
+            &intent(2, 10)?,
+            &permit(2, 2, 10)?,
+            2,
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn simulated_partition_and_rejoin_rejects_stale_owner() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let mut store = OmsStore::open(dir.path().join("oms.jsonl"))?;
+        // owner-a is fenced, then loses visibility of the journal (partition).
+        let partitioned = store.fence("owner-a").expect("fence owner-a");
+        // owner-b takes over while owner-a cannot observe the term advance.
+        let rejoined = store.fence("owner-b").expect("fence owner-b");
+        store.create_fenced(
+            &rejoined,
+            ClientOrderId::new(1)?,
+            &intent(1, 10)?,
+            &permit(1, 1, 10)?,
+            2,
+        )?;
+        // owner-a rejoins and presents its pre-partition token.
+        assert_stale!(store.create_fenced(
+            &partitioned,
+            ClientOrderId::new(2)?,
+            &intent(2, 10)?,
+            &permit(2, 2, 10)?,
+            3,
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn duplicate_replay_after_restart_is_idempotent_without_lowering_term() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("oms.jsonl");
+        let token;
+        {
+            let mut store = OmsStore::open(&path)?;
+            token = store.fence("owner-a").expect("fence owner-a");
+            store.create_fenced(
+                &token,
+                ClientOrderId::new(1)?,
+                &intent(1, 10)?,
+                &permit(1, 1, 10)?,
+                1,
+            )?;
+        }
+        let mut store = OmsStore::open(&path)?;
+        assert_eq!(
+            store.fencing_term().get(),
+            1,
+            "term persisted before restart"
+        );
+        // Same owner, same term: identity rules make the replay a no-op.
+        store.create_fenced(
+            &token,
+            ClientOrderId::new(1)?,
+            &intent(1, 10)?,
+            &permit(1, 1, 10)?,
+            2,
+        )?;
+        assert_eq!(
+            store.fencing_term().get(),
+            1,
+            "duplicate must not lower the term"
+        );
+        let next = store.fence("owner-b").expect("reassign after restart");
+        assert_stale!(store.create_fenced(
+            &token,
+            ClientOrderId::new(1)?,
+            &intent(1, 10)?,
+            &permit(1, 1, 10)?,
+            3,
+        ));
+        assert_eq!(
+            store.fencing_term().get(),
+            next.term.get(),
+            "term is not lowered by stale replay"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn every_fenced_write_rejects_a_stale_term() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let mut store = OmsStore::open(dir.path().join("oms.jsonl"))?;
+        let stale = store.fence("owner-a").expect("fence owner-a");
+        let current = store.fence("owner-b").expect("fence owner-b");
+        let client = ClientOrderId::new(1)?;
+        let order_intent = intent(1, 10)?;
+        let order_permit = permit(1, 1, 10)?;
+        store.create_fenced(&current, client, &order_intent, &order_permit, 1)?;
+        assert_stale!(store.create_fenced(&stale, client, &order_intent, &order_permit, 2));
+        assert_stale!(store.accept_risk_approved_fenced(&stale, client, 2));
+        assert_stale!(store.claim_fenced(&stale, "worker", 2, 1_000));
+        assert_stale!(store.mark_dispatching_fenced(&stale, 1, 2));
+        assert_stale!(store.acknowledge_fenced(
+            &stale,
+            1,
+            &BrokerOrderId::new("BROKER-1")?,
+            "evt-ack",
+            2,
+        ));
+        assert_stale!(store.apply_typed_fill_fenced(&stale, fill("exec-1", "evt-fill-1")));
+        assert_stale!(store.apply_fill_fenced(&stale, client, "exec-2", "evt-fill-2", 1, 1_000, 2));
+        assert_stale!(store.request_cancel_fenced(&stale, client, 2));
+        assert_stale!(store.apply_cancel_fenced(&stale, client, "evt-cancel", 2));
+        assert_stale!(store.begin_reconciliation_fenced(&stale, client, 2));
+        assert_stale!(store.resolve_unknown_fenced(
+            &stale,
+            client,
+            Resolution::Rejected {
+                broker_order_id: None,
+            },
+            "evt-resolve",
+            2,
+        ));
+        assert_stale!(store.expire_dispatched_fenced(&stale, 2, 1));
+        Ok(())
+    }
+
+    #[test]
+    fn forged_term_and_wrong_owner_are_rejected() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let mut store = OmsStore::open(dir.path().join("oms.jsonl"))?;
+        let current = store.fence("rightful-owner").expect("fence rightful owner");
+        assert_eq!(current.term, FencingTerm::new(1), "first term is one");
+        let forged = FencingToken {
+            term: FencingTerm::new(9),
+            owner: "rightful-owner".to_owned(),
+        };
+        assert!(
+            matches!(
+                store.create_fenced(
+                    &forged,
+                    ClientOrderId::new(1)?,
+                    &intent(1, 10)?,
+                    &permit(1, 1, 10)?,
+                    1,
+                ),
+                Err(FencingError::UnknownTerm {
+                    presented: 9,
+                    persisted: 1
+                })
+            ),
+            "a term that was never issued must be rejected"
+        );
+        let wrong_owner = FencingToken {
+            term: current.term,
+            owner: "impostor".to_owned(),
+        };
+        assert!(
+            matches!(
+                store.create_fenced(
+                    &wrong_owner,
+                    ClientOrderId::new(1)?,
+                    &intent(1, 10)?,
+                    &permit(1, 1, 10)?,
+                    1,
+                ),
+                Err(FencingError::OwnerMismatch { .. })
+            ),
+            "a token from another owner must be rejected"
+        );
+        Ok(())
+    }
 }
