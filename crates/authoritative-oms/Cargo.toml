@@ -29,6 +29,10 @@ workspace = true
 
 # Integration targets are declared explicitly under the test policy.
 [[test]]
+name = "fencing_boundary"
+path = "tests/fencing_boundary.rs"
+
+[[test]]
 name = "account_ledger"
 path = "tests/account_ledger.rs"
 required-features = ["market-shaped-tests"]

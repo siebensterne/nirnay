@@ -17,6 +17,7 @@ use std::{
 
 use account_journal::{
     CommitFault, //
+    FencingToken,
     Journal,
     JournalError,
     StoredRecord,
@@ -57,7 +58,13 @@ use trading_core::{
 
 use crate::{
     error::OmsError, //
-    store::{ChargeStatus, ClientOrderId, FillEvent, OmsStore, fill_content_digest},
+    store::{
+        ChargeStatus, //
+        ClientOrderId,
+        FillEvent,
+        OmsStore,
+        fill_content_digest,
+    },
 };
 
 /// Stream identity for the projected account ledger.
@@ -235,6 +242,80 @@ impl Projector {
         self.journal.force_commit_fault(fault);
     }
 
+    /// Grant an owner the next durable account-journal fencing term. This is
+    /// the token-issuance entry point; every projection mutation below needs
+    /// the returned token.
+    pub fn fence(&mut self, owner: &str) -> Result<FencingToken, JournalError> {
+        self.journal.fence(owner)
+    }
+
+    /// Fenced opening-balance append. Stale or wrong-owner tokens are refused
+    /// before any work, including on an idempotent duplicate.
+    pub fn open_account_fenced(
+        &mut self,
+        token: &FencingToken,
+        account_scope: &str,
+        starting_cash: Paise,
+        trade_date: TradeDate,
+        evidence: OpeningBalanceEvidence,
+    ) -> Result<bool, ProjectionError> {
+        self.journal.check_fencing(token)?;
+        self.open_account(token, account_scope, starting_cash, trade_date, evidence)
+    }
+
+    /// Fenced posting of one OMS execution. The internal posting primitive is
+    /// crate-only; external callers cannot append to the account journal
+    /// without a current token:
+    ///
+    /// ```compile_fail
+    /// # use authoritative_oms::{FillEvent, Projector};
+    /// # use trading_core::InstrumentId;
+    /// # fn outside(projector: &mut Projector, event: &FillEvent, instrument: &InstrumentId) {
+    /// projector.project_fill(event, instrument);
+    /// # }
+    /// ```
+    pub fn project_fill_fenced(
+        &mut self,
+        token: &FencingToken,
+        event: &FillEvent,
+        instrument_id: &InstrumentId,
+    ) -> Result<bool, ProjectionError> {
+        self.journal.check_fencing(token)?;
+        self.project_fill(token, event, instrument_id)
+    }
+
+    /// Fenced bulk posting of persisted OMS fills.
+    pub fn project_store_fills_fenced(
+        &mut self,
+        token: &FencingToken,
+        store: &OmsStore,
+        instruments: &BTreeMap<String, InstrumentId>,
+    ) -> Result<usize, ProjectionError> {
+        self.journal.check_fencing(token)?;
+        self.project_store_fills(token, store, instruments)
+    }
+
+    /// Fenced reversal of a prior posting.
+    pub fn bust_fenced(
+        &mut self,
+        token: &FencingToken,
+        execution_id: &str,
+    ) -> Result<bool, ProjectionError> {
+        self.journal.check_fencing(token)?;
+        self.bust(token, execution_id)
+    }
+
+    /// Fenced charge-confirmation correction.
+    pub fn confirm_charges_fenced(
+        &mut self,
+        token: &FencingToken,
+        execution_id: &str,
+        confirmed_charges_paise: i64,
+    ) -> Result<bool, ProjectionError> {
+        self.journal.check_fencing(token)?;
+        self.confirm_charges(token, execution_id, confirmed_charges_paise)
+    }
+
     /// Rebuild state from every journal record in sequence order.
     fn rebuild(&mut self) -> Result<(), ProjectionError> {
         let mut state = LedgerState::default();
@@ -291,8 +372,11 @@ impl Projector {
 
     /// Append an evidenced opening balance. A second opening for the same
     /// scope with a different amount is refused rather than silently applied.
-    pub fn open_account(
+    /// Internal-only opening-balance append. External callers must use
+    /// [`Self::open_account_fenced`] with a current token.
+    pub(crate) fn open_account(
         &mut self,
+        token: &FencingToken,
         account_scope: &str,
         starting_cash: Paise,
         trade_date: TradeDate,
@@ -348,14 +432,17 @@ impl Projector {
                 evidence,
             },
         };
-        self.journal.append(body)?;
+        self.journal.append_fenced(token, body)?;
         self.rebuild()?;
         Ok(true)
     }
 
     /// Project one OMS execution. Returns `false` on an identical duplicate.
-    pub fn project_fill(
+    /// Internal-only posting append. External callers must use
+    /// [`Self::project_fill_fenced`] with a current token.
+    pub(crate) fn project_fill(
         &mut self,
+        token: &FencingToken,
         event: &FillEvent,
         instrument_id: &InstrumentId,
     ) -> Result<bool, ProjectionError> {
@@ -372,6 +459,7 @@ impl Projector {
                 account_scope: event.account_scope.clone(),
             })?;
         self.append_posting(
+            token,
             LedgerPostingKind::Posting,
             event,
             instrument_id,
@@ -383,8 +471,11 @@ impl Projector {
 
     /// Project every persisted OMS fill using a caller-supplied execution to
     /// instrument mapping. Delivery order does not affect the final state.
-    pub fn project_store_fills(
+    /// Internal-only bulk posting append. External callers must use
+    /// [`Self::project_store_fills_fenced`] with a current token.
+    pub(crate) fn project_store_fills(
         &mut self,
+        token: &FencingToken,
         store: &OmsStore,
         instruments: &BTreeMap<String, InstrumentId>,
     ) -> Result<usize, ProjectionError> {
@@ -395,7 +486,7 @@ impl Projector {
                     execution_id: event.execution_id.clone(),
                 }
             })?;
-            if self.project_fill(&event, instrument)? {
+            if self.project_fill(token, &event, instrument)? {
                 projected += 1;
             }
         }
@@ -404,7 +495,13 @@ impl Projector {
 
     /// Append a reversing record for a prior posting. The original record is
     /// never mutated; the net state change is the exact negative delta.
-    pub fn bust(&mut self, execution_id: &str) -> Result<bool, ProjectionError> {
+    /// Internal-only reversal append. External callers must use
+    /// [`Self::bust_fenced`] with a current token.
+    pub(crate) fn bust(
+        &mut self,
+        token: &FencingToken,
+        execution_id: &str,
+    ) -> Result<bool, ProjectionError> {
         let prior = self.find_execution(execution_id)?;
         if prior.reversed {
             return Ok(false);
@@ -412,6 +509,7 @@ impl Projector {
         let original = prior.to_fill_event(prior.charge_status, prior.execution_id.clone())?;
         prior.check_digest(&original)?;
         self.append_posting(
+            token,
             LedgerPostingKind::Reversal,
             &original,
             &prior.instrument_id,
@@ -423,8 +521,11 @@ impl Projector {
 
     /// Rebook estimated charges as broker-confirmed values by appending a
     /// reversal of the original posting followed by a new positive posting.
-    pub fn confirm_charges(
+    /// Internal-only correction append. External callers must use
+    /// [`Self::confirm_charges_fenced`] with a current token.
+    pub(crate) fn confirm_charges(
         &mut self,
+        token: &FencingToken,
         execution_id: &str,
         confirmed_charges_paise: i64,
     ) -> Result<bool, ProjectionError> {
@@ -439,6 +540,7 @@ impl Projector {
         let reversal_id =
             charge_reversal_event_id(&prior.account_scope, execution_id, confirmed_charges_paise)?;
         let appended = self.append_posting(
+            token,
             LedgerPostingKind::Reversal,
             &original,
             &prior.instrument_id,
@@ -465,6 +567,7 @@ impl Projector {
                 account_scope: prior.account_scope.clone(),
             })?;
         self.append_posting(
+            token,
             LedgerPostingKind::Posting,
             &corrected,
             &prior.instrument_id,
@@ -478,8 +581,10 @@ impl Projector {
         Ok(true)
     }
 
+    #[allow(clippy::too_many_arguments)] // internal posting primitive carries the mandatory token
     fn append_posting(
         &mut self,
+        token: &FencingToken,
         kind: LedgerPostingKind,
         event: &FillEvent,
         instrument_id: &InstrumentId,
@@ -553,7 +658,7 @@ impl Projector {
                 cash_delta,
             },
         };
-        self.journal.append(body)?;
+        self.journal.append_fenced(token, body)?;
         self.rebuild()?;
         Ok(true)
     }

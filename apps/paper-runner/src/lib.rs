@@ -23,7 +23,9 @@ use std::{
 use authoritative_oms::{
     BrokerOrderId, //
     ClientOrderId,
+    FencingToken,
     FillEvent,
+    JournalFencingToken,
     OmsOrderState,
     OmsStore,
     OrderView,
@@ -910,9 +912,12 @@ pub fn ledger_position(projector: &Projector, instrument_id: &InstrumentId) -> R
 /// 6. only an accepted OMS fill is projected into the ledger.
 ///
 /// Returns `true` only when a new execution was applied.
+#[allow(clippy::too_many_arguments)] // both authoritative stores require their current token
 pub fn apply_authoritative_fill(
     store: &mut OmsStore,
     projector: &mut Projector,
+    oms_token: &FencingToken,
+    ledger_token: &JournalFencingToken,
     instruments: &mut BTreeMap<String, InstrumentId>,
     client: ClientOrderId,
     instrument_id: &InstrumentId,
@@ -972,7 +977,7 @@ pub fn apply_authoritative_fill(
         .ok_or("fill accounting overflow: ledger position")?;
 
     let applied = store
-        .apply_typed_fill(candidate)
+        .apply_typed_fill_fenced(oms_token, candidate)
         .map_err(|error| error.to_string())?;
     if applied {
         instruments.insert(evidence.execution_id.clone(), instrument_id.clone());
@@ -980,7 +985,7 @@ pub fn apply_authoritative_fill(
             .fill(&evidence.execution_id)
             .ok_or("missing persisted fill")?;
         projector
-            .project_fill(stored, instrument_id)
+            .project_fill_fenced(ledger_token, stored, instrument_id)
             .map_err(|error| error.to_string())?;
     }
     Ok(applied)
@@ -1271,8 +1276,13 @@ pub fn run_paper(input: &PaperInput, oms_path: &Path) -> Result<PaperRun, String
     let mut store = OmsStore::open(oms_path).map_err(|e| e.to_string())?;
     let mut projector = Projector::open(oms_path.with_extension("ledger"), account_id)
         .map_err(|e| e.to_string())?;
+    let oms_token = store.fence("paper-runner-oms").map_err(|e| e.to_string())?;
+    let ledger_token = projector
+        .fence("paper-runner-ledger")
+        .map_err(|e| e.to_string())?;
     projector
-        .open_account(
+        .open_account_fenced(
+            &ledger_token,
             "paper",
             Paise(1_000_000),
             input.trade_date,
@@ -1449,17 +1459,17 @@ pub fn run_paper(input: &PaperInput, oms_path: &Path) -> Result<PaperRun, String
                 .map_err(|e| e.to_string())?,
         };
         store
-            .create(client, &order, &permit, ordinal as i64)
+            .create_fenced(&oms_token, client, &order, &permit, ordinal as i64)
             .map_err(|e| e.to_string())?;
         store
-            .accept_risk_approved(client, ordinal as i64 + 1)
+            .accept_risk_approved_fenced(&oms_token, client, ordinal as i64 + 1)
             .map_err(|e| e.to_string())?;
         let claim = store
-            .claim("paper-dispatcher", ordinal as i64 + 2, 1_000)
+            .claim_fenced(&oms_token, "paper-dispatcher", ordinal as i64 + 2, 1_000)
             .map_err(|e| e.to_string())?
             .ok_or("no submission claim")?;
         store
-            .mark_dispatching(claim.attempt_id, ordinal as i64 + 3)
+            .mark_dispatching_fenced(&oms_token, claim.attempt_id, ordinal as i64 + 3)
             .map_err(|e| e.to_string())?;
         let request = BrokerOrderRequest::from_claim(&claim, &permit, broker.adapter_id())
             .map_err(|e| e.to_string())?;
@@ -1468,7 +1478,8 @@ pub fn run_paper(input: &PaperInput, oms_path: &Path) -> Result<PaperRun, String
                 let broker_id =
                     BrokerOrderId::new(ack.broker_order_id.clone()).map_err(|e| e.to_string())?;
                 store
-                    .acknowledge(
+                    .acknowledge_fenced(
+                        &oms_token,
                         claim.attempt_id,
                         &broker_id,
                         &ack.broker_event_id,
@@ -1505,6 +1516,8 @@ pub fn run_paper(input: &PaperInput, oms_path: &Path) -> Result<PaperRun, String
                         let applied = apply_authoritative_fill(
                             &mut store,
                             &mut projector,
+                            &oms_token,
+                            &ledger_token,
                             &mut instruments,
                             client,
                             &instrument_id,
@@ -1539,7 +1552,7 @@ pub fn run_paper(input: &PaperInput, oms_path: &Path) -> Result<PaperRun, String
             }
             SubmissionOutcome::TimedOut { .. } => {
                 store
-                    .expire_dispatched(ordinal as i64 + 10, 1)
+                    .expire_dispatched_fenced(&oms_token, ordinal as i64 + 10, 1)
                     .map_err(|e| e.to_string())?;
             }
             SubmissionOutcome::Rejected {
@@ -1548,7 +1561,8 @@ pub fn run_paper(input: &PaperInput, oms_path: &Path) -> Result<PaperRun, String
                 ..
             } => {
                 store
-                    .reject_submission(
+                    .reject_submission_fenced(
+                        &oms_token,
                         claim.attempt_id,
                         &reason,
                         &broker_event_id,

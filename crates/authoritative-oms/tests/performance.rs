@@ -14,6 +14,7 @@ use authoritative_oms::{
     ChargeStatus,
     ClientOrderId,
     CommitFault,
+    FencingToken,
     FillEvent,
     OmsOrderState,
     OmsStore,
@@ -39,6 +40,10 @@ use trading_core::{
 };
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+fn fence(store: &mut OmsStore) -> FencingToken {
+    store.fence("oms-benchmark-owner").expect("fence the OMS")
+}
 
 const COMMITS: u64 = 200;
 const DUPLICATES: u64 = 2_000;
@@ -126,8 +131,10 @@ fn restart_recovery_after_k_commits_with_injected_fault() -> TestResult {
     let partial_write_count = 0_u64;
     {
         let mut store = OmsStore::open(&path)?;
+        let token = fence(&mut store);
         for id in 1..=COMMITS {
-            store.create(
+            store.create_fenced(
+                &token,
                 ClientOrderId::new(id)?,
                 &intent(id, 1)?,
                 &permit(id, &intent(id, 1)?),
@@ -137,7 +144,8 @@ fn restart_recovery_after_k_commits_with_injected_fault() -> TestResult {
         store.force_commit_fault(CommitFault::SyncFailure);
         sync_failure_count += 1;
         let uncertain = COMMITS + 1;
-        let failed = store.create(
+        let failed = store.create_fenced(
+            &token,
             ClientOrderId::new(uncertain)?,
             &intent(uncertain, 1)?,
             &permit(uncertain, &intent(uncertain, 1)?),
@@ -175,14 +183,22 @@ fn duplicate_event_handling_rate() -> TestResult {
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("oms.journal");
     let mut store = OmsStore::open(&path)?;
+    let token = fence(&mut store);
     let client = ClientOrderId::new(1)?;
-    store.create(client, &intent(1, 10)?, &permit(7, &intent(1, 10)?), 1_000)?;
-    store.accept_risk_approved(client, 1_010)?;
+    store.create_fenced(
+        &token,
+        client,
+        &intent(1, 10)?,
+        &permit(7, &intent(1, 10)?),
+        1_000,
+    )?;
+    store.accept_risk_approved_fenced(&token, client, 1_010)?;
     let claim = store
-        .claim("bench-dispatcher", 2_000, 1_000)?
+        .claim_fenced(&token, "bench-dispatcher", 2_000, 1_000)?
         .expect("claim");
-    store.mark_dispatching(claim.attempt_id, 2_100)?;
-    store.acknowledge(
+    store.mark_dispatching_fenced(&token, claim.attempt_id, 2_100)?;
+    store.acknowledge_fenced(
+        &token,
         claim.attempt_id,
         &BrokerOrderId::new("B-bench-1")?,
         "evt-bench-ack",
@@ -190,7 +206,7 @@ fn duplicate_event_handling_rate() -> TestResult {
     )?;
     let event = fill_event("exec-bench-1", "evt-bench-fill-1", 1);
     assert!(
-        store.apply_typed_fill(event.clone())?,
+        store.apply_typed_fill_fenced(&token, event.clone())?,
         "first fill is accepted"
     );
 
@@ -202,7 +218,7 @@ fn duplicate_event_handling_rate() -> TestResult {
     let started = Instant::now();
     for _ in 0..DUPLICATES {
         let item_started = Instant::now();
-        if !store.apply_typed_fill(event.clone())? {
+        if !store.apply_typed_fill_fenced(&token, event.clone())? {
             ignored += 1;
         }
         latencies.push(item_started.elapsed().as_nanos());
@@ -228,16 +244,23 @@ fn reconciliation_completeness_against_injected_unknown_set() -> TestResult {
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("oms.journal");
     let mut store = OmsStore::open(&path)?;
+    let token = fence(&mut store);
     for id in 1..=UNKNOWN_ORDERS {
         let client = ClientOrderId::new(id)?;
-        store.create(client, &intent(id, 1)?, &permit(id, &intent(id, 1)?), 1_000)?;
-        store.accept_risk_approved(client, 1_010)?;
+        store.create_fenced(
+            &token,
+            client,
+            &intent(id, 1)?,
+            &permit(id, &intent(id, 1)?),
+            1_000,
+        )?;
+        store.accept_risk_approved_fenced(&token, client, 1_010)?;
         let claim = store
-            .claim("bench-dispatcher", 2_000, 1_000)?
+            .claim_fenced(&token, "bench-dispatcher", 2_000, 1_000)?
             .expect("claim");
-        store.mark_dispatching(claim.attempt_id, 2_100)?;
+        store.mark_dispatching_fenced(&token, claim.attempt_id, 2_100)?;
     }
-    let expired = store.expire_dispatched(5_000, 0)?;
+    let expired = store.expire_dispatched_fenced(&token, 5_000, 0)?;
     assert_eq!(
         expired, UNKNOWN_ORDERS as usize,
         "every dispatched order becomes UNKNOWN"
@@ -261,8 +284,9 @@ fn reconciliation_completeness_against_injected_unknown_set() -> TestResult {
     for id in 1..=UNKNOWN_ORDERS {
         let client = ClientOrderId::new(id)?;
         let item_started = Instant::now();
-        store.begin_reconciliation(client, 5_100)?;
-        store.resolve_unknown(
+        store.begin_reconciliation_fenced(&token, client, 5_100)?;
+        store.resolve_unknown_fenced(
+            &token,
             client,
             Resolution::Working {
                 broker_order_id: BrokerOrderId::new(format!("B-bench-{id}"))?,

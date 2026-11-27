@@ -14,6 +14,8 @@ pub mod lifecycle;
 pub mod reconciliation;
 pub mod store;
 
+/// Freshness marker for the authoritative OMS store's local fencing terms.
+pub use account_journal::FencingToken as JournalFencingToken;
 pub use account_projection::{
     LEDGER_STREAM_ID, //
     LedgerCursor,
@@ -39,6 +41,9 @@ pub use store::{
     ClientOrderId,
     CommitFault,
     DispatchClaim,
+    FencingError,
+    FencingTerm,
+    FencingToken,
     FillEvent,
     OmsStore,
     OrderView,
