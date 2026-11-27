@@ -8,7 +8,11 @@ use std::{
     io::{Read, Seek, SeekFrom, Write},
 };
 
-use account_journal::{Journal, JournalError};
+use account_journal::{
+    FencingToken, //
+    Journal,
+    JournalError,
+};
 use trading_core::{
     AccountId, Continuity, DomainError, EventEnvelope, EventId, EventPayload, EventTimes,
     InstrumentId, LogicalNanos, Paise, PricePaise, Quantity, QuoteSnapshot, RunId, StoredBody,
@@ -16,6 +20,12 @@ use trading_core::{
 };
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+fn fence(journal: &mut Journal) -> FencingToken {
+    journal
+        .fence("journal-contract-owner")
+        .expect("fence the journal writer")
+}
 
 const TIMESTAMP: i64 = 1_793_145_600_000_000_000;
 const RUN: RunId = RunId::from_bytes([
@@ -104,9 +114,10 @@ fn venue_bearing_payloads_require_and_preserve_schema_version_three() -> TestRes
     let event_id = EventId::for_run(RUN, 1);
     {
         let mut journal = Journal::open(&root, stream)?;
+        let token = fence(&mut journal);
         // A v1 body would replay as a legacy record without a venue.
         let legacy = quote_body(stream, event_id.clone(), 1, Venue::Nse)?;
-        match journal.append(legacy) {
+        match journal.append_fenced(&token, legacy) {
             Err(JournalError::SchemaVersionTooOld {
                 required: 3,
                 declared: 1,
@@ -117,7 +128,7 @@ fn venue_bearing_payloads_require_and_preserve_schema_version_three() -> TestRes
         assert_eq!(journal.verification_report().record_count, 0);
 
         let body = quote_body(stream, event_id, 3, Venue::Bse)?;
-        journal.append(body)?;
+        journal.append_fenced(&token, body)?;
         assert_eq!(journal.verification_report().record_count, 1);
     }
     let journal = Journal::open(&root, stream)?;
@@ -143,7 +154,8 @@ fn reopen_repairs_an_incomplete_final_frame_and_preserves_committed_history() ->
     let first_hash;
     {
         let mut journal = Journal::open(&root, stream)?;
-        let record = journal.append(body)?;
+        let token = fence(&mut journal);
+        let record = journal.append_fenced(&token, body)?;
         first_hash = record.hash.hex();
         assert_eq!(journal.verification_report().record_count, 1);
     }
@@ -175,10 +187,12 @@ fn identical_run_inputs_produce_identical_event_ids_and_hashes() -> TestResult {
     for directory in [first_dir.path(), second_dir.path()] {
         let root = directory.join("ledger");
         let mut journal = Journal::open(&root, stream)?;
+        let token = fence(&mut journal);
         for ordinal in 1..=3_u64 {
             let event_id = journal.next_event_id(RUN)?;
             assert_eq!(event_id, EventId::for_run(RUN, ordinal));
-            let record = journal.append(kill_switch(stream, event_id, "identical input"))?;
+            let record =
+                journal.append_fenced(&token, kill_switch(stream, event_id, "identical input"))?;
             assert_eq!(record.sequence, ordinal);
             hashes.push(record.hash.hex());
         }
@@ -197,17 +211,18 @@ fn duplicate_append_is_idempotent_and_conflicting_content_is_rejected() -> TestR
     let root = directory.path().join("ledger");
     let stream = "idempotency";
     let mut journal = Journal::open(&root, stream)?;
+    let token = fence(&mut journal);
     let event_id = journal.next_event_id(RUN)?;
     let body = kill_switch(stream, event_id.clone(), "first");
 
-    let first = journal.append(body.clone())?;
-    let second = journal.append(body)?;
+    let first = journal.append_fenced(&token, body.clone())?;
+    let second = journal.append_fenced(&token, body)?;
     assert_eq!(first, second);
     assert_eq!(journal.records().len(), 1);
 
     let conflicting = kill_switch(stream, event_id, "different content");
     assert!(matches!(
-        journal.append(conflicting),
+        journal.append_fenced(&token, conflicting),
         Err(JournalError::IdempotencyConflict(_))
     ));
     assert_eq!(journal.records().len(), 1);
@@ -221,8 +236,9 @@ fn tampered_body_breaks_the_hash_chain() -> TestResult {
     let stream = "hash-chain";
     {
         let mut journal = Journal::open(&root, stream)?;
+        let token = fence(&mut journal);
         let event_id = journal.next_event_id(RUN)?;
-        journal.append(kill_switch(stream, event_id, "before tampering"))?;
+        journal.append_fenced(&token, kill_switch(stream, event_id, "before tampering"))?;
     }
 
     let segment = root
@@ -266,9 +282,10 @@ fn segment_rollover_preserves_contiguous_sequences() -> TestResult {
     let stream = "segment-rollover";
     {
         let mut journal = Journal::open_with_segment_limit(&root, stream, 84 + 1024)?;
+        let token = fence(&mut journal);
         for _ in 1..=6_u64 {
             let event_id = journal.next_event_id(RUN)?;
-            journal.append(kill_switch(stream, event_id, "rollover record"))?;
+            journal.append_fenced(&token, kill_switch(stream, event_id, "rollover record"))?;
         }
         assert!(journal.verification_report().segment_count > 1);
         assert_eq!(journal.verification_report().record_count, 6);
@@ -290,10 +307,11 @@ fn stream_mismatch_and_invalid_bodies_are_rejected_before_write() -> TestResult 
     let directory = tempfile::tempdir()?;
     let root = directory.path().join("ledger");
     let mut journal = Journal::open(&root, "expected-stream")?;
+    let token = fence(&mut journal);
 
     let other = kill_switch("other-stream", EventId::for_run(RUN, 1), "wrong stream");
     assert!(matches!(
-        journal.append(other),
+        journal.append_fenced(&token, other),
         Err(JournalError::StreamMismatch { .. })
     ));
 
@@ -306,7 +324,7 @@ fn stream_mismatch_and_invalid_bodies_are_rejected_before_write() -> TestResult 
             .ok_or_else(|| DomainError::InvalidEventTime("invalid date".to_owned()))?,
     };
     assert!(matches!(
-        journal.append(invalid),
+        journal.append_fenced(&token, invalid),
         Err(JournalError::Domain(_))
     ));
     assert_eq!(journal.records().len(), 0);

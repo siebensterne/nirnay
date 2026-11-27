@@ -5,6 +5,8 @@ use authoritative_oms::{
     BrokerOrderId, //
     ChargeStatus,
     ClientOrderId,
+    FencingError,
+    FencingToken,
     FillEvent,
     OmsError,
     OmsStore,
@@ -29,6 +31,10 @@ use trading_core::{
 };
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+fn fence(store: &mut OmsStore) -> FencingToken {
+    store.fence("fill-events-owner").expect("fence the OMS")
+}
 
 fn intent() -> Result<OrderIntent, Box<dyn std::error::Error>> {
     Ok(OrderIntent {
@@ -62,12 +68,15 @@ fn permit() -> PermitRef {
     }
 }
 
-fn working(store: &mut OmsStore, client: ClientOrderId) -> TestResult {
-    store.create(client, &intent()?, &permit(), 1_000)?;
-    store.accept_risk_approved(client, 1_010)?;
-    let claim = store.claim("dispatcher-a", 2_000, 1_000)?.expect("claim");
-    store.mark_dispatching(claim.attempt_id, 2_100)?;
-    store.acknowledge(
+fn working(store: &mut OmsStore, token: &FencingToken, client: ClientOrderId) -> TestResult {
+    store.create_fenced(&token, client, &intent()?, &permit(), 1_000)?;
+    store.accept_risk_approved_fenced(&token, client, 1_010)?;
+    let claim = store
+        .claim_fenced(&token, "dispatcher-a", 2_000, 1_000)?
+        .expect("claim");
+    store.mark_dispatching_fenced(&token, claim.attempt_id, 2_100)?;
+    store.acknowledge_fenced(
+        &token,
         claim.attempt_id,
         &BrokerOrderId::new("B-1")?,
         "evt-ack",
@@ -102,15 +111,16 @@ fn each_fill_is_persisted_as_a_typed_event() -> TestResult {
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("oms.journal");
     let mut store = OmsStore::open(&path)?;
+    let token = fence(&mut store);
     let client = ClientOrderId::new(1)?;
-    working(&mut store, client)?;
+    working(&mut store, &token, client)?;
 
     assert!(
-        store.apply_typed_fill(event("exec-1", "evt-fill-1", 4))?,
+        store.apply_typed_fill_fenced(&token, event("exec-1", "evt-fill-1", 4))?,
         "first fill is accepted"
     );
     assert!(
-        store.apply_typed_fill(event("exec-2", "evt-fill-2", 6))?,
+        store.apply_typed_fill_fenced(&token, event("exec-2", "evt-fill-2", 6))?,
         "second fill is accepted"
     );
     let fills = store.fills();
@@ -135,14 +145,15 @@ fn each_fill_is_persisted_as_a_typed_event() -> TestResult {
 fn duplicate_execution_is_idempotent_and_different_content_conflicts() -> TestResult {
     let directory = tempfile::tempdir()?;
     let mut store = OmsStore::open(directory.path().join("oms.journal"))?;
+    let token = fence(&mut store);
     let client = ClientOrderId::new(1)?;
-    working(&mut store, client)?;
+    working(&mut store, &token, client)?;
     assert!(
-        store.apply_typed_fill(event("exec-1", "evt-fill-1", 4))?,
+        store.apply_typed_fill_fenced(&token, event("exec-1", "evt-fill-1", 4))?,
         "first fill is accepted"
     );
     assert!(
-        !store.apply_typed_fill(event("exec-1", "evt-fill-1", 4))?,
+        !store.apply_typed_fill_fenced(&token, event("exec-1", "evt-fill-1", 4))?,
         "an identical duplicate is idempotent"
     );
     assert_eq!(
@@ -154,8 +165,8 @@ fn duplicate_execution_is_idempotent_and_different_content_conflicts() -> TestRe
     conflicting.price_paise = 1_001;
     assert!(
         matches!(
-            store.apply_typed_fill(conflicting),
-            Err(OmsError::FillContentConflict { .. })
+            store.apply_typed_fill_fenced(&token, conflicting),
+            Err(FencingError::Oms(OmsError::FillContentConflict { .. }))
         ),
         "a reused execution id with different content is a hard conflict"
     );
@@ -173,8 +184,9 @@ fn typed_events_survive_restart() -> TestResult {
     let path = directory.path().join("oms.journal");
     {
         let mut store = OmsStore::open(&path)?;
-        working(&mut store, ClientOrderId::new(1)?)?;
-        store.apply_typed_fill(event("exec-1", "evt-fill-1", 4))?;
+        let token = fence(&mut store);
+        working(&mut store, &token, ClientOrderId::new(1)?)?;
+        store.apply_typed_fill_fenced(&token, event("exec-1", "evt-fill-1", 4))?;
     }
     let store = OmsStore::open(&path)?;
     let fills = store.fills();
@@ -191,13 +203,14 @@ fn typed_events_survive_restart() -> TestResult {
 fn malformed_typed_event_is_refused() -> TestResult {
     let directory = tempfile::tempdir()?;
     let mut store = OmsStore::open(directory.path().join("oms.journal"))?;
-    working(&mut store, ClientOrderId::new(1)?)?;
+    let token = fence(&mut store);
+    working(&mut store, &token, ClientOrderId::new(1)?)?;
     let mut bad = event("exec-1", "evt-fill-1", 4);
     bad.schema_version = 2;
     assert!(
         matches!(
-            store.apply_typed_fill(bad),
-            Err(OmsError::InvalidIdentifier(_))
+            store.apply_typed_fill_fenced(&token, bad),
+            Err(FencingError::Oms(OmsError::InvalidIdentifier(_)))
         ),
         "an unsupported event schema is rejected"
     );

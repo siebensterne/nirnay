@@ -11,7 +11,12 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use account_journal::{Journal, JournalError, StoredRecord};
+use account_journal::{
+    FencingToken, //
+    Journal,
+    JournalError,
+    StoredRecord,
+};
 use cost_model::{ChargeBook, FeeError};
 use risk_engine::{RiskContext, RiskPolicy, ValidatedRiskPolicy, evaluate_risk};
 use thiserror::Error;
@@ -192,6 +197,9 @@ impl RecordMeta {
 
 pub struct Engine {
     journal: Journal,
+    /// Current local fencing token, issued to this writer at open. Every
+    /// journal append presents it; the durable term advances on each reopen.
+    fencing: FencingToken,
     config: EngineConfig,
     validated_policy: ValidatedRiskPolicy,
     projection: Projection,
@@ -245,7 +253,7 @@ impl Engine {
                     .map_err(fee_error)?;
             }
         }
-        let journal = Journal::open(journal_path, config.stream_id.clone())?;
+        let mut journal = Journal::open(journal_path, config.stream_id.clone())?;
         // Replay reproduces the matcher against this run's own fill-price
         // rule: reopening with a different slippage profile or instrument
         // catalog fails fills instead of re-pricing history.
@@ -266,8 +274,11 @@ impl Engine {
                 return Err(EngineError::StreamConfigurationMismatch);
             }
         }
+        let owner = format!("paper-engine:{}", config.run_id);
+        let fencing = journal.fence(&owner)?;
         let mut engine = Self {
             journal,
+            fencing,
             config,
             validated_policy,
             projection,
@@ -1250,7 +1261,7 @@ impl Engine {
         };
         let body = StoredBody { envelope, payload };
         body.validate()?;
-        let record = self.journal.append(body)?;
+        let record = self.journal.append_fenced(&self.fencing, body)?;
         if self.projection.apply(&record).is_err() {
             self.poisoned = true;
             return Err(EngineError::ProjectionAfterCommit);

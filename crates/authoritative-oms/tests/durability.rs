@@ -6,6 +6,8 @@ use std::fs;
 
 use authoritative_oms::{
     ClientOrderId, //
+    FencingError,
+    FencingToken,
     OmsError,
     OmsStore,
     PermitRef,
@@ -29,6 +31,10 @@ use trading_core::{
 };
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+fn fence(store: &mut OmsStore) -> FencingToken {
+    store.fence("durability-owner").expect("fence the OMS")
+}
 
 fn intent(id: u64, quantity: i64) -> Result<OrderIntent, Box<dyn std::error::Error>> {
     Ok(OrderIntent {
@@ -80,7 +86,9 @@ fn writer_lock_is_released_when_the_store_is_dropped() -> TestResult {
     let path = directory.path().join("oms.journal");
     {
         let mut first = OmsStore::open(&path)?;
-        first.create(
+        let token = fence(&mut first);
+        first.create_fenced(
+            &token,
             ClientOrderId::new(1)?,
             &intent(1, 10)?,
             &permit(7, &intent(1, 10)?),
@@ -100,8 +108,10 @@ fn partial_write_poisons_the_writer_and_recovery_fails_closed() -> TestResult {
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("oms.journal");
     let mut store = OmsStore::open(&path)?;
+    let token = fence(&mut store);
     store.force_commit_fault(authoritative_oms::CommitFault::PartialWrite);
-    let failed = store.create(
+    let failed = store.create_fenced(
+        &token,
         ClientOrderId::new(1)?,
         &intent(1, 10)?,
         &permit(7, &intent(1, 10)?),
@@ -110,14 +120,15 @@ fn partial_write_poisons_the_writer_and_recovery_fails_closed() -> TestResult {
     assert!(failed.is_err(), "an incomplete append must fail");
     assert!(store.is_poisoned(), "the writer must be poisoned");
 
-    let after = store.create(
+    let after = store.create_fenced(
+        &token,
         ClientOrderId::new(2)?,
         &intent(1, 11)?,
         &permit(8, &intent(1, 11)?),
         1_100,
     );
     assert!(
-        matches!(after, Err(OmsError::WriterPoisoned)),
+        matches!(after, Err(FencingError::Oms(OmsError::WriterPoisoned))),
         "a poisoned writer must refuse further mutations"
     );
     assert!(
@@ -132,14 +143,17 @@ fn sync_failure_poisons_the_writer_and_recovery_replays_the_durable_prefix() -> 
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("oms.journal");
     let mut store = OmsStore::open(&path)?;
-    store.create(
+    let token = fence(&mut store);
+    store.create_fenced(
+        &token,
         ClientOrderId::new(1)?,
         &intent(1, 10)?,
         &permit(7, &intent(1, 10)?),
         1_000,
     )?;
     store.force_commit_fault(authoritative_oms::CommitFault::SyncFailure);
-    let failed = store.create(
+    let failed = store.create_fenced(
+        &token,
         ClientOrderId::new(2)?,
         &intent(1, 11)?,
         &permit(8, &intent(1, 11)?),
@@ -149,13 +163,14 @@ fn sync_failure_poisons_the_writer_and_recovery_replays_the_durable_prefix() -> 
     assert!(store.is_poisoned(), "the writer must stay poisoned");
     assert!(
         matches!(
-            store.create(
+            store.create_fenced(
+                &token,
                 ClientOrderId::new(3)?,
                 &intent(1, 12)?,
                 &permit(9, &intent(1, 12)?),
                 1_200
             ),
-            Err(OmsError::WriterPoisoned)
+            Err(FencingError::Oms(OmsError::WriterPoisoned))
         ),
         "the poisoned instance stays unusable"
     );
@@ -177,15 +192,18 @@ fn restart_preserves_event_order() -> TestResult {
     let path = directory.path().join("oms.journal");
     {
         let mut store = OmsStore::open(&path)?;
-        store.create(
+        let token = fence(&mut store);
+        store.create_fenced(
+            &token,
             ClientOrderId::new(1)?,
             &intent(1, 10)?,
             &permit(7, &intent(1, 10)?),
             1_000,
         )?;
-        store.accept_risk_approved(ClientOrderId::new(1)?, 1_010)?;
+        store.accept_risk_approved_fenced(&token, ClientOrderId::new(1)?, 1_010)?;
     }
     let mut store = OmsStore::open(&path)?;
+    let token = fence(&mut store);
     let order = store
         .order(ClientOrderId::new(1)?)?
         .expect("the order survives restart");
@@ -194,7 +212,8 @@ fn restart_preserves_event_order() -> TestResult {
         authoritative_oms::OmsOrderState::PendingSubmission,
         "the last committed state survives restart"
     );
-    store.create(
+    store.create_fenced(
+        &token,
         ClientOrderId::new(2)?,
         &intent(1, 20)?,
         &permit(10, &intent(1, 20)?),
@@ -208,8 +227,8 @@ fn restart_preserves_event_order() -> TestResult {
         .collect();
     assert_eq!(
         sequences,
-        vec![1, 2, 3],
-        "journal sequence remains contiguous across restart"
+        vec![1, 2, 3, 4, 5],
+        "fence records and order records share one contiguous sequence"
     );
     Ok(())
 }

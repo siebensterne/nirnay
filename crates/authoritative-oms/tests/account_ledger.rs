@@ -13,8 +13,21 @@ use account_journal::{
     JournalError,
 };
 use authoritative_oms::{
-    ChargeStatus, ClientOrderId, FillEvent, LEDGER_STREAM_ID, OmsError, OmsStore, PermitRef,
-    ProjectionError, Projector, ReconciliationInput, Resolution, reconcile,
+    ChargeStatus, //
+    ClientOrderId,
+    FencingError,
+    FencingToken,
+    FillEvent,
+    JournalFencingToken,
+    LEDGER_STREAM_ID,
+    OmsError,
+    OmsStore,
+    PermitRef,
+    ProjectionError,
+    Projector,
+    ReconciliationInput,
+    Resolution,
+    reconcile,
     store::fill_content_digest,
 };
 use trading_core::{
@@ -50,10 +63,21 @@ fn evidence(hash_hex: &str) -> OpeningBalanceEvidence {
     }
 }
 
-fn projector(dir: &std::path::Path) -> Result<Projector, ProjectionError> {
+fn projector(dir: &std::path::Path) -> Result<(Projector, JournalFencingToken), ProjectionError> {
     let mut projector = Projector::open(dir, account())?;
-    projector.open_account("paper", Paise(10_000), date(), evidence(&"0".repeat(64)))?;
-    Ok(projector)
+    let token = projector.fence("ledger-owner")?;
+    projector.open_account_fenced(
+        &token,
+        "paper",
+        Paise(10_000),
+        date(),
+        evidence(&"0".repeat(64)),
+    )?;
+    Ok((projector, token))
+}
+
+fn fence(store: &mut OmsStore) -> FencingToken {
+    store.fence("account-ledger-owner").expect("fence the OMS")
 }
 
 fn fill(id: &str, quantity: i64, price: i64, charges: i64) -> FillEvent {
@@ -83,9 +107,9 @@ fn execution_identity_is_content_addressed_and_stable_across_restart() -> TestRe
     let event = fill("exec-1", 2, 100, 0);
     let before = fill_content_digest(&event);
     {
-        let mut ledger = projector(directory.path())?;
+        let (mut ledger, ledger_token) = projector(directory.path())?;
         assert!(
-            ledger.project_fill(&event, &instrument())?,
+            ledger.project_fill_fenced(&ledger_token, &event, &instrument())?,
             "first projection"
         );
         assert_eq!(
@@ -94,7 +118,7 @@ fn execution_identity_is_content_addressed_and_stable_across_restart() -> TestRe
             "one opening and one posting"
         );
     }
-    let reopened = projector(directory.path())?;
+    let (reopened, _ledger_token) = projector(directory.path())?;
     assert_eq!(
         reopened.verification_report().record_count,
         2,
@@ -117,16 +141,16 @@ fn execution_identity_is_content_addressed_and_stable_across_restart() -> TestRe
 #[test]
 fn duplicate_delivery_is_idempotent() -> TestResult {
     let directory = tempfile::tempdir()?;
-    let mut ledger = projector(directory.path())?;
+    let (mut ledger, ledger_token) = projector(directory.path())?;
     let event = fill("exec-1", 2, 100, 0);
     assert!(
-        ledger.project_fill(&event, &instrument())?,
+        ledger.project_fill_fenced(&ledger_token, &event, &instrument())?,
         "first delivery"
     );
     let digest_before = ledger.state().state_digest();
     let records_before = ledger.verification_report().record_count;
     assert!(
-        !ledger.project_fill(&event, &instrument())?,
+        !ledger.project_fill_fenced(&ledger_token, &event, &instrument())?,
         "duplicate delivery is a no-op"
     );
     assert_eq!(
@@ -145,13 +169,13 @@ fn duplicate_delivery_is_idempotent() -> TestResult {
 #[test]
 fn same_execution_id_different_content_conflicts() -> TestResult {
     let directory = tempfile::tempdir()?;
-    let mut ledger = projector(directory.path())?;
-    ledger.project_fill(&fill("exec-1", 2, 100, 0), &instrument())?;
+    let (mut ledger, ledger_token) = projector(directory.path())?;
+    ledger.project_fill_fenced(&ledger_token, &fill("exec-1", 2, 100, 0), &instrument())?;
     let mut changed = fill("exec-1", 2, 100, 0);
     changed.charges_paise = 50;
     assert!(
         matches!(
-            ledger.project_fill(&changed, &instrument()),
+            ledger.project_fill_fenced(&ledger_token, &changed, &instrument()),
             Err(ProjectionError::ContentConflict { .. })
         ),
         "a reused execution id with different charges is a hard conflict"
@@ -165,17 +189,18 @@ fn same_execution_id_different_content_conflicts() -> TestResult {
     // The OMS layer must reject the same anomaly rather than silently drop it.
     let oms_dir = tempfile::tempdir()?;
     let mut store = OmsStore::open(oms_dir.path().join("oms.journal"))?;
-    setup_order(&mut store, 1, 10)?;
+    let oms_token = fence(&mut store);
+    setup_order(&mut store, &oms_token, 1, 10)?;
     assert!(
-        store.apply_typed_fill(fill_for_order("exec-1", 1, 2, 100, 0))?,
+        store.apply_typed_fill_fenced(&oms_token, fill_for_order("exec-1", 1, 2, 100, 0))?,
         "the OMS accepts the conflicting fixture fill"
     );
     let mut oms_changed = fill_for_order("exec-1", 1, 2, 100, 0);
     oms_changed.price_paise = 101;
     assert!(
         matches!(
-            store.apply_typed_fill(oms_changed),
-            Err(OmsError::FillContentConflict { .. })
+            store.apply_typed_fill_fenced(&oms_token, oms_changed),
+            Err(FencingError::Oms(OmsError::FillContentConflict { .. }))
         ),
         "OMS raises a typed content conflict"
     );
@@ -185,12 +210,12 @@ fn same_execution_id_different_content_conflicts() -> TestResult {
 #[test]
 fn partial_fills_accumulate_exactly() -> TestResult {
     let directory = tempfile::tempdir()?;
-    let mut split = projector(directory.path())?;
-    split.project_fill(&fill("exec-a", 2, 100, 10), &instrument())?;
-    split.project_fill(&fill("exec-b", 3, 100, 20), &instrument())?;
+    let (mut split, ledger_token) = projector(directory.path())?;
+    split.project_fill_fenced(&ledger_token, &fill("exec-a", 2, 100, 10), &instrument())?;
+    split.project_fill_fenced(&ledger_token, &fill("exec-b", 3, 100, 20), &instrument())?;
     let other = tempfile::tempdir()?;
-    let mut whole = projector(other.path())?;
-    whole.project_fill(&fill("exec-c", 5, 100, 30), &instrument())?;
+    let (mut whole, ledger_token) = projector(other.path())?;
+    whole.project_fill_fenced(&ledger_token, &fill("exec-c", 5, 100, 30), &instrument())?;
 
     assert_eq!(split.state().cash, whole.state().cash, "cash is exact");
     assert_eq!(
@@ -214,9 +239,12 @@ fn partial_fills_accumulate_exactly() -> TestResult {
 #[test]
 fn bust_reverses_exactly() -> TestResult {
     let directory = tempfile::tempdir()?;
-    let mut ledger = projector(directory.path())?;
-    ledger.project_fill(&fill("exec-1", 3, 100, 30), &instrument())?;
-    assert!(ledger.bust("exec-1")?, "the bust is appended");
+    let (mut ledger, ledger_token) = projector(directory.path())?;
+    ledger.project_fill_fenced(&ledger_token, &fill("exec-1", 3, 100, 30), &instrument())?;
+    assert!(
+        ledger.bust_fenced(&ledger_token, "exec-1")?,
+        "the bust is appended"
+    );
     assert_eq!(
         ledger.state().positions["paper"][&instrument()],
         0,
@@ -237,7 +265,7 @@ fn bust_reverses_exactly() -> TestResult {
         "replay reproduces the reversed state"
     );
     assert!(
-        !ledger.bust("exec-1")?,
+        !ledger.bust_fenced(&ledger_token, "exec-1")?,
         "a duplicate bust is an idempotent no-op"
     );
     assert_eq!(
@@ -251,8 +279,8 @@ fn bust_reverses_exactly() -> TestResult {
 #[test]
 fn estimated_to_confirmed_charges_rebooks_only_delta() -> TestResult {
     let directory = tempfile::tempdir()?;
-    let mut ledger = projector(directory.path())?;
-    ledger.project_fill(&fill("exec-1", 2, 100, 100), &instrument())?;
+    let (mut ledger, ledger_token) = projector(directory.path())?;
+    ledger.project_fill_fenced(&ledger_token, &fill("exec-1", 2, 100, 100), &instrument())?;
     assert_eq!(
         ledger.state().charges_estimated,
         Paise(100),
@@ -260,7 +288,7 @@ fn estimated_to_confirmed_charges_rebooks_only_delta() -> TestResult {
     );
     assert_eq!(ledger.state().cash, Paise(9_700), "fill cash is exact");
     assert!(
-        ledger.confirm_charges("exec-1", 150)?,
+        ledger.confirm_charges_fenced(&ledger_token, "exec-1", 150)?,
         "charges are confirmed"
     );
     assert_eq!(
@@ -291,6 +319,7 @@ fn opening_balance_requires_evidence_and_positive_cash() -> TestResult {
     let directory = tempfile::tempdir()?;
     let journal = Journal::open(directory.path(), LEDGER_STREAM_ID)?;
     let mut ledger = Projector::new(journal, account())?;
+    let ledger_token = ledger.fence("ledger-owner")?;
     let invalid = OpeningBalanceEvidence {
         statement_ref: String::new(),
         journal_ref: JournalRef {
@@ -301,14 +330,20 @@ fn opening_balance_requires_evidence_and_positive_cash() -> TestResult {
     };
     assert!(
         matches!(
-            ledger.open_account("paper", Paise(1_000), date(), invalid),
+            ledger.open_account_fenced(&ledger_token, "paper", Paise(1_000), date(), invalid),
             Err(ProjectionError::Domain(DomainError::InvalidInstrument(_)))
         ),
         "an opening without evidence is refused"
     );
     assert!(
         matches!(
-            ledger.open_account("paper", Paise(0), date(), evidence(&"0".repeat(64))),
+            ledger.open_account_fenced(
+                &ledger_token,
+                "paper",
+                Paise(0),
+                date(),
+                evidence(&"0".repeat(64))
+            ),
             Err(ProjectionError::Overflow(_))
         ),
         "a non-positive opening balance is refused"
@@ -334,21 +369,32 @@ fn crash_at_each_append_boundary() -> TestResult {
         let journal =
             Journal::open_with_segment_limit(directory.path(), LEDGER_STREAM_ID, segment_limit)?;
         let mut ledger = Projector::new(journal, account())?;
-        ledger.open_account("paper", Paise(10_000), date(), evidence(&"0".repeat(64)))?;
+        let ledger_token = ledger.fence("ledger-owner")?;
+        ledger.open_account_fenced(
+            &ledger_token,
+            "paper",
+            Paise(10_000),
+            date(),
+            evidence(&"0".repeat(64)),
+        )?;
         let opening_records = ledger.verification_report().record_count;
         let mut crashing_fill = fill("exec-1", 2, 100, 0);
         if fault == CommitFault::Rollover {
             crashing_fill.provenance = "x".repeat(2_000);
         }
         ledger.force_commit_fault(Some(fault));
-        let outcome = ledger.project_fill(&crashing_fill, &instrument());
+        let outcome = ledger.project_fill_fenced(&ledger_token, &crashing_fill, &instrument());
         assert!(
             outcome.is_err(),
             "{fault:?} must surface an uncertain commit"
         );
         assert!(
             matches!(
-                ledger.project_fill(&fill("exec-2", 2, 100, 0), &instrument()),
+                ledger.project_fill_fenced(
+                    &ledger_token,
+                    &fill("exec-2", 2, 100, 0),
+                    &instrument()
+                ),
                 Err(ProjectionError::Journal(JournalError::Poisoned))
                     | Err(ProjectionError::Journal(JournalError::CommitOutcomeUnknown))
             ),
@@ -356,7 +402,7 @@ fn crash_at_each_append_boundary() -> TestResult {
         );
         drop(ledger);
 
-        let reopened = projector(directory.path())?;
+        let (reopened, _ledger_token) = projector(directory.path())?;
         let count = reopened.verification_report().record_count;
         let expected = if matches!(
             fault,
@@ -380,11 +426,11 @@ fn restart_replay_digest_matches() -> TestResult {
     let directory = tempfile::tempdir()?;
     let expected;
     {
-        let mut ledger = projector(directory.path())?;
-        ledger.project_fill(&fill("exec-1", 2, 100, 10), &instrument())?;
+        let (mut ledger, ledger_token) = projector(directory.path())?;
+        ledger.project_fill_fenced(&ledger_token, &fill("exec-1", 2, 100, 10), &instrument())?;
         expected = ledger.verify_replay()?.cursor;
     }
-    let reopened = projector(directory.path())?;
+    let (reopened, _ledger_token) = projector(directory.path())?;
     let verification = reopened.verify_replay()?;
     assert!(
         verification.matched,
@@ -401,15 +447,15 @@ fn restart_replay_digest_matches() -> TestResult {
 fn out_of_order_delivery_is_confluent() -> TestResult {
     let first_dir = tempfile::tempdir()?;
     let second_dir = tempfile::tempdir()?;
-    let mut first = projector(first_dir.path())?;
-    let mut second = projector(second_dir.path())?;
+    let (mut first, _ledger_token) = projector(first_dir.path())?;
+    let (mut second, ledger_token) = projector(second_dir.path())?;
     let a = fill("exec-a", 2, 100, 7);
     let mut b = fill("exec-b", 3, 120, 11);
     b.broker_timestamp_ns = 5;
-    first.project_fill(&a, &instrument())?;
-    first.project_fill(&b, &instrument())?;
-    second.project_fill(&b, &instrument())?;
-    second.project_fill(&a, &instrument())?;
+    first.project_fill_fenced(&ledger_token, &a, &instrument())?;
+    first.project_fill_fenced(&ledger_token, &b, &instrument())?;
+    second.project_fill_fenced(&ledger_token, &b, &instrument())?;
+    second.project_fill_fenced(&ledger_token, &a, &instrument())?;
     assert_eq!(
         first.state().state_digest(),
         second.state().state_digest(),
@@ -421,12 +467,12 @@ fn out_of_order_delivery_is_confluent() -> TestResult {
 #[test]
 fn currency_and_scope_mismatch_fails_closed() -> TestResult {
     let directory = tempfile::tempdir()?;
-    let mut ledger = projector(directory.path())?;
+    let (mut ledger, ledger_token) = projector(directory.path())?;
     let mut foreign = fill("exec-1", 1, 100, 0);
     foreign.currency = "USD".to_owned();
     assert!(
         matches!(
-            ledger.project_fill(&foreign, &instrument()),
+            ledger.project_fill_fenced(&ledger_token, &foreign, &instrument()),
             Err(ProjectionError::CurrencyNotInr { .. })
         ),
         "a non-INR fill is refused"
@@ -435,7 +481,7 @@ fn currency_and_scope_mismatch_fails_closed() -> TestResult {
     other_scope.account_scope = "other".to_owned();
     assert!(
         matches!(
-            ledger.project_fill(&other_scope, &instrument()),
+            ledger.project_fill_fenced(&ledger_token, &other_scope, &instrument()),
             Err(ProjectionError::AccountNotOpen { .. })
         ),
         "an unopened scope is refused"
@@ -465,8 +511,13 @@ fn order_intent(id: u64, quantity: i64) -> OrderIntent {
     }
 }
 
-fn setup_order(store: &mut OmsStore, id: u64, quantity: i64) -> Result<(), OmsError> {
-    let client = ClientOrderId::new(id)?;
+fn setup_order(
+    store: &mut OmsStore,
+    token: &FencingToken,
+    id: u64,
+    quantity: i64,
+) -> Result<(), FencingError> {
+    let client = ClientOrderId::new(id).map_err(FencingError::Oms)?;
     let order = order_intent(id, quantity);
     let permit = PermitRef {
         permit_id: 1,
@@ -474,15 +525,16 @@ fn setup_order(store: &mut OmsStore, id: u64, quantity: i64) -> Result<(), OmsEr
         snapshot_revision: 1,
         digest: trading_core::permit_digest(1, "test", 1, &order),
     };
-    store.create(client, &order, &permit, 1)?;
-    store.accept_risk_approved(client, 2)?;
+    store.create_fenced(token, client, &order, &permit, 1)?;
+    store.accept_risk_approved_fenced(token, client, 2)?;
     let claim = store
-        .claim("test-dispatcher", 3, 100)?
-        .ok_or_else(|| OmsError::CorruptRecord("no claim".to_owned()))?;
-    store.mark_dispatching(claim.attempt_id, 4)?;
-    store.acknowledge(
+        .claim_fenced(token, "test-dispatcher", 3, 100)?
+        .ok_or_else(|| FencingError::Oms(OmsError::CorruptRecord("no claim".to_owned())))?;
+    store.mark_dispatching_fenced(token, claim.attempt_id, 4)?;
+    store.acknowledge_fenced(
+        token,
         claim.attempt_id,
-        &authoritative_oms::BrokerOrderId::new("BROKER-1")?,
+        &authoritative_oms::BrokerOrderId::new("BROKER-1").map_err(FencingError::Oms)?,
         "ack-1",
         5,
     )?;
@@ -500,15 +552,19 @@ fn duplicate_fill_does_not_double_project() -> TestResult {
     let oms_dir = tempfile::tempdir()?;
     let ledger_dir = tempfile::tempdir()?;
     let mut store = OmsStore::open(oms_dir.path().join("oms.journal"))?;
-    setup_order(&mut store, 1, 10)?;
+    let oms_token = fence(&mut store);
+    setup_order(&mut store, &oms_token, 1, 10)?;
     let event = fill_for_order("exec-1", 1, 4, 100, 10);
     assert!(
-        store.apply_typed_fill(event.clone())?,
+        store.apply_typed_fill_fenced(&oms_token, event.clone())?,
         "the OMS accepts the first fill"
     );
-    assert!(!store.apply_typed_fill(event.clone())?, "OMS dedups");
-    let mut ledger = projector(ledger_dir.path())?;
-    ledger.project_fill(&event, &instrument())?;
+    assert!(
+        !store.apply_typed_fill_fenced(&oms_token, event.clone())?,
+        "OMS dedups"
+    );
+    let (mut ledger, ledger_token) = projector(ledger_dir.path())?;
+    ledger.project_fill_fenced(&ledger_token, &event, &instrument())?;
     let outcome = reconcile(
         &store,
         &ledger,
@@ -542,11 +598,12 @@ fn same_id_different_content_raises_mismatch() -> TestResult {
     let oms_dir = tempfile::tempdir()?;
     let ledger_dir = tempfile::tempdir()?;
     let mut store = OmsStore::open(oms_dir.path().join("oms.journal"))?;
-    setup_order(&mut store, 1, 10)?;
+    let oms_token = fence(&mut store);
+    setup_order(&mut store, &oms_token, 1, 10)?;
     let event = fill_for_order("exec-1", 1, 4, 100, 10);
-    store.apply_typed_fill(event.clone())?;
-    let mut ledger = projector(ledger_dir.path())?;
-    ledger.project_fill(&event, &instrument())?;
+    store.apply_typed_fill_fenced(&oms_token, event.clone())?;
+    let (mut ledger, ledger_token) = projector(ledger_dir.path())?;
+    ledger.project_fill_fenced(&ledger_token, &event, &instrument())?;
     let mut conflicting = event.clone();
     conflicting.charges_paise = 500;
     let outcome = reconcile(
@@ -577,14 +634,15 @@ fn partial_fill_sum_matches_order_aggregate() -> TestResult {
     let oms_dir = tempfile::tempdir()?;
     let ledger_dir = tempfile::tempdir()?;
     let mut store = OmsStore::open(oms_dir.path().join("oms.journal"))?;
-    setup_order(&mut store, 1, 10)?;
+    let oms_token = fence(&mut store);
+    setup_order(&mut store, &oms_token, 1, 10)?;
     let first = fill_for_order("exec-1", 1, 4, 100, 0);
     let second = fill_for_order("exec-2", 1, 3, 100, 0);
-    store.apply_typed_fill(first.clone())?;
-    store.apply_typed_fill(second.clone())?;
-    let mut ledger = projector(ledger_dir.path())?;
-    ledger.project_fill(&first, &instrument())?;
-    ledger.project_fill(&second, &instrument())?;
+    store.apply_typed_fill_fenced(&oms_token, first.clone())?;
+    store.apply_typed_fill_fenced(&oms_token, second.clone())?;
+    let (mut ledger, ledger_token) = projector(ledger_dir.path())?;
+    ledger.project_fill_fenced(&ledger_token, &first, &instrument())?;
+    ledger.project_fill_fenced(&ledger_token, &second, &instrument())?;
     let outcome = reconcile(
         &store,
         &ledger,
@@ -617,6 +675,7 @@ fn resolution_filled_without_event_is_a_mismatch() -> TestResult {
     let oms_dir = tempfile::tempdir()?;
     let ledger_dir = tempfile::tempdir()?;
     let mut store = OmsStore::open(oms_dir.path().join("oms.journal"))?;
+    let oms_token = fence(&mut store);
     let client = ClientOrderId::new(1).expect("client");
     let order = order_intent(1, 4);
     let permit = PermitRef {
@@ -625,13 +684,16 @@ fn resolution_filled_without_event_is_a_mismatch() -> TestResult {
         snapshot_revision: 1,
         digest: trading_core::permit_digest(1, "test", 1, &order),
     };
-    store.create(client, &order, &permit, 1)?;
-    store.accept_risk_approved(client, 2)?;
-    let claim = store.claim("test", 3, 100)?.expect("claim");
-    store.mark_dispatching(claim.attempt_id, 4)?;
-    store.expire_dispatched(5, 1)?;
-    store.begin_reconciliation(client, 6)?;
-    store.resolve_unknown(
+    store.create_fenced(&oms_token, client, &order, &permit, 1)?;
+    store.accept_risk_approved_fenced(&oms_token, client, 2)?;
+    let claim = store
+        .claim_fenced(&oms_token, "test", 3, 100)?
+        .expect("claim");
+    store.mark_dispatching_fenced(&oms_token, claim.attempt_id, 4)?;
+    store.expire_dispatched_fenced(&oms_token, 5, 1)?;
+    store.begin_reconciliation_fenced(&oms_token, client, 6)?;
+    store.resolve_unknown_fenced(
+        &oms_token,
         client,
         Resolution::Filled {
             broker_order_id: authoritative_oms::BrokerOrderId::new("B-1")?,
@@ -641,7 +703,7 @@ fn resolution_filled_without_event_is_a_mismatch() -> TestResult {
         "resolution-evidence",
         7,
     )?;
-    let ledger = projector(ledger_dir.path())?;
+    let (ledger, _ledger_token) = projector(ledger_dir.path())?;
     let outcome = reconcile(&store, &ledger, &ReconciliationInput::default())?;
     assert_eq!(
         outcome.report.status,
@@ -656,13 +718,14 @@ fn cancel_ack_then_late_fill_is_mismatch() -> TestResult {
     let oms_dir = tempfile::tempdir()?;
     let ledger_dir = tempfile::tempdir()?;
     let mut store = OmsStore::open(oms_dir.path().join("oms.journal"))?;
-    setup_order(&mut store, 1, 10)?;
+    let oms_token = fence(&mut store);
+    setup_order(&mut store, &oms_token, 1, 10)?;
     let client = ClientOrderId::new(1).expect("client");
-    store.request_cancel(client, 20)?;
-    store.apply_cancel(client, "cancel-evidence", 21)?;
+    store.request_cancel_fenced(&oms_token, client, 20)?;
+    store.apply_cancel_fenced(&oms_token, client, "cancel-evidence", 21)?;
     let mut late = fill_for_order("exec-late", 1, 1, 100, 0);
     late.broker_timestamp_ns = 30;
-    let ledger = projector(ledger_dir.path())?;
+    let (ledger, _ledger_token) = projector(ledger_dir.path())?;
     let outcome = reconcile(
         &store,
         &ledger,
@@ -684,12 +747,13 @@ fn reconciliation_unavailable_blocks_like_mismatch() -> TestResult {
     let oms_dir = tempfile::tempdir()?;
     let ledger_dir = tempfile::tempdir()?;
     let mut store = OmsStore::open(oms_dir.path().join("oms.journal"))?;
-    setup_order(&mut store, 1, 10)?;
+    let oms_token = fence(&mut store);
+    setup_order(&mut store, &oms_token, 1, 10)?;
     store.force_commit_fault(authoritative_oms::CommitFault::SyncFailure);
     let client = ClientOrderId::new(1).expect("client");
-    let _ = store.request_cancel(client, 30);
+    let _ = store.request_cancel_fenced(&oms_token, client, 30);
     assert!(store.is_poisoned(), "the OMS writer is poisoned");
-    let ledger = projector(ledger_dir.path())?;
+    let (ledger, _ledger_token) = projector(ledger_dir.path())?;
     let outcome = reconcile(&store, &ledger, &ReconciliationInput::default())?;
     assert_eq!(
         outcome.report.status,
@@ -708,11 +772,12 @@ fn mismatch_does_not_auto_clear() -> TestResult {
     let oms_dir = tempfile::tempdir()?;
     let ledger_dir = tempfile::tempdir()?;
     let mut store = OmsStore::open(oms_dir.path().join("oms.journal"))?;
-    setup_order(&mut store, 1, 10)?;
+    let oms_token = fence(&mut store);
+    setup_order(&mut store, &oms_token, 1, 10)?;
     let event = fill_for_order("exec-1", 1, 4, 100, 0);
-    store.apply_typed_fill(event.clone())?;
-    let mut ledger = projector(ledger_dir.path())?;
-    ledger.project_fill(&event, &instrument())?;
+    store.apply_typed_fill_fenced(&oms_token, event.clone())?;
+    let (mut ledger, ledger_token) = projector(ledger_dir.path())?;
+    ledger.project_fill_fenced(&ledger_token, &event, &instrument())?;
     let mut conflicting = event.clone();
     conflicting.charges_paise = 999;
     let input = ReconciliationInput {
@@ -803,20 +868,26 @@ fn projection_payload_contract_rejects_bad_accounting() -> TestResult {
 fn bust_after_confirm_charges_is_exact() -> TestResult {
     let directory = tempfile::tempdir()?;
     {
-        let mut ledger = projector(directory.path())?;
-        ledger.project_fill(&fill("exec-1", 2, 100, 100), &instrument())?;
+        let (mut ledger, ledger_token) = projector(directory.path())?;
+        ledger.project_fill_fenced(&ledger_token, &fill("exec-1", 2, 100, 100), &instrument())?;
         assert_eq!(
             ledger.state().cash,
             Paise(9_700),
             "filled with estimated charges"
         );
-        assert!(ledger.confirm_charges("exec-1", 150)?, "charges confirmed");
+        assert!(
+            ledger.confirm_charges_fenced(&ledger_token, "exec-1", 150)?,
+            "charges confirmed"
+        );
         assert_eq!(
             ledger.state().cash,
             Paise(9_650),
             "only the charge delta moved"
         );
-        assert!(ledger.bust("exec-1")?, "bust the active confirmed posting");
+        assert!(
+            ledger.bust_fenced(&ledger_token, "exec-1")?,
+            "bust the active confirmed posting"
+        );
         assert_eq!(
             ledger.state().cash,
             Paise(10_000),
@@ -842,7 +913,7 @@ fn bust_after_confirm_charges_is_exact() -> TestResult {
             "replay reproduces the exact state"
         );
     }
-    let reopened = projector(directory.path())?;
+    let (reopened, _ledger_token) = projector(directory.path())?;
     assert_eq!(
         reopened.state().cash,
         Paise(10_000),
@@ -866,9 +937,12 @@ fn bust_after_confirm_charges_is_exact() -> TestResult {
 #[test]
 fn confirm_after_bust_is_a_typed_refusal() -> TestResult {
     let directory = tempfile::tempdir()?;
-    let mut ledger = projector(directory.path())?;
-    ledger.project_fill(&fill("exec-1", 2, 100, 100), &instrument())?;
-    assert!(ledger.bust("exec-1")?, "bust the posting");
+    let (mut ledger, ledger_token) = projector(directory.path())?;
+    ledger.project_fill_fenced(&ledger_token, &fill("exec-1", 2, 100, 100), &instrument())?;
+    assert!(
+        ledger.bust_fenced(&ledger_token, "exec-1")?,
+        "bust the posting"
+    );
     assert_eq!(
         ledger.state().cash,
         Paise(10_000),
@@ -876,7 +950,7 @@ fn confirm_after_bust_is_a_typed_refusal() -> TestResult {
     );
     assert!(
         matches!(
-            ledger.confirm_charges("exec-1", 150),
+            ledger.confirm_charges_fenced(&ledger_token, "exec-1", 150),
             Err(ProjectionError::ExecutionNotActive { .. })
         ),
         "a busted execution cannot be charge-confirmed"
@@ -904,10 +978,10 @@ fn confirm_after_bust_is_a_typed_refusal() -> TestResult {
 #[test]
 fn repeated_confirm_with_different_amount_rebooks_exactly() -> TestResult {
     let directory = tempfile::tempdir()?;
-    let mut ledger = projector(directory.path())?;
-    ledger.project_fill(&fill("exec-1", 2, 100, 100), &instrument())?;
+    let (mut ledger, ledger_token) = projector(directory.path())?;
+    ledger.project_fill_fenced(&ledger_token, &fill("exec-1", 2, 100, 100), &instrument())?;
     assert!(
-        ledger.confirm_charges("exec-1", 150)?,
+        ledger.confirm_charges_fenced(&ledger_token, "exec-1", 150)?,
         "charges are confirmed"
     );
     assert_eq!(
@@ -916,7 +990,7 @@ fn repeated_confirm_with_different_amount_rebooks_exactly() -> TestResult {
         "the charge delta is exact"
     );
     assert!(
-        ledger.confirm_charges("exec-1", 200)?,
+        ledger.confirm_charges_fenced(&ledger_token, "exec-1", 200)?,
         "a new amount is a new reversal"
     );
     assert_eq!(
@@ -953,7 +1027,7 @@ fn unknown_delivery_produces_mismatch_status() -> TestResult {
     let oms_dir = tempfile::tempdir()?;
     let ledger_dir = tempfile::tempdir()?;
     let store = OmsStore::open(oms_dir.path().join("oms.journal"))?;
-    let ledger = projector(ledger_dir.path())?;
+    let (ledger, _ledger_token) = projector(ledger_dir.path())?;
     let mut unknown = fill("exec-unknown", 1, 100, 0);
     unknown.client_order_id = ClientOrderId::new(1).expect("client");
     let outcome = reconcile(

@@ -4,6 +4,8 @@
 
 use authoritative_oms::{
     ClientOrderId, //
+    FencingError,
+    FencingToken,
     OmsError,
     OmsStore,
     PermitRef,
@@ -27,6 +29,10 @@ use trading_core::{
 };
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+fn fence(store: &mut OmsStore) -> FencingToken {
+    store.fence("permit-binding-owner").expect("fence the OMS")
+}
 
 fn intent(id: u64, quantity: i64) -> Result<OrderIntent, Box<dyn std::error::Error>> {
     Ok(OrderIntent {
@@ -64,6 +70,7 @@ fn tampered_intent_after_issuance_is_denied() -> TestResult {
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("oms.journal");
     let mut store = OmsStore::open(&path)?;
+    let token = fence(&mut store);
     let authorized = intent(1, 10)?;
     let issued = permit(7, &authorized);
 
@@ -71,9 +78,14 @@ fn tampered_intent_after_issuance_is_denied() -> TestResult {
     // The OMS recomputes the digest from the submitted terms and denies it.
     let mut tampered = authorized;
     tampered.quantity = Quantity::new(11)?;
-    let result = store.create(ClientOrderId::new(1)?, &tampered, &issued, 1_100);
+    let result = store.create_fenced(&token, ClientOrderId::new(1)?, &tampered, &issued, 1_100);
     assert!(
-        matches!(result, Err(OmsError::PermitDigestMismatch { permit_id: 7 })),
+        matches!(
+            result,
+            Err(FencingError::Oms(OmsError::PermitDigestMismatch {
+                permit_id: 7
+            }))
+        ),
         "a tampered intent must not open an order: {result:?}"
     );
     Ok(())
@@ -83,15 +95,27 @@ fn tampered_intent_after_issuance_is_denied() -> TestResult {
 fn tampered_permit_identity_is_denied() -> TestResult {
     let directory = tempfile::tempdir()?;
     let mut store = OmsStore::open(directory.path().join("oms.journal"))?;
+    let token = fence(&mut store);
     let authorized = intent(1, 10)?;
     let issued = permit(7, &authorized);
     let wrong_version = PermitRef {
         policy_version: "risk-v2".to_owned(),
         ..issued.clone()
     };
-    let result = store.create(ClientOrderId::new(1)?, &authorized, &wrong_version, 1_000);
+    let result = store.create_fenced(
+        &token,
+        ClientOrderId::new(1)?,
+        &authorized,
+        &wrong_version,
+        1_000,
+    );
     assert!(
-        matches!(result, Err(OmsError::PermitDigestMismatch { permit_id: 7 })),
+        matches!(
+            result,
+            Err(FencingError::Oms(OmsError::PermitDigestMismatch {
+                permit_id: 7
+            }))
+        ),
         "a permit with a rewritten policy version must be denied: {result:?}"
     );
 
@@ -99,9 +123,20 @@ fn tampered_permit_identity_is_denied() -> TestResult {
         snapshot_revision: 4,
         ..issued.clone()
     };
-    let result = store.create(ClientOrderId::new(2)?, &authorized, &wrong_revision, 1_000);
+    let result = store.create_fenced(
+        &token,
+        ClientOrderId::new(2)?,
+        &authorized,
+        &wrong_revision,
+        1_000,
+    );
     assert!(
-        matches!(result, Err(OmsError::PermitDigestMismatch { permit_id: 7 })),
+        matches!(
+            result,
+            Err(FencingError::Oms(OmsError::PermitDigestMismatch {
+                permit_id: 7
+            }))
+        ),
         "a permit with a rewritten snapshot revision must be denied: {result:?}"
     );
     Ok(())
@@ -111,22 +146,25 @@ fn tampered_permit_identity_is_denied() -> TestResult {
 fn identical_replay_is_idempotent_and_a_new_client_id_is_denied() -> TestResult {
     let directory = tempfile::tempdir()?;
     let mut store = OmsStore::open(directory.path().join("oms.journal"))?;
+    let token = fence(&mut store);
     let order = intent(1, 10)?;
     let issued = permit(7, &order);
-    store.create(ClientOrderId::new(1)?, &order, &issued, 1_000)?;
+    store.create_fenced(&token, ClientOrderId::new(1)?, &order, &issued, 1_000)?;
 
-    store.create(ClientOrderId::new(1)?, &order, &issued, 2_000)?;
+    store.create_fenced(&token, ClientOrderId::new(1)?, &order, &issued, 2_000)?;
     assert_eq!(
         store.orders()?.len(),
         1,
         "an identical replay is an idempotent no-op"
     );
 
-    let reused = store.create(ClientOrderId::new(2)?, &order, &issued, 3_000);
+    let reused = store.create_fenced(&token, ClientOrderId::new(2)?, &order, &issued, 3_000);
     assert!(
         matches!(
             reused,
-            Err(OmsError::PermitAlreadyConsumed { permit_id: 7 })
+            Err(FencingError::Oms(OmsError::PermitAlreadyConsumed {
+                permit_id: 7
+            }))
         ),
         "a spent permit cannot open a second client order: {reused:?}"
     );
@@ -142,14 +180,18 @@ fn consumed_permits_survive_recovery() -> TestResult {
     let issued = permit(7, &order);
     {
         let mut store = OmsStore::open(&path)?;
-        store.create(ClientOrderId::new(1)?, &order, &issued, 1_000)?;
+        let token = fence(&mut store);
+        store.create_fenced(&token, ClientOrderId::new(1)?, &order, &issued, 1_000)?;
     }
     let mut recovered = OmsStore::recover(&path)?;
-    let replay = recovered.create(ClientOrderId::new(2)?, &order, &issued, 2_000);
+    let token = fence(&mut recovered);
+    let replay = recovered.create_fenced(&token, ClientOrderId::new(2)?, &order, &issued, 2_000);
     assert!(
         matches!(
             replay,
-            Err(OmsError::PermitAlreadyConsumed { permit_id: 7 })
+            Err(FencingError::Oms(OmsError::PermitAlreadyConsumed {
+                permit_id: 7
+            }))
         ),
         "the consumed set must replay after restart: {replay:?}"
     );

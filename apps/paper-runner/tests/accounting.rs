@@ -12,7 +12,9 @@ use authoritative_oms::{
     BrokerOrderId, //
     ChargeStatus,
     ClientOrderId,
+    FencingToken,
     FillEvent,
+    JournalFencingToken,
     OmsStore,
     OrderView,
     PermitRef,
@@ -106,6 +108,8 @@ struct Fixture {
     _dir: tempfile::TempDir,
     store: OmsStore,
     projector: Projector,
+    oms_token: FencingToken,
+    ledger_token: JournalFencingToken,
     instruments: BTreeMap<String, InstrumentId>,
 }
 
@@ -113,10 +117,15 @@ impl Fixture {
     fn new() -> Self {
         let dir = tempfile::tempdir().expect("fixture directory");
         let oms_path = dir.path().join("oms.journal");
-        let store = OmsStore::open(&oms_path).expect("oms store");
+        let mut store = OmsStore::open(&oms_path).expect("oms store");
+        let oms_token = store.fence("paper-accounting-owner").expect("fence OMS");
         let mut projector = Projector::open(dir.path().join("ledger"), account()).expect("ledger");
+        let ledger_token = projector
+            .fence("paper-accounting-ledger")
+            .expect("fence ledger");
         projector
-            .open_account(
+            .open_account_fenced(
+                &ledger_token,
                 SCOPE,
                 Paise(1_000_000),
                 date(),
@@ -134,6 +143,8 @@ impl Fixture {
             _dir: dir,
             store,
             projector,
+            oms_token,
+            ledger_token,
             instruments: BTreeMap::new(),
         }
     }
@@ -158,14 +169,14 @@ impl Fixture {
         };
         let client = ClientOrderId::new(id).expect("client order id");
         self.store
-            .create(client, &intent, &permit, 1)
+            .create_fenced(&self.oms_token, client, &intent, &permit, 1)
             .expect("create order");
         self.store
-            .accept_risk_approved(client, 2)
+            .accept_risk_approved_fenced(&self.oms_token, client, 2)
             .expect("accept order");
         let claim = self
             .store
-            .claim("paper-test", 3, 1_000)
+            .claim_fenced(&self.oms_token, "paper-test", 3, 1_000)
             .expect("claim")
             .expect("claim is available");
         assert_eq!(
@@ -173,11 +184,17 @@ impl Fixture {
             "claim belongs to the requested order"
         );
         self.store
-            .mark_dispatching(claim.attempt_id, 4)
+            .mark_dispatching_fenced(&self.oms_token, claim.attempt_id, 4)
             .expect("dispatch order");
         let broker = BrokerOrderId::new(format!("broker-{id}")).expect("broker id");
         self.store
-            .acknowledge(claim.attempt_id, &broker, &format!("ack-{id}"), 5)
+            .acknowledge_fenced(
+                &self.oms_token,
+                claim.attempt_id,
+                &broker,
+                &format!("ack-{id}"),
+                5,
+            )
             .expect("acknowledge order");
         client
     }
@@ -192,18 +209,18 @@ impl Fixture {
         };
         let client = ClientOrderId::new(id).expect("client order id");
         self.store
-            .create(client, &intent, &permit, 1)
+            .create_fenced(&self.oms_token, client, &intent, &permit, 1)
             .expect("create order");
         self.store
-            .accept_risk_approved(client, 2)
+            .accept_risk_approved_fenced(&self.oms_token, client, 2)
             .expect("accept order");
         let claim = self
             .store
-            .claim("paper-test", 3, 1_000)
+            .claim_fenced(&self.oms_token, "paper-test", 3, 1_000)
             .expect("claim")
             .expect("claim is available");
         self.store
-            .mark_dispatching(claim.attempt_id, 4)
+            .mark_dispatching_fenced(&self.oms_token, claim.attempt_id, 4)
             .expect("dispatch without acknowledgement");
         client
     }
@@ -237,6 +254,8 @@ impl Fixture {
         apply_authoritative_fill(
             &mut self.store,
             &mut self.projector,
+            &self.oms_token,
+            &self.ledger_token,
             &mut self.instruments,
             client,
             &instrument_id(),
@@ -389,11 +408,11 @@ fn late_fill_after_cancel_is_rejected_and_flagged_by_reconciliation() -> TestRes
     let client = fixture.working_order(1, Side::Buy, 10);
     fixture
         .store
-        .request_cancel(client, 6)
+        .request_cancel_fenced(&fixture.oms_token, client, 6)
         .expect("request cancel");
     fixture
         .store
-        .apply_cancel(client, "event-cancel", 7)
+        .apply_cancel_fenced(&fixture.oms_token, client, "event-cancel", 7)
         .expect("apply broker cancel evidence");
     let error = fixture
         .deliver(client, "late-fill", Side::Buy, 10)
@@ -456,12 +475,16 @@ fn trade_bust_reverses_the_posting() -> TestResult {
     fixture.deliver(client, "buy-10", Side::Buy, 10)?;
     assert_eq!(fixture.position(), 10, "fill establishes a position");
     assert!(
-        fixture.projector.bust("buy-10")?,
+        fixture
+            .projector
+            .bust_fenced(&fixture.ledger_token, "buy-10")?,
         "bust reverses the posting"
     );
     assert_eq!(fixture.position(), 0, "the corrected ledger is flat");
     assert!(
-        !fixture.projector.bust("buy-10")?,
+        !fixture
+            .projector
+            .bust_fenced(&fixture.ledger_token, "buy-10")?,
         "a second bust is a no-op"
     );
     Ok(())
@@ -523,12 +546,12 @@ fn snapshot_classifies_partial_unknown_and_pending_cancel() -> TestResult {
     let unknown = fixture.dispatched_order(2, Side::Buy, 3);
     fixture
         .store
-        .expire_dispatched(7, 1)
+        .expire_dispatched_fenced(&fixture.oms_token, 7, 1)
         .expect("expire dispatch");
     let pending = fixture.working_order(3, Side::Buy, 5);
     fixture
         .store
-        .request_cancel(pending, 8)
+        .request_cancel_fenced(&fixture.oms_token, pending, 8)
         .expect("pending cancel");
     let snapshot = fixture.snapshot(ReconciliationStatus::Unavailable)?;
     assert!(

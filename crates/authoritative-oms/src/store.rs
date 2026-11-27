@@ -15,9 +15,18 @@
 //! from M3 is local mutual exclusion only and is not distributed fencing.
 //!
 //! Every durable record carries the current term in its replayed state. The
-//! legacy write methods remain for single-process callers that hold the local
-//! lock. The `*_fenced` methods are the authoritative owner-facing surface:
-//! they require a token and reject stale terms at the sink before any write.
+//! `*_fenced` methods are the **only public mutation interface**; the raw
+//! transition methods are crate-internal primitives reachable only through
+//! that facade. Every caller must obtain a token from [`OmsStore::fence`] and
+//! present it with each write. No public API mutates order, outbox, fill or
+//! reconciliation state without a current owner token.
+//!
+//! Scope, precisely: fencing terms are **durable local** counters owned by this
+//! process and its filesystem. `flock` from M3 is local mutual exclusion only.
+//! There is no distributed consensus, no multi-host fencing, no replication,
+//! no split-brain protection and no high availability. A [`FencingToken`] is a
+//! freshness marker — it proves that a writer observed the latest local term;
+//! it is **not** an authentication credential and carries no identity proof.
 
 use std::{
     fmt, //
@@ -188,12 +197,34 @@ impl FencingTerm {
     }
 }
 
-/// Capability presented with every fenced write. It binds one owner to one
-/// term; the sink refuses a write whose term is older than the persisted term.
+/// Freshness marker presented with every fenced write. It binds one owner
+/// label to one locally issued term; the sink refuses a write whose term is
+/// older than the persisted term. It is **not** an authentication credential:
+/// it proves recency of observation, not identity, and anyone able to observe
+/// a token can replay it while its term is current. Fields are private so
+/// callers cannot fabricate a token by construction; tokens come only from
+/// [`OmsStore::fence`]. External callers cannot fabricate one:
+///
+/// ```compile_fail
+/// # use authoritative_oms::store::{FencingTerm, FencingToken};
+/// let forged = FencingToken { term: FencingTerm::new(9), owner: "anyone".to_owned() };
+/// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FencingToken {
-    pub term: FencingTerm,
-    pub owner: String,
+    term: FencingTerm,
+    owner: String,
+}
+
+impl FencingToken {
+    #[must_use]
+    pub const fn term(&self) -> FencingTerm {
+        self.term
+    }
+
+    #[must_use]
+    pub fn owner(&self) -> &str {
+        &self.owner
+    }
 }
 
 /// Typed fencing failures. A stale term is never silently accepted or clamped
@@ -478,10 +509,12 @@ impl OmsStore {
         self.state.fencing_owner.as_deref()
     }
 
-    /// Grant an owner the next fencing term. The `fence` record is appended and
-    /// synced before the token is returned, so the term is durable before the
-    /// new owner is allowed to accept writes. Checked arithmetic prevents a
-    /// wrap-around from reviving a stale term.
+    /// Grant an owner the next fencing term. This is the token-issuance entry
+    /// point and the only public write of the fencing record: it is not an
+    /// order mutation and it only invalidates older tokens. The `fence` record
+    /// is appended and synced before the token is returned, so the term is
+    /// durable before the new owner is allowed to accept writes. Checked
+    /// arithmetic prevents a wrap-around from reviving a stale term.
     pub fn fence(&mut self, owner: &str) -> Result<FencingToken, FencingError> {
         if owner.trim().is_empty() {
             return Err(FencingError::InvalidOwner);
@@ -536,6 +569,17 @@ impl OmsStore {
 
     /// Fenced `create`. A repeated write at the current term is deduplicated by
     /// the existing client-order/permit identity rules; the term is never lowered.
+    ///
+    /// The raw transition is crate-internal, so external callers cannot bypass
+    /// the guard:
+    ///
+    /// ```compile_fail
+    /// # use authoritative_oms::{ClientOrderId, OmsStore, PermitRef};
+    /// # use trading_core::OrderIntent;
+    /// # fn outside(store: &mut OmsStore, id: ClientOrderId, intent: &OrderIntent, permit: &PermitRef) {
+    /// store.create(id, intent, permit, 0);
+    /// # }
+    /// ```
     pub fn create_fenced(
         &mut self,
         token: &FencingToken,
@@ -597,6 +641,20 @@ impl OmsStore {
     ) -> Result<bool, FencingError> {
         self.guard(token)?;
         self.acknowledge(attempt_id, broker_order_id, broker_event_id, now_ns)
+            .map_err(FencingError::Oms)
+    }
+
+    /// Fenced `reject_submission`.
+    pub fn reject_submission_fenced(
+        &mut self,
+        token: &FencingToken,
+        attempt_id: i64,
+        reason: &str,
+        broker_event_id: &str,
+        now_ns: i64,
+    ) -> Result<bool, FencingError> {
+        self.guard(token)?;
+        self.reject_submission(attempt_id, reason, broker_event_id, now_ns)
             .map_err(FencingError::Oms)
     }
 
@@ -752,7 +810,9 @@ impl OmsStore {
     }
 
     /// Create an order in `Created` state. Idempotent on identical terms.
-    pub fn create(
+    /// Internal-only transition primitive.
+    /// Callers outside this crate must use `create_fenced` with a current token.
+    pub(crate) fn create(
         &mut self,
         client_order_id: ClientOrderId,
         intent: &OrderIntent,
@@ -810,7 +870,9 @@ impl OmsStore {
     }
 
     /// Accept a risk-approved order and enqueue its first submission attempt.
-    pub fn accept_risk_approved(
+    /// Internal-only transition primitive.
+    /// Callers outside this crate must use `accept_risk_approved_fenced` with a current token.
+    pub(crate) fn accept_risk_approved(
         &mut self,
         client_order_id: ClientOrderId,
         now_ns: i64,
@@ -856,7 +918,9 @@ impl OmsStore {
     }
 
     /// Claim one pending outbox command for a dispatcher.
-    pub fn claim(
+    /// Internal-only transition primitive.
+    /// Callers outside this crate must use `claim_fenced` with a current token.
+    pub(crate) fn claim(
         &mut self,
         worker: &str,
         now_ns: i64,
@@ -906,7 +970,13 @@ impl OmsStore {
 
     /// Mark a claimed attempt as dispatched. From this point a missing broker
     /// acknowledgement is UNKNOWN, never an automatic retry.
-    pub fn mark_dispatching(&mut self, attempt_id: i64, now_ns: i64) -> Result<(), OmsError> {
+    /// Internal-only transition primitive.
+    /// Callers outside this crate must use `mark_dispatching_fenced` with a current token.
+    pub(crate) fn mark_dispatching(
+        &mut self,
+        attempt_id: i64,
+        now_ns: i64,
+    ) -> Result<(), OmsError> {
         self.apply("mark_dispatching", |state| {
             let mut next = state.clone();
             let attempt = next
@@ -921,7 +991,9 @@ impl OmsStore {
 
     /// Bind the broker order id on acknowledgement and move the order to
     /// Working. Duplicate broker events are ignored.
-    pub fn acknowledge(
+    /// Internal-only transition primitive.
+    /// Callers outside this crate must use `acknowledge_fenced` with a current token.
+    pub(crate) fn acknowledge(
         &mut self,
         attempt_id: i64,
         broker_order_id: &BrokerOrderId,
@@ -965,7 +1037,13 @@ impl OmsStore {
 
     /// Expire dispatched attempts with no acknowledgement. The order becomes
     /// UNKNOWN and no new attempt is created.
-    pub fn expire_dispatched(&mut self, now_ns: i64, timeout_ns: i64) -> Result<usize, OmsError> {
+    /// Internal-only transition primitive.
+    /// Callers outside this crate must use `expire_dispatched_fenced` with a current token.
+    pub(crate) fn expire_dispatched(
+        &mut self,
+        now_ns: i64,
+        timeout_ns: i64,
+    ) -> Result<usize, OmsError> {
         self.apply("expire_dispatched", |state| {
             let targets: Vec<i64> = state
                 .outbox
@@ -1005,7 +1083,9 @@ impl OmsStore {
     }
 
     /// Reject a dispatched attempt.
-    pub fn reject_submission(
+    /// Internal-only transition primitive.
+    /// Callers outside this crate must use `reject_submission_fenced` with a current token.
+    pub(crate) fn reject_submission(
         &mut self,
         attempt_id: i64,
         reason: &str,
@@ -1048,7 +1128,9 @@ impl OmsStore {
 
     /// Apply a typed execution event. Duplicate execution ids and broker
     /// event ids are ignored; the full event is persisted in the journal.
-    pub fn apply_typed_fill(&mut self, event: FillEvent) -> Result<bool, OmsError> {
+    /// Internal-only transition primitive.
+    /// Callers outside this crate must use `apply_typed_fill_fenced` with a current token.
+    pub(crate) fn apply_typed_fill(&mut self, event: FillEvent) -> Result<bool, OmsError> {
         let execution_id = event.execution_id.clone();
         let broker_event_id = event.broker_event_id.clone();
         let client_order_id = event.client_order_id;
@@ -1147,7 +1229,9 @@ impl OmsStore {
     /// Apply a broker fill from a minimal simulated report. The typed event
     /// records estimated charges and paper provenance; broker-confirmed charge
     /// values require `apply_typed_fill` with real evidence.
-    pub fn apply_fill(
+    /// Internal-only transition primitive.
+    /// Callers outside this crate must use `apply_fill_fenced` with a current token.
+    pub(crate) fn apply_fill(
         &mut self,
         client_order_id: ClientOrderId,
         execution_id: &str,
@@ -1207,7 +1291,9 @@ impl OmsStore {
         Ok(views)
     }
 
-    pub fn request_cancel(
+    /// Internal-only transition primitive.
+    /// Callers outside this crate must use `request_cancel_fenced` with a current token.
+    pub(crate) fn request_cancel(
         &mut self,
         client_order_id: ClientOrderId,
         now_ns: i64,
@@ -1245,7 +1331,9 @@ impl OmsStore {
     }
 
     /// Apply a broker cancellation acknowledgement.
-    pub fn apply_cancel(
+    /// Internal-only transition primitive.
+    /// Callers outside this crate must use `apply_cancel_fenced` with a current token.
+    pub(crate) fn apply_cancel(
         &mut self,
         client_order_id: ClientOrderId,
         broker_event_id: &str,
@@ -1273,7 +1361,9 @@ impl OmsStore {
     }
 
     /// Begin reconciliation of an UNKNOWN order.
-    pub fn begin_reconciliation(
+    /// Internal-only transition primitive.
+    /// Callers outside this crate must use `begin_reconciliation_fenced` with a current token.
+    pub(crate) fn begin_reconciliation(
         &mut self,
         client_order_id: ClientOrderId,
         now_ns: i64,
@@ -1291,7 +1381,9 @@ impl OmsStore {
 
     /// Resolve a reconciled UNKNOWN order from broker evidence. This is the
     /// only path out of `Reconciling`, and no new submission is created.
-    pub fn resolve_unknown(
+    /// Internal-only transition primitive.
+    /// Callers outside this crate must use `resolve_unknown_fenced` with a current token.
+    pub(crate) fn resolve_unknown(
         &mut self,
         client_order_id: ClientOrderId,
         resolution: Resolution,
@@ -1812,6 +1904,7 @@ mod fencing_tests {
             "evt-ack",
             2,
         ));
+        assert_stale!(store.reject_submission_fenced(&stale, 1, "rejected", "evt-reject", 2));
         assert_stale!(store.apply_typed_fill_fenced(&stale, fill("exec-1", "evt-fill-1")));
         assert_stale!(store.apply_fill_fenced(&stale, client, "exec-2", "evt-fill-2", 1, 1_000, 2));
         assert_stale!(store.request_cancel_fenced(&stale, client, 2));

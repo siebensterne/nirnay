@@ -22,9 +22,17 @@
 //! The fencing record is synced before a new owner receives a token; `flock`
 //! from M3 is local mutual exclusion only and is not distributed fencing.
 //!
-//! The legacy `append` remains for single-process callers that hold the local
-//! lock. `append_fenced` is the authoritative owner-facing surface: it requires
-//! a token and rejects stale terms at the sink before any write.
+//! `append_fenced` is the only public mutation surface. The raw append is a
+//! crate-private internal primitive used only by that facade; it cannot be
+//! called from outside this crate. Every caller must first obtain a token from
+//! this journal and present it with each write.
+//!
+//! Scope, precisely: fencing terms are **durable local** counters owned by this
+//! process and its filesystem. `flock` from M3 is local mutual exclusion only.
+//! There is no distributed consensus, no multi-host fencing, no replication,
+//! no split-brain protection and no high availability. A [`FencingToken`] is a
+//! freshness marker — it proves that a writer observed the latest local term;
+//! it is **not** an authentication credential and carries no identity proof.
 
 use std::{
     collections::BTreeMap,
@@ -94,12 +102,34 @@ impl FencingTerm {
     }
 }
 
-/// Capability presented with every fenced append. It binds one owner to one
-/// term; the sink refuses a write whose term is older than the persisted term.
+/// Freshness marker presented with every fenced append. It binds one owner
+/// label to one locally issued term; the sink refuses a write whose term is
+/// older than the persisted term. It is **not** an authentication credential:
+/// it proves recency of observation, not identity, and anyone able to observe
+/// a token can replay it while its term is current. Fields are private so
+/// callers cannot fabricate a token by construction; tokens come only from
+/// [`Journal::fence`]. External callers cannot fabricate one:
+///
+/// ```compile_fail
+/// # use account_journal::{FencingTerm, FencingToken};
+/// let forged = FencingToken { term: FencingTerm::new(9), owner: "anyone".to_owned() };
+/// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FencingToken {
-    pub term: FencingTerm,
-    pub owner: String,
+    term: FencingTerm,
+    owner: String,
+}
+
+impl FencingToken {
+    #[must_use]
+    pub const fn term(&self) -> FencingTerm {
+        self.term
+    }
+
+    #[must_use]
+    pub fn owner(&self) -> &str {
+        &self.owner
+    }
 }
 
 /// Durable on-disk fencing record, replaced atomically and synced before a new
@@ -558,8 +588,10 @@ impl Journal {
         sync_directory(&self.root)
     }
 
-    /// Grant an owner the next fencing term. Checked arithmetic prevents a
-    /// wrap-around from reviving a stale term.
+    /// Grant an owner the next fencing term. This is the token-issuance entry
+    /// point and the only public write of the fencing record: it is not an
+    /// order/account mutation and it only invalidates older tokens. Checked
+    /// arithmetic prevents a wrap-around from reviving a stale term.
     pub fn fence(&mut self, owner: &str) -> Result<FencingToken, JournalError> {
         if owner.trim().is_empty() {
             return Err(JournalError::InvalidFencingOwner);
@@ -610,8 +642,26 @@ impl Journal {
         }
     }
 
+    /// Read-only check that a token is the current owner context. Mutations
+    /// re-check at the sink; this exposes the same guard so a higher-level
+    /// facade can fail before doing work, including on idempotent no-ops.
+    pub fn check_fencing(&self, token: &FencingToken) -> Result<(), JournalError> {
+        self.guard(token)
+    }
+
     /// Fenced append. A repeated body at the current term is deduplicated by
-    /// the existing event-identity rules; the term is never lowered.
+    /// the existing event-identity rules; the term is never lowered. This is
+    /// the only public way to mutate the journal's persistent state.
+    ///
+    /// The unfenced primitive is crate-internal, so external callers cannot
+    /// bypass this guard:
+    ///
+    /// ```compile_fail
+    /// # use account_journal::{Journal, StoredBody};
+    /// # fn outside(journal: &mut Journal, body: StoredBody) {
+    /// journal.append(body);
+    /// # }
+    /// ```
     pub fn append_fenced(
         &mut self,
         token: &FencingToken,
@@ -621,7 +671,10 @@ impl Journal {
         self.append(body)
     }
 
-    pub fn append(&mut self, body: StoredBody) -> Result<StoredRecord, JournalError> {
+    /// Internal-only append primitive. No public API may reach this path
+    /// without passing [`Self::guard`] first; from outside the crate the fenced
+    /// facade above is the sole mutation interface.
+    pub(crate) fn append(&mut self, body: StoredBody) -> Result<StoredRecord, JournalError> {
         if self.poisoned {
             return Err(JournalError::Poisoned);
         }
