@@ -25,8 +25,8 @@ use std::path::Path;
 use std::path::PathBuf;
 
 const FIXTURE_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/contract_fixtures");
-const MANIFEST_SHA256: &str = "3edcfde5fdd7fb0ecadda4cc447cf2a52ea29f6d5df723a3185a08150c057654";
-const FIXTURE_COUNT: usize = 14;
+const MANIFEST_SHA256: &str = "b9066d915d77eb63b309e5f05eace4288e833754de2d731ebf25538347a3a3fd";
+const FIXTURE_COUNT: usize = 30;
 const ACCEPTED: &str = "ACCEPTED";
 
 fn fixture_path(name: &str) -> PathBuf {
@@ -80,13 +80,6 @@ fn outcome<T>(result: Result<T, SourceEventError>) -> &'static str {
         Ok(_) => ACCEPTED,
         Err(error) => error.normative_code(),
     }
-}
-
-fn observe(event: &SourceEvent, ledger: &mut SequenceLedger) -> Result<[u8; 32], SourceEventError> {
-    // Refusal-only envelope check (quarantine), then the scoped ledger. A
-    // refusal at either step leaves every watermark untouched.
-    event.validate_admissible()?;
-    ledger.observe(event)
 }
 
 fn check_expectation(
@@ -158,7 +151,8 @@ fn run_fixture(id: &str, fixture: &Value) -> Result<(), Box<dyn std::error::Erro
                 .to_vec(),
             _ => serde_json::to_vec(member)?,
         };
-        let result = SourceEvent::parse(&bytes).and_then(|event| observe(&event, &mut ledger));
+        // The public ledger API owns admission; no pre-check wrapper here.
+        let result = SourceEvent::parse(&bytes).and_then(|event| ledger.observe(&event));
         check_expectation(id, index, expect, result);
     }
     Ok(())
@@ -195,7 +189,7 @@ fn canonical_fixture_copies_are_byte_identical() -> Result<(), Box<dyn std::erro
     let files = manifest["files"]
         .as_array()
         .ok_or("manifest files is not an array")?;
-    assert_eq!(files.len(), FIXTURE_COUNT, "all 14 fixtures are recorded");
+    assert_eq!(files.len(), FIXTURE_COUNT, "all 30 fixtures are recorded");
     for meta in files {
         let (id, fixture) = load_verified_fixture(meta)?;
         assert_eq!(
@@ -213,10 +207,106 @@ fn every_golden_fixture_matches_its_expectations() -> Result<(), Box<dyn std::er
     let files = manifest["files"]
         .as_array()
         .ok_or("manifest files is not an array")?;
-    assert_eq!(files.len(), FIXTURE_COUNT, "all 14 fixtures are recorded");
+    assert_eq!(files.len(), FIXTURE_COUNT, "all 30 fixtures are recorded");
     for meta in files {
         let (id, fixture) = load_verified_fixture(meta)?;
         run_fixture(&id, &fixture)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn sequence_ledger_observe_enforces_admission_on_the_ledger_fixture()
+-> Result<(), Box<dyn std::error::Error>> {
+    let manifest = load_manifest()?;
+    let files = manifest["files"]
+        .as_array()
+        .ok_or("manifest files is not an array")?;
+    let meta = files
+        .iter()
+        .find(|meta| meta["id"].as_str() == Some("P13-LEDGER-QUARANTINE"))
+        .ok_or("ledger fixture is missing from the manifest")?;
+    let (id, fixture) = load_verified_fixture(meta)?;
+    let events = fixture["events"]
+        .as_array()
+        .ok_or("ledger fixture events is not an array")?;
+    let expects = fixture["expect"]
+        .as_array()
+        .ok_or("ledger fixture expect is not an array")?;
+    assert_eq!(
+        events.len(),
+        expects.len(),
+        "one expectation per ledger event"
+    );
+    let source_id = events[0]["source_id"]
+        .as_str()
+        .ok_or("ledger event has no source_id")?;
+    let session_ref = events[0]["session_ref"]
+        .as_str()
+        .ok_or("ledger event has no session_ref")?;
+    let mut ledger = SequenceLedger::default();
+
+    for (index, (member, expect)) in events.iter().zip(expects.iter()).enumerate() {
+        let event = SourceEvent::parse(&serde_json::to_vec(member)?)?;
+        // Direct public-API call: no wrapper pre-checks admissibility.
+        let result = ledger.observe(&event);
+        match index {
+            0 => {
+                assert!(
+                    event.validate().is_ok(),
+                    "the quarantined envelope is structurally valid"
+                );
+                assert_eq!(
+                    outcome(result.clone()),
+                    "QUARANTINED_NOT_ADMISSIBLE",
+                    "the ledger itself refuses a quarantined event"
+                );
+                assert_eq!(
+                    ledger.watermark(source_id, session_ref),
+                    None,
+                    "the refusal created no watermark"
+                );
+                assert_eq!(ledger.session_count(), 0, "the refusal created no scope");
+            }
+            1 => {
+                assert_eq!(
+                    outcome(result.clone()),
+                    ACCEPTED,
+                    "the same sequence is admissible once the event is not quarantined"
+                );
+                assert_eq!(
+                    ledger.watermark(source_id, session_ref),
+                    Some((1, 1)),
+                    "the accepted event established the watermark"
+                );
+            }
+            2 => {
+                assert_eq!(
+                    outcome(result.clone()),
+                    "QUARANTINED_NOT_ADMISSIBLE",
+                    "a later quarantined event is also refused"
+                );
+                assert_eq!(
+                    ledger.watermark(source_id, session_ref),
+                    Some((1, 1)),
+                    "the refusal advanced no watermark"
+                );
+            }
+            3 => {
+                assert_eq!(
+                    outcome(result.clone()),
+                    ACCEPTED,
+                    "sequence two is accepted"
+                );
+                assert_eq!(
+                    ledger.watermark(source_id, session_ref),
+                    Some((2, 2)),
+                    "the refusal consumed neither sequence"
+                );
+            }
+            _ => {}
+        }
+        check_expectation(&id, index, expect, result);
     }
     Ok(())
 }

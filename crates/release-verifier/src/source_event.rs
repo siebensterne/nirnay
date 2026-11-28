@@ -143,12 +143,21 @@ pub enum SourceEventError {
         /// Rejected schema version.
         actual: u32,
     },
+    /// The declared schema version is not the literal v1 integer one.
+    #[error("SOURCE_SCHEMA_VERSION: expected the literal 1")]
+    SchemaVersionOutOfDomain,
     /// A required identity or revision field is empty.
     #[error("SOURCE_FIELD_EMPTY: {field}")]
     EmptyField {
         /// Exact field name.
         field: &'static str,
     },
+    /// A quality state is not one of the four exact v1 members.
+    #[error("INVALID_QUALITY_STATE: quality_state is not a v1 member")]
+    InvalidQualityState,
+    /// A continuity state is not one of the four exact v1 members.
+    #[error("INVALID_CONTINUITY_STATE: continuity_state is not a v1 member")]
+    InvalidContinuityState,
     /// The connection epoch is zero.
     #[error("CONNECTION_EPOCH_INVALID: connection_epoch must be positive")]
     ConnectionEpoch,
@@ -206,8 +215,10 @@ impl SourceEventError {
     pub const fn code(&self) -> &'static str {
         match self {
             Self::Parse { .. } => "SOURCE_EVENT_PARSE",
-            Self::SchemaVersion { .. } => "SOURCE_SCHEMA_VERSION",
+            Self::SchemaVersion { .. } | Self::SchemaVersionOutOfDomain => "SOURCE_SCHEMA_VERSION",
             Self::EmptyField { .. } => "SOURCE_FIELD_EMPTY",
+            Self::InvalidQualityState => "INVALID_QUALITY_STATE",
+            Self::InvalidContinuityState => "INVALID_CONTINUITY_STATE",
             Self::ConnectionEpoch => "CONNECTION_EPOCH_INVALID",
             Self::ProviderSequenceZero => "PROVIDER_SEQUENCE_ZERO",
             Self::SourceTimestamp => "INVALID_SOURCE_TIMESTAMP",
@@ -235,8 +246,12 @@ impl SourceEventError {
     pub const fn normative_code(&self) -> &'static str {
         match self {
             Self::Parse { .. } | Self::Canonicalization { .. } => "UNKNOWN_OR_MISSING_MEMBER",
-            Self::SchemaVersion { .. } => "SCHEMA_VERSION_MISMATCH",
+            Self::SchemaVersion { .. } | Self::SchemaVersionOutOfDomain => {
+                "SCHEMA_VERSION_MISMATCH"
+            }
             Self::EmptyField { .. } => "EMPTY_REQUIRED_STRING",
+            Self::InvalidQualityState => "INVALID_QUALITY_STATE",
+            Self::InvalidContinuityState => "INVALID_CONTINUITY_STATE",
             Self::ConnectionEpoch => "INVALID_CONNECTION_EPOCH",
             Self::ProviderSequenceZero => "INVALID_PROVIDER_SEQUENCE",
             Self::SourceTimestamp => "INVALID_SOURCE_TIMESTAMP",
@@ -255,25 +270,20 @@ impl SourceEventError {
 impl SourceEvent {
     /// Parse one strict JSON envelope, rejecting duplicate and unknown fields.
     ///
-    /// Numbers outside the declared u64-or-null domain are classified before
-    /// typed deserialization: otherwise serde collapses a negative or
-    /// out-of-range integer into a generic parse error and the normative field
-    /// code would be unreachable. Duplicate members are still rejected by the
-    /// strict parser before this classification runs.
+    /// Invalid integer values and non-member enum values are classified before
+    /// typed deserialization: otherwise serde collapses a negative, out-of-range
+    /// or non-string value into a generic parse error and the normative field
+    /// code would be unreachable. Missing members are left to the strict
+    /// deserializer and stay `UNKNOWN_OR_MISSING_MEMBER`. Duplicate members are
+    /// rejected by the strict parser before this classification runs.
     pub fn parse(bytes: &[u8]) -> Result<Self, SourceEventError> {
         let value = crate::jcs::parse_strict(bytes).map_err(|error| SourceEventError::Parse {
             detail: error.to_string(),
         })?;
         if let Some(members) = value.as_object() {
-            if number_outside_u64(members, "connection_epoch") {
-                return Err(SourceEventError::ConnectionEpoch);
-            }
-            if number_outside_u64(members, "provider_sequence") {
-                return Err(SourceEventError::ProviderSequenceZero);
-            }
-            if number_outside_u64(members, "source_timestamp_ns") {
-                return Err(SourceEventError::SourceTimestamp);
-            }
+            reject_missing_members(members)?;
+            classify_integers(members)?;
+            classify_enums(members)?;
         }
         serde_json::from_value(value).map_err(|error| SourceEventError::Parse {
             detail: error.to_string(),
@@ -481,13 +491,126 @@ impl SourceEvent {
     }
 }
 
-/// True when a member is a JSON number that cannot be a u64.
+/// Every v1 envelope member, including the two u64-or-null members.
+const ENVELOPE_MEMBERS: [&str; 18] = [
+    "schema_version",
+    "source_id",
+    "source_product_ref",
+    "session_ref",
+    "connection_epoch",
+    "capture_sequence",
+    "canonical_sequence",
+    "provider_sequence",
+    "source_timestamp_ns",
+    "receive_utc_ns",
+    "receive_monotonic_ns",
+    "decoder_version",
+    "reference_data_revision",
+    "rights_evidence_ref",
+    "raw_frame_digest",
+    "quality_state",
+    "continuity_state",
+    "envelope_digest",
+];
+
+/// Refuse an absent envelope member before typed deserialization.
 ///
-/// A missing member, an explicit `null` and non-number types are left to the
-/// existing strict deserializer: only numeric values that serde would collapse
-/// into a generic parse error are classified here.
-fn number_outside_u64(members: &Map<String, Value>, field: &str) -> bool {
-    matches!(members.get(field), Some(Value::Number(number)) if number.as_u64().is_none())
+/// Serde treats a missing `Option<u64>` member as `None`, which would let an
+/// absent optional member reach digest checking with a synthesized null. A
+/// missing member is a structural defect, never a field-code rejection.
+fn reject_missing_members(members: &Map<String, Value>) -> Result<(), SourceEventError> {
+    if let Some(field) = ENVELOPE_MEMBERS
+        .iter()
+        .find(|field| !members.contains_key(**field))
+    {
+        return Err(SourceEventError::Parse {
+            detail: format!("missing field: {field}"),
+        });
+    }
+    Ok(())
+}
+
+/// Classify every integer member outside its declared domain before typed
+/// deserialization, using that field's normative rejection code.
+///
+/// A missing member is already refused as `UNKNOWN_OR_MISSING_MEMBER` by
+/// `reject_missing_members`. `null` is in domain only for the two optional
+/// u64-or-null members; all other JSON types and out-of-u64 numbers are
+/// field-code rejections.
+fn classify_integers(members: &Map<String, Value>) -> Result<(), SourceEventError> {
+    if let Some(value) = members.get("schema_version")
+        && !matches!(
+            value,
+            Value::Number(number) if number.as_u64() == Some(u64::from(V1_SCHEMA_VERSION))
+        )
+    {
+        return Err(SourceEventError::SchemaVersionOutOfDomain);
+    }
+    for (field, error) in [
+        ("connection_epoch", SourceEventError::ConnectionEpoch),
+        ("capture_sequence", SourceEventError::CaptureSequence),
+        ("canonical_sequence", SourceEventError::CanonicalSequence),
+        ("receive_utc_ns", SourceEventError::ReceiveUtc),
+        ("receive_monotonic_ns", SourceEventError::ReceiveMonotonic),
+        ("provider_sequence", SourceEventError::ProviderSequenceZero),
+        ("source_timestamp_ns", SourceEventError::SourceTimestamp),
+    ] {
+        if let Some(value) = members.get(field) {
+            let in_domain = match value {
+                Value::Number(number) => number.as_u64().is_some(),
+                Value::Null => matches!(field, "provider_sequence" | "source_timestamp_ns"),
+                _ => false,
+            };
+            if !in_domain {
+                return Err(error);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Classify present enum members that are not exact v1 members.
+///
+/// Unknown strings, numbers, nulls and objects receive their own typed codes;
+/// missing or duplicate members are still `UNKNOWN_OR_MISSING_MEMBER`.
+fn classify_enums(members: &Map<String, Value>) -> Result<(), SourceEventError> {
+    if let Some(value) = members.get("quality_state")
+        && !value
+            .as_str()
+            .is_some_and(|text| parse_quality_state(text).is_some())
+    {
+        return Err(SourceEventError::InvalidQualityState);
+    }
+    if let Some(value) = members.get("continuity_state")
+        && !value
+            .as_str()
+            .is_some_and(|text| parse_continuity_state(text).is_some())
+    {
+        return Err(SourceEventError::InvalidContinuityState);
+    }
+    Ok(())
+}
+
+fn parse_quality_state(text: &str) -> Option<QualityState> {
+    [
+        QualityState::Captured,
+        QualityState::Decoded,
+        QualityState::Validated,
+        QualityState::Quarantined,
+    ]
+    .into_iter()
+    .find(|state| state.as_str() == text)
+}
+
+fn parse_continuity_state(text: &str) -> Option<ContinuityState> {
+    [
+        ContinuityState::Continuous,
+        ContinuityState::GapSuspected,
+        ContinuityState::Recovered,
+        ContinuityState::Unknown,
+    ]
+    .into_iter()
+    .find(|state| state.as_str() == text)
 }
 
 fn option_u64_value(value: Option<u64>) -> Value {
@@ -551,9 +674,12 @@ struct SessionWatermark {
 }
 
 impl SequenceLedger {
-    /// Validate an event and advance its scope watermark only on success.
+    /// Check admission and advance its scope watermark only on success.
+    ///
+    /// Structural validity is not enough: a `QUARANTINED` event is refused with
+    /// `QUARANTINED_NOT_ADMISSIBLE` before any watermark is read or written.
     pub fn observe(&mut self, event: &SourceEvent) -> Result<[u8; 32], SourceEventError> {
-        let digest = event.validate()?;
+        let digest = event.validate_admissible()?;
         let scope = (event.source_id.clone(), event.session_ref.clone());
         if let Some(previous) = self.scopes.get(&scope) {
             if event.capture_sequence <= previous.capture_sequence {
