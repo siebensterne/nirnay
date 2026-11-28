@@ -31,6 +31,42 @@
 //!   cargo bench -p paper-runner --bench production_components --no-run
 //!   cargo bench -p paper-runner --bench production_components -- --self-test
 //!   cargo bench -p paper-runner --bench production_components -- --run --out RESULT.json
+//!
+//! # DIGEST INPUT FORMAT (binding)
+//!
+//! The raw observation digest of a stage is SHA-256 over the UTF-8 bytes of
+//! newline-delimited lines, each of the exact form
+//!
+//!   `stage_id|repetition_index|process_index|observation_ns_integer`
+//!
+//! where `stage_id` is this module's stage name, `repetition_index` and
+//! `process_index` are zero-based decimal integers, and `observation_ns_integer`
+//! is a decimal `u128` nanosecond sample. Every line is terminated by one LF
+//! (`\n`), including the final line; there is no trailing blank line. Lines are
+//! ordered by process index, then by within-process repetition index, then by
+//! observation order inside that repetition. Nothing else enters the digest:
+//! no histogram, no quantile, no summary, no padding. Because the ordered
+//! vector itself is retained in each artifact, any third party can recompute
+//! the digest from the artifact alone. The same rule is implemented by
+//! `scripts/verify_benchmark_evidence.py`.
+//!
+//! Previously a digest was taken over an opaque byte encoding whose ordered
+//! input was not retained (only latency histograms survived). That is why the
+//! historical `benchmark-stability-2026-11-28.json` digests could not be
+//! reproduced. That file is historical evidence and is NOT silently repaired
+//! here; this harness only emits a new, independently declared representation.
+//!
+//! # STAGE SEPARATION AND SAMPLE SUFFICIENCY
+//!
+//! Warm-up events are untimed and run in a separate workload before every
+//! measured repetition. Within a stage, repetition zero is the cold pass
+//! (first measured pass after warm-up) and later repetitions are warm; each
+//! repetition is labelled in the artifact. `replay_recovery` is a recovery
+//! stage: it yields one observation per repetition and is declared small-sample
+//! wherever it appears, so its tail quantiles are provisional. The 13
+//! event-driven stages retain their full ordered vectors, which are sufficient
+//! for provisional tail quantiles; no gate, threshold or resource maximum is
+//! implied by any number emitted here.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -109,12 +145,29 @@ use trading_core::{
     permit_digest,
 };
 
-const BASE_SHA: &str = "08867faa14d03f2cfb313223ea41f63740b2587e";
+const BASE_SHA: &str = "360c80711f6a10174f60787f6f08c89df51aca85";
 const OWNER: &str = "neutral-production-bench";
 const WORKER: &str = "neutral-bench-worker";
 const STREAM_ID: &str = "neutral-production-bench-account";
 const POLICY_VERSION: &str = "neutral-bench-risk-v1";
 const RUN_ID_BYTES: [u8; 16] = [0x4e; 16];
+
+// Binding declarations copied verbatim into every artifact. Keeping them in
+// one place prevents the emitter and the independent verifier from drifting.
+const DIGEST_INPUT_FORMAT: &str = "SHA-256 over UTF-8 newline-delimited lines of the form \
+stage_id|repetition_index|process_index|observation_ns_integer; each line terminated by one LF; \
+lines ordered by process index, then within-process repetition index, then observation order; \
+stage_id is the stage name, the two indices are zero-based decimal integers and the observation is \
+a decimal u128 nanosecond integer; histogram and quantiles are never inputs";
+const QUANTILE_METHOD: &str = "lower-nearest-rank: sort pooled observations ascending; \
+zero-based index = min(n-1, floor(fraction*n)); fractions p50=0.50, p90=0.90, p95=0.95, \
+p99=0.99, p999=0.999; tail quantiles are provisional evidence, not a gate";
+const HISTORICAL_DISPOSITION: &str = "benchmark-stability-2026-11-28.json is historical \
+evidence and is not silently repaired: its 25 raw_observations_sha256 values were computed over \
+an ordered input that was not retained (only histograms survived), so they cannot be reproduced; \
+this harness emits a new, separately declared representation instead of rewriting that file";
+const NO_GATE: &str = "evidence only: no performance gate, threshold, resource maximum, \
+latency/throughput certificate or pass/fail criterion is defined by these measurements";
 
 fn hex(bytes: &[u8]) -> String {
     const DIGITS: &[u8; 16] = b"0123456789abcdef";
@@ -166,6 +219,13 @@ impl Json {
         self.raw(key, &format!("\"{}\"", escape_json(value)));
     }
 
+    fn optional_string(&mut self, key: &str, value: Option<&str>) {
+        match value {
+            Some(value) => self.string(key, value),
+            None => self.raw(key, "null"),
+        }
+    }
+
     fn uint(&mut self, key: &str, value: u64) {
         self.raw(key, &value.to_string());
     }
@@ -192,6 +252,19 @@ impl Json {
 
     fn array(&mut self, key: &str, values: &[Json]) {
         let rendered: Vec<String> = values.iter().map(Json::render).collect();
+        self.raw(key, &format!("[{}]", rendered.join(",")));
+    }
+
+    fn uint128_array(&mut self, key: &str, values: &[u128]) {
+        let rendered: Vec<String> = values.iter().map(u128::to_string).collect();
+        self.raw(key, &format!("[{}]", rendered.join(",")));
+    }
+
+    fn string_array(&mut self, key: &str, values: &[&str]) {
+        let rendered: Vec<String> = values
+            .iter()
+            .map(|value| format!("\"{}\"", escape_json(value)))
+            .collect();
         self.raw(key, &format!("[{}]", rendered.join(",")));
     }
 
@@ -272,6 +345,8 @@ struct Config {
     repetitions: usize,
     payload_bytes: usize,
     seed: u64,
+    process_index: u64,
+    start_load_average: Option<String>,
     out: Option<PathBuf>,
 }
 
@@ -286,6 +361,8 @@ impl Config {
             repetitions: 3,
             payload_bytes: 64,
             seed: 0x4e69_726e_6179_0000,
+            process_index: 0,
+            start_load_average: None,
             out: None,
         }
     }
@@ -1118,12 +1195,55 @@ fn correctness_snapshot(label: &str, events: &[Event]) -> Result<Snapshot, Strin
 
 struct CaseResult {
     stage: Stage,
+    // Flattened in repetition order, then observation order. The companion
+    // counts restore the exact repetition boundaries used by the digest.
     samples: Vec<u128>,
+    repetition_sample_counts: Vec<usize>,
     events: u64,
     bytes: u64,
     elapsed_ns: u128,
     error_count: u64,
     state: String,
+}
+
+impl CaseResult {
+    fn measurement_class(&self) -> &'static str {
+        if self.stage == Stage::ReplayRecovery {
+            "recovery"
+        } else {
+            "warm"
+        }
+    }
+
+    fn thermal_by_repetition(&self) -> Vec<&'static str> {
+        (0..self.repetition_sample_counts.len())
+            .map(|index| if index == 0 { "cold" } else { "warm" })
+            .collect()
+    }
+}
+
+/// SHA-256 over the declared DIGEST INPUT FORMAT for one stage: UTF-8 lines
+/// `stage_id|repetition_index|process_index|observation_ns_integer\n` ordered
+/// by repetition then observation order. This process-level digest is later
+/// recomputed across all processes by `scripts/verify_benchmark_evidence.py`.
+fn observations_digest(
+    stage: &str,
+    process_index: u64,
+    samples: &[u128],
+    counts: &[usize],
+) -> String {
+    let mut text = String::new();
+    let mut offset = 0_usize;
+    for (repetition, count) in counts.iter().enumerate() {
+        for value in &samples[offset..offset + count] {
+            text.push_str(&format!(
+                "{}|{}|{}|{}\n",
+                stage, repetition, process_index, value
+            ));
+        }
+        offset += count;
+    }
+    digest_hex(&text)
 }
 
 fn run_case(stage: Stage, events: &[Event], config: &Config) -> Result<CaseResult, String> {
@@ -1181,9 +1301,11 @@ fn run_case(stage: Stage, events: &[Event], config: &Config) -> Result<CaseResul
         }
     }
     let elapsed_ns: u128 = samples.iter().copied().sum();
+    let repetition_sample_counts = vec![samples.len()];
     Ok(CaseResult {
         stage,
         samples,
+        repetition_sample_counts,
         events: processed,
         bytes: processed_bytes,
         elapsed_ns,
@@ -1192,11 +1314,14 @@ fn run_case(stage: Stage, events: &[Event], config: &Config) -> Result<CaseResul
     })
 }
 
+/// Lower-nearest-rank quantile: sort ascending, then take the element at the
+/// zero-based index `min(n-1, floor(fraction*n))`. This is the documented
+/// QUANTILE_METHOD and is shared with the independent verifier.
 fn percentile(sorted: &[u128], fraction: f64) -> u128 {
     if sorted.is_empty() {
         return 0;
     }
-    let index = ((sorted.len() as f64 - 1.0) * fraction).round() as usize;
+    let index = ((sorted.len() as f64) * fraction).floor() as usize;
     sorted[index.min(sorted.len() - 1)]
 }
 
@@ -1232,6 +1357,9 @@ fn latency_json(samples: &[u128]) -> Json {
         })
         .collect();
     json.array("raw_histogram_ns", &histogram_json);
+    // The histogram remains a summary only. The ordered vector is the raw
+    // representation that makes the digest reproducible from this artifact.
+    json.uint128_array("raw_observations_ns", samples);
     json
 }
 
@@ -1249,13 +1377,15 @@ fn bindings_json(
     json.string("target_triple", target);
     json.string("workload_digest_sha256", workload);
     json.uint128("seed", config.seed as u128);
+    json.uint("process_index", config.process_index);
+    json.optional_string("start_load_average", config.start_load_average.as_deref());
     json.uint("event_count", config.events);
     json.uint("warmup_events", config.warmup_events);
     json.uint("repetitions", config.repetitions as u64);
     json
 }
 
-fn case_json(result: &CaseResult, bindings: &Json) -> Json {
+fn case_json(result: &CaseResult, bindings: &Json, process_index: u64) -> Json {
     let elapsed_seconds = result.elapsed_ns as f64 / 1_000_000_000.0;
     let throughput = if elapsed_seconds > 0.0 {
         result.events as f64 / elapsed_seconds
@@ -1279,6 +1409,30 @@ fn case_json(result: &CaseResult, bindings: &Json) -> Json {
     json.object("latency_ns", &latency_json(&result.samples));
     json.uint("error_count", result.error_count);
     json.string("raw_result_digest_sha256", &result.state);
+    json.string(
+        "raw_observations_digest_sha256",
+        &observations_digest(
+            result.stage.as_str(),
+            process_index,
+            &result.samples,
+            &result.repetition_sample_counts,
+        ),
+    );
+    let counts: Vec<String> = result
+        .repetition_sample_counts
+        .iter()
+        .map(usize::to_string)
+        .collect();
+    json.raw(
+        "repetition_sample_counts",
+        &format!("[{}]", counts.join(",")),
+    );
+    json.string_array("thermal_by_repetition", &result.thermal_by_repetition());
+    json.string("measurement_class", result.measurement_class());
+    json.boolean(
+        "small_sample",
+        result.stage == Stage::ReplayRecovery || result.repetition_sample_counts.len() < 5,
+    );
     json
 }
 
@@ -1416,6 +1570,8 @@ fn parse_args() -> Result<Config, String> {
             "--repetitions" => config.repetitions = parse_usize(&value, &key)?,
             "--payload-bytes" => config.payload_bytes = parse_usize(&value, &key)?,
             "--seed" => config.seed = parse_seed(&value)?,
+            "--process-index" => config.process_index = parse_u64(&value, &key)?,
+            "--start-load-average" => config.start_load_average = Some(value),
             "--out" => config.out = Some(PathBuf::from(value)),
             other => return Err(format!("unknown argument: {other}")),
         }
@@ -1457,6 +1613,8 @@ fn print_help() {
     eprintln!("  --repetitions N        measured repetitions");
     eprintln!("  --payload-bytes N      opaque payload size");
     eprintln!("  --seed N               decimal or 0x-prefixed seed");
+    eprintln!("  --process-index N      zero-based process index for raw digest lines");
+    eprintln!("  --start-load-average=STR  operator-observed per-process load; never invented");
     eprintln!("  --out PATH             JSON artifact destination");
 }
 
@@ -1485,6 +1643,7 @@ fn run_main() -> Result<(), String> {
         let mut combined = CaseResult {
             stage: *stage,
             samples: Vec::new(),
+            repetition_sample_counts: Vec::new(),
             events: 0,
             bytes: 0,
             elapsed_ns: 0,
@@ -1495,6 +1654,7 @@ fn run_main() -> Result<(), String> {
             let result = run_case(*stage, &events, &config)
                 .map_err(|error| format!("stage {}: {error}", stage.as_str()))?;
             combined.samples.extend(result.samples.iter().copied());
+            combined.repetition_sample_counts.push(result.samples.len());
             combined.events = combined.events.wrapping_add(result.events);
             combined.bytes = combined.bytes.wrapping_add(result.bytes);
             combined.elapsed_ns = combined.elapsed_ns.wrapping_add(result.elapsed_ns);
@@ -1566,6 +1726,19 @@ fn run_main() -> Result<(), String> {
                 config.events, pipeline.events
             ));
         }
+        let probe = [10_u128, 20, 30, 40, 50];
+        let declared = "stage_probe|0|0|10\nstage_probe|0|0|20\nstage_probe|0|0|30\nstage_probe|0|0|40\nstage_probe|0|0|50\n";
+        if observations_digest("stage_probe", 0, &probe, &[probe.len()]) != digest_hex(declared) {
+            return Err("self-test: digest input format mismatch".to_owned());
+        }
+        let sorted_probe = {
+            let mut value = probe.to_vec();
+            value.sort_unstable();
+            value
+        };
+        if percentile(&sorted_probe, 0.50) != 30 || percentile(&sorted_probe, 0.999) != 50 {
+            return Err("self-test: lower-nearest-rank quantile mismatch".to_owned());
+        }
     }
     let raw_digest = digest_hex(&raw_canonical);
     let out = config.out.clone().unwrap_or_else(|| {
@@ -1598,7 +1771,7 @@ fn run_main() -> Result<(), String> {
     );
 
     let mut artifact = Json::new();
-    artifact.uint("schema_version", 1);
+    artifact.uint("schema_version", 2);
     artifact.string("harness", "production_components");
     artifact.string(
         "mode",
@@ -1608,7 +1781,7 @@ fn run_main() -> Result<(), String> {
             "full"
         },
     );
-    artifact.string("label", "neutral-production-baseline-2026-11-27");
+    artifact.string("label", "neutral-production-corrected-baseline-2026-11-28");
     artifact.string(
         "disclaimer",
         "neutral-workload measurements of real Nirnay components; not a production latency/throughput certificate, not nanosecond/HFT, not horizontal scale; no resource maxima are set",
@@ -1619,12 +1792,12 @@ fn run_main() -> Result<(), String> {
     );
     artifact.string(
         "stage_separation",
-        "one stage timer wraps one production API call; unmeasured fenced prerequisite calls prepare isolated stages; pipeline_total wraps the whole per-event sequence; replay_recovery has one replay observation per repetition; elapsed_ns is the sum of target-call samples",
+        "one stage timer wraps one production API call; untimed warm-up runs in a separate workload before each repetition; unmeasured fenced prerequisite calls prepare isolated stages; repetition zero is the cold pass and later repetitions are warm (thermal_by_repetition); pipeline_total wraps the whole per-event sequence; replay_recovery is a recovery stage with one observation per repetition and is small-sample; elapsed_ns is the sum of target-call samples",
     );
-    artifact.string(
-        "quantile_method",
-        "nearest-rank: sort ascending, index = round((n-1)*fraction); count_beyond_X counts strictly greater samples; raw_histogram_ns is lossless",
-    );
+    artifact.string("quantile_method", QUANTILE_METHOD);
+    artifact.string("digest_input_format", DIGEST_INPUT_FORMAT);
+    artifact.string("historical_artifact_disposition", HISTORICAL_DISPOSITION);
+    artifact.string("no_gate", NO_GATE);
     artifact.string("source_sha", &source_sha);
     artifact.string(
         "source_sha_scope",
@@ -1663,6 +1836,16 @@ fn run_main() -> Result<(), String> {
     artifact.string("workload_digest_sha256", &workload_digest);
     artifact.string("raw_result_digest_sha256", &raw_digest);
     artifact.uint128("seed", config.seed as u128);
+    artifact.uint("process_index", config.process_index);
+    artifact.optional_string("start_load_average", config.start_load_average.as_deref());
+    artifact.string(
+        "start_load_average_source",
+        if config.start_load_average.is_some() {
+            "operator-supplied via --start-load-average; not inferred or fabricated"
+        } else {
+            "unrecorded: no --start-load-average value was supplied"
+        },
+    );
     artifact.uint("event_count", config.events);
     artifact.uint("warmup_events", config.warmup_events);
     artifact.uint("repetitions", config.repetitions as u64);
@@ -1710,7 +1893,7 @@ fn run_main() -> Result<(), String> {
         "measurements",
         &results
             .iter()
-            .map(|result| case_json(result, &bindings))
+            .map(|result| case_json(result, &bindings, config.process_index))
             .collect::<Vec<Json>>(),
     );
     let mut text = artifact.render();
