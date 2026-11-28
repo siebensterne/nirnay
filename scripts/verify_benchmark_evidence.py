@@ -27,6 +27,14 @@ drifted digest is a failure, never a warning.
 Run ``--self-test`` for positive and negative adversarial cases. Exit status
 is zero only when every declared digest, count, quantile, binding and
 correctness check matches the retained observations.
+
+In ``--artifact`` mode the expected measured revision defaults to the
+historical corrected-baseline revision (``MEASUREMENT_REVISION``) so that
+existing artifacts keep verifying unchanged. ``--measured-revision`` supplies
+that expectation explicitly for a later final-head measurement; it changes
+only which revision is expected in the provenance binding, never any other
+check. Every packaged file digest is still recomputed from the revision the
+artifact itself declares via read-only ``git show``.
 """
 
 from __future__ import annotations
@@ -190,23 +198,29 @@ def verify_provenance(
     payload: dict[str, object],
     revision_files: dict[str, bytes],
     revision_tree: str,
+    expected_revision: str = MEASUREMENT_REVISION,
 ) -> list[str]:
-    """Recompute all declared provenance digests from revision-packaged inputs."""
+    """Recompute all declared provenance digests from revision-packaged inputs.
+
+    ``expected_revision`` is the revision the artifact must declare as measured.
+    It defaults to the historical corrected-baseline revision; the CLI flag
+    ``--measured-revision`` overrides only this expectation.
+    """
     errors: list[str] = []
     binding = payload.get(PROVENANCE_KEY)
     if not isinstance(binding, dict):
         return [f"{PROVENANCE_KEY}: missing evidence schema object"]
     if binding.get("schema") != PROVENANCE_SCHEMA:
         errors.append("provenance schema identifier mismatch")
-    if binding.get("production_source_revision") != MEASUREMENT_REVISION:
+    if binding.get("production_source_revision") != expected_revision:
         errors.append(
             "production_source_revision is not the measured revision "
-            f"(expected {MEASUREMENT_REVISION})"
+            f"(expected {expected_revision})"
         )
     disclosure = binding.get("measurement_revision_vs_base")
     if (
         not isinstance(disclosure, str)
-        or MEASUREMENT_REVISION not in disclosure
+        or expected_revision not in disclosure
         or BRANCH_BASE_REVISION not in disclosure
         or "not measured" not in disclosure.lower()
     ):
@@ -413,14 +427,19 @@ def verify_stage(stage: dict[str, object], process_count: int) -> list[str]:
     return errors
 
 
-def verify_process(process: dict[str, object], index: int) -> list[str]:
+def verify_process(
+    process: dict[str, object], index: int, expected_source_sha: str = BASE_SHA
+) -> list[str]:
     """Verify binding and correctness declarations of one process record."""
     errors: list[str] = []
     label = f"process[{index}]"
     if process.get("process_index") != index:
         errors.append(f"{label}: process_index mismatch")
-    if process.get("source_sha") != BASE_SHA:
-        errors.append(f"{label}: source_sha is not the recorded base SHA")
+    if process.get("source_sha") != expected_source_sha:
+        errors.append(
+            f"{label}: source_sha is not the expected source SHA "
+            f"({expected_source_sha})"
+        )
     load = process.get("start_load_average")
     if not isinstance(load, str) or not load.strip():
         errors.append(f"{label}: start_load_average was not recorded")
@@ -443,10 +462,16 @@ def verify_artifact(
     payload: dict[str, object],
     revision_files: dict[str, bytes] | None = None,
     revision_tree: str = "",
+    expected_revision: str = MEASUREMENT_REVISION,
+    expected_source_sha: str = BASE_SHA,
 ) -> list[str]:
     """Verify the whole corrected-baseline artifact; return all findings."""
     errors: list[str] = []
-    errors.extend(verify_provenance(payload, revision_files or {}, revision_tree))
+    errors.extend(
+        verify_provenance(
+            payload, revision_files or {}, revision_tree, expected_revision
+        )
+    )
     if payload.get("schema_version") != 2:
         errors.append("schema_version must be 2")
     if payload.get("base_sha") != BASE_SHA:
@@ -475,7 +500,7 @@ def verify_artifact(
             if not isinstance(process, dict):
                 errors.append(f"process[{index}] is not an object")
                 continue
-            errors.extend(verify_process(process, index))
+            errors.extend(verify_process(process, index, expected_source_sha))
             seed = process.get("seed")
             if not is_integer(seed):
                 errors.append(f"process[{index}]: malformed seed")
@@ -651,6 +676,23 @@ def run_self_test() -> bool:
         ):
             failures.append("positive case unexpectedly failed")
 
+        # The explicit-revision path must accept the same valid fixture when
+        # the expectation matches, and reject it when the expectation drifts.
+        if verify_artifact(
+            load_artifact(valid_path),
+            SELF_TEST_PACKAGED_FILES,
+            SELF_TEST_TREE,
+            expected_revision=MEASUREMENT_REVISION,
+        ):
+            failures.append("explicit-revision positive case unexpectedly failed")
+        if not verify_artifact(
+            load_artifact(valid_path),
+            SELF_TEST_PACKAGED_FILES,
+            SELF_TEST_TREE,
+            expected_revision="e" * 40,
+        ):
+            failures.append("wrong expected revision was silently accepted")
+
         negative_cases: dict[str, Any] = {}
 
         bad_digest = json.loads(json.dumps(valid))
@@ -709,6 +751,21 @@ def run_self_test() -> bool:
             drifted[PROVENANCE_KEY][key] = "f" * 64
             negative_cases[f"{key} drift"] = drifted
 
+        # Explicit-revision regression guards: a wrong declared revision and
+        # harness digest drift must both fail when the expectation is supplied
+        # by the CLI flag rather than taken from the historical default.
+        wrong_revision = json.loads(json.dumps(valid))
+        wrong_revision[PROVENANCE_KEY]["production_source_revision"] = "e" * 40
+        negative_cases["wrong declared revision"] = wrong_revision
+
+        explicit_harness_drift = json.loads(json.dumps(valid))
+        explicit_harness_drift[PROVENANCE_KEY]["benchmark_harness_digest"] = "e" * 64
+        negative_cases["harness digest drift explicit"] = explicit_harness_drift
+
+        source_drift = json.loads(json.dumps(valid))
+        source_drift["processes"][3]["source_sha"] = "e" * 40
+        negative_cases["source sha drift"] = source_drift
+
         dup_key = '{"schema_version":2,"schema_version":2}'
         dup_path = root / "duplicate.json"
         dup_path.write_text(dup_key, encoding="utf-8")
@@ -718,17 +775,27 @@ def run_self_test() -> bool:
         except ValueError:
             pass
 
+        explicit_cases = {
+            "harness digest drift explicit": MEASUREMENT_REVISION,
+            "wrong declared revision": MEASUREMENT_REVISION,
+        }
         for name, payload in negative_cases.items():
             path = root / f"{name.replace(' ', '_')}.json"
             write_json(path, payload)
             if not verify_artifact(
-                load_artifact(path), SELF_TEST_PACKAGED_FILES, SELF_TEST_TREE
+                load_artifact(path),
+                SELF_TEST_PACKAGED_FILES,
+                SELF_TEST_TREE,
+                expected_revision=explicit_cases.get(name, MEASUREMENT_REVISION),
             ):
                 failures.append(f"negative case was silently accepted: {name}")
 
     for failure in failures:
         print(f"SELF-TEST FAIL: {failure}")
-    print(f"self-test: {len(negative_cases) + 2} cases, {len(failures)} failure(s)")
+    # positive default, positive explicit, wrong-expectation negative, duplicate
+    # key negative, plus every payload-driven negative case.
+    case_count = len(negative_cases) + 4
+    print(f"self-test: {case_count} cases, {len(failures)} failure(s)")
     return not failures
 
 
@@ -744,7 +811,22 @@ def main() -> int:
         default=DEFAULT_ARTIFACT,
         help=f"artifact to verify (default: {DEFAULT_ARTIFACT})",
     )
+    parser.add_argument(
+        "--measured-revision",
+        default=None,
+        metavar="SHA",
+        help=(
+            "expected production_source_revision in the provenance binding "
+            f"(default: historical {MEASUREMENT_REVISION}); override for a "
+            "later final-head measurement"
+        ),
+    )
     args = parser.parse_args()
+    # Selecting an explicit revision also retargets the per-process source_sha
+    # expectation (the harness records `git rev-parse HEAD` at measurement
+    # time). With no flag both expectations stay on their historical values.
+    expected_revision = args.measured_revision or MEASUREMENT_REVISION
+    expected_source_sha = args.measured_revision or BASE_SHA
     if args.self_test:
         return 0 if run_self_test() else 1
     try:
@@ -762,7 +844,13 @@ def main() -> int:
     except ValueError as error:
         print(f"VERIFY FAIL: cannot read measured revision: {error}")
         return 1
-    errors = verify_artifact(payload, revision_files, revision_tree)
+    errors = verify_artifact(
+        payload,
+        revision_files,
+        revision_tree,
+        expected_revision=expected_revision,
+        expected_source_sha=expected_source_sha,
+    )
     if errors:
         for error in errors:
             print(f"VERIFY FAIL: {error}")
